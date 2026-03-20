@@ -1,0 +1,7 @@
+<CycloneDDS>
+    <Domain>
+        <Discovery>
+            <EnableTopicDiscoveryEndpoints>true</EnableTopicDiscoveryEndpoints>
+        </Discovery>
+    </Domain>
+</CycloneDDS>
