@@ -4,9 +4,9 @@ Status: proposed architecture and acceptance contract. Not ratified; no clause b
 
 | Field | Value |
 | --- | --- |
-| Document version | 0.3.0-draft |
+| Document version | 0.3.1-draft |
 | Last revised | 2026-10-24 |
-| Companion documents | `PLAN.md` (phasing, gates, backlog); evidence ledger; decision records; per-robot acceptance and safety profiles |
+| Companion documents | `PLAN.md` (phasing, gates, backlog); evidence ledger; decision records; per-robot acceptance and safety profiles; `devenv.nix`, `devenv.yaml` and `devenv.lock` as the executable form of Section 2.2 |
 | Normative scope | Sections 1–15 bind the implementation. Appendix A is definitional, Appendix B is advisory until its gates pass, Appendix C records what is still undecided |
 | Change control | Changes to Sections 2, 4, 5, 7, 12 or 14 require a decision record and a review of every dependent acceptance profile, fixture and consumer crate |
 
@@ -17,6 +17,7 @@ Status: proposed architecture and acceptance contract. Not ratified; no clause b
 | 0.1 | Initial specification, Sections 1–15 | — |
 | 0.2 | Appendix B replaced with the supplied Rust ecosystem survey revised v2.0 | — |
 | 0.3.0-draft | Document control, normative-language convention, glossary (Appendix A), operating-mode and evidence-promotion tables, foreign-dependency exception procedure, safety case (Section 12), acceptance traceability, open-questions register (Appendix C) | 2026-10-24 |
+| 0.3.1-draft | devenv-provisioned development environment (Section 2.2), locked-environment recording in Section 13, acceptance row A-22, glossary and open-question entries. Touches Sections 2 and 14, so the change-control rule applies and the decision record is tracked as [C-14](#appendix-c--open-questions-and-unresolved-decisions) until written | 2026-10-24 |
 
 ### Normative language
 
@@ -118,6 +119,30 @@ Several clauses in this document and in Appendix B defer to "a separate scope de
 6. A review date and a removal plan naming the Rust work that would retire the exception, with its estimated cost.
 
 An approved exception covers the named capability, version and profile only. It does not generalize to the same library used elsewhere, to a newer major version, or to a sibling crate from the same project. Appendix B grants no exceptions; it only identifies which candidates would need one.
+
+### 2.2 Development environment provisioning with devenv
+
+The toolchain is a dependency like any other, and an unpinned toolchain invalidates the evidence states of Section 3 as effectively as an unpinned library version. Every developer machine, CI job and benchmark host MUST obtain the Rust toolchain, native build inputs, linkers, GPU userspace where applicable and auxiliary development tools from one declarative definition instead of host package managers or onboarding prose. The project uses [devenv](https://devenv.sh) over Nix for that definition.
+
+| Artifact | Role |
+| --- | --- |
+| `devenv.nix` | The environment itself: `languages.rust` toolchain and components, native inputs, `packages`, `scripts`, `processes`, `git-hooks`, `enterTest` |
+| `devenv.yaml` | Declared inputs, including the pinned nixpkgs and the Rust toolchain overlay |
+| `devenv.lock` | Resolved input revisions; committed, reviewed, and cited as the environment pin |
+| Optional `.envrc` containing `use devenv` | direnv activation convenience; a shortcut for `devenv shell`, never a requirement |
+
+The following are binding:
+
+1. `devenv.lock` MUST be committed, and CI, benchmark runs and release builds MUST use the same revision. A measurement produced outside the locked environment either records that fact under Section 3 or is not recorded at all.
+2. A clean checkout MUST reach a working environment through `devenv shell` with no further manual installation. A missing step is a defect in `devenv.nix`, not an omission in a README.
+3. Formatting, lint and dependency-policy checks — `cargo fmt`, `cargo clippy` and the exclusion gate of Section 2.1 — SHOULD be declared as `git-hooks` so that local and CI enforcement share one definition rather than drifting apart.
+4. CI SHOULD execute through `devenv test` / `enterTest`, so that "passes locally" and "passes CI" denote the same environment.
+5. `devenv processes` MAY host development-only services such as the viewer, a local telemetry collector or a replay device. Nothing declared there is part of the control path of Section 5 or a runtime dependency of a deployed robot.
+6. Nix expressions and the `scripts` they declare are environment provisioning, in the same class as TOML configuration under Section 2's opening paragraph, and are not a language exception. They MUST NOT accumulate application logic: a script entry is a thin alias over a `cargo` or `robot-cli` invocation, and anything containing branching, parsing or numerics belongs in Rust.
+7. Deployment MUST NOT require Nix or devenv on the robot host. The deliverables remain the Rust binaries and policy bundles of Section 7.4; the locked environment reproduces the build, it does not become part of the product.
+8. The runtimes excluded by Section 2 and Section 1.1 MUST NOT appear in the default environment. Manual execution of the Python prior art, or an approved Section 2.1 exception, lives in a separately named non-default environment whose foreign nature is visible at its call site, and the exclusion gate still runs in the default one.
+
+The known limitation is host coverage: Nix supports Linux and macOS, and Windows only through WSL2. Which host platforms the locked environment is actually exercised on, which toolchain input supplies Rust, and whether CI runs devenv natively or inside an image built from the same lock, are open under [C-14](#appendix-c--open-questions-and-unresolved-decisions). A reproducible environment is not a hermetic build: Nix pins inputs, it does not make `cargo` fetch nothing, so dependency locking under Appendix B.6 remains separately required.
 
 ## 3. Evidence policy and corrections to the research premise
 
@@ -491,7 +516,7 @@ Expression MUST NOT widen any envelope, extend any dwell time against a recovery
 
 ## 13. Reproducibility and operational requirements
 
-Every run records source revision, compiler/toolchain, dependency lock, hardware/driver details, seeds, data hashes, robot model, simulator configuration, reward definition and all model versions. Determinism is a documented mode and tolerance, not an assumed property of GPU execution.
+Every run records source revision, compiler/toolchain, the `devenv.lock` revision that supplied it, dependency lock, hardware/driver details, seeds, data hashes, robot model, simulator configuration, reward definition and all model versions. A run whose environment cannot be named is not reproducible, whatever else it recorded. Determinism is a documented mode and tolerance, not an assumed property of GPU execution.
 
 Provide restartable training, atomic checkpoints, bounded storage quotas, artifact retention, structured metrics and replayable failure episodes. Production bundles are immutable. Promotion includes compatibility validation, evaluation report and an immediately available last-known-good artifact.
 
@@ -524,6 +549,7 @@ Each row states the evidence that closes it and the section that defines the req
 | A-19 | Safety case | §12 | Per-robot hazard register with independent controls; supervisor isolation tests; emergency stop verified with host down; area interlock exercised |
 | A-20 | Hardware | §4, §12 | Mode-gated progression, watchdog and emergency-stop checks; no simulation-only result labeled hardware validation |
 | A-21 | Boxing | §9.4, §12.2 | Scoring validated independently; held-out opponents and disturbance scenarios; contact tests follow noncontact qualification |
+| A-22 | Environment reproducibility | §2.2, §13 | Clean-checkout `devenv shell` bootstrap and `devenv test` pass at the committed `devenv.lock`; every reported result names that revision; the default environment contains no excluded runtime |
 
 Numeric physical thresholds depend on robot mass, reach, actuator specifications, sensing and task constraints. Set them in a versioned acceptance profile before evaluating a candidate; do not tune thresholds after observing the result. Use multiple seeds and confidence intervals for stochastic outcomes, and include negative results.
 
@@ -592,6 +618,8 @@ This appendix is definitional. It creates no requirements, but a term used in Se
 | Safety profile | The versioned per-robot limits, fault responses and hazard controls of §12 |
 | Evidence state | One of the five states of §3, with the promotion rules given there |
 | Shadow mode | Computing commands from live sensors with the transmit path disabled and the disable verified, per §4 |
+| Locked environment | The toolchain, native inputs and development tools resolved by the committed `devenv.lock`, per §2.2. "Locally" is not an environment |
+| Default environment | The devenv environment entered by `devenv shell` with no profile selection, from which Section 2's excluded runtimes are absent and the §2.1 exclusion gate runs |
 
 ### A.3 Units, frames and timing conventions
 
@@ -891,5 +919,6 @@ This specification deliberately leaves decisions open rather than inventing defa
 | C-11 | Durable record encoding and IPC encoding | §7.5, upgrade-readability guarantee | Measured comparison on representative payloads | Decided separately from each other; neither is chosen by default |
 | C-12 | Is GPU batched simulation required, and who authors it? | Training budgets, Phase 3 scope | Measured CPU throughput first, then a costed proposal | Not assumed from GPU neural-network support |
 | C-13 | License and redistribution terms for this project's own outputs | Publication of bundles, datasets and reports | Decision record | Unresolved; no external distribution until it is |
+| C-14 | Which Rust toolchain input and host platforms does the locked devenv environment support, and does CI run devenv natively or in an image built from the same lock? | §2.2 onboarding, the A-22 row, the benchmark-host decision in C-08, and the change-record obligation for this §2/§14 revision | Decision record after the environment is bootstrapped and exercised in `PLAN.md` Phase 0–1 | nixpkgs-pinned stable Rust through `devenv.yaml` inputs; Linux x86_64 is the only host assumed exercised; macOS and WSL2 are unverified |
 
 A blocked requirement is not a deferred requirement. Where an open question prevents a section from being testable, the corresponding Section 14 row cannot be closed, and a release report MUST say so rather than omitting the row.

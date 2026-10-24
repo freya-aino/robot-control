@@ -22,7 +22,7 @@ Use three release levels:
 
 Create architecture decision records for:
 
-1. Rust compiler/toolchain and supported host OS/CPU/GPU platforms.
+1. Rust compiler/toolchain, the devenv-locked environment that provides it, and supported host OS/CPU/GPU platforms.
 2. Rust-native physics and differentiable-compute capability findings.
 3. First simulator robot model and first hardware target when available.
 4. Canonical units, coordinate frames, quaternion encoding and timing model.
@@ -36,6 +36,7 @@ Hardware-agnostic APIs do not require choosing the physical robot immediately. S
 
 ### Work
 
+- Bootstrap the devenv environment required by `SPECS.md` Section 2.2 before any benchmark: `devenv.nix` with the Rust toolchain and native inputs, `devenv.yaml` inputs and a committed `devenv.lock`. Every feasibility measurement below cites that lock revision; a number produced outside it is labeled accordingly or discarded.
 - Establish a source ledger from the research leads in `SPECS.md`.
 - Verify RoboStriker's paper identity, algorithms, data, code status and reported sim-to-real evidence. Extract equations and hyperparameters only from the primary source.
 - Verify Unitree boxing product/demo claims and clearly label unknown implementation details.
@@ -53,11 +54,11 @@ Hardware-agnostic APIs do not require choosing the physical robot immediately. S
 
 ### Deliverables
 
-Evidence ledger, dependency inventory, capability matrix, benchmark reports and decisions naming supported baseline features.
+Evidence ledger, dependency inventory, capability matrix, committed `devenv.lock`, benchmark reports and decisions naming supported baseline features.
 
 ### Exit gate
 
-A Rust-only executable can run a small controlled physics task, collect trajectories, differentiate a training loss, update a policy, save/load it and execute inference. Simulator throughput and fidelity limitations are documented.
+A Rust-only executable can run a small controlled physics task, collect trajectories, differentiate a training loss, update a policy, save/load it and execute inference. A clean checkout reaches the same toolchain through `devenv shell`, and every reported measurement names the lock revision it ran under. Simulator throughput and fidelity limitations are documented.
 
 ### If the gate fails
 
@@ -73,7 +74,9 @@ Create explicit Rust implementation tasks for missing articulated dynamics, GPU 
 - Define separate human-motion, robot-reference, robot-episode and policy-bundle schemas.
 - Implement content hashing, manifest validation and atomic artifact writes.
 - Create experiment configuration and run directories with immutable input manifests.
-- Set up `cargo fmt`, `cargo clippy`, unit/integration checks, dependency/license review and reproducible build records.
+- Set up `cargo fmt`, `cargo clippy`, unit/integration checks, dependency/license review and reproducible build records. Declare the formatting, lint and excluded-runtime checks as devenv `git-hooks` and run CI through `devenv test`, so local and CI enforcement share one definition.
+- Keep the Python prior art of `SPECS.md` Section 1.1 and any foreign runtime out of the default devenv environment; manual comparison runs use a separately named non-default environment.
+- Expose development-only services such as the viewer, a local telemetry collector and the replay device through devenv `processes`; nothing declared there may become a deployment dependency.
 - Define simulator, hardware, learner and inference interfaces without promising stable dynamic-plugin ABI.
 - Evaluate `urdf-rs` with our semantic validation layer; inventory unsupported model features explicitly.
 - Create per-dependency records covering enabled features, transitive native linkage, build scripts, license, maintenance and replacement cost under Appendix B.6.
@@ -101,7 +104,7 @@ These commands are interface requirements, not currently implemented tools.
 
 ### Exit gate
 
-Fixtures round-trip without losing units, frames or timestamps; invalid or incompatible artifacts are rejected. Every run is traceable to source/config/data/model versions.
+Fixtures round-trip without losing units, frames or timestamps; invalid or incompatible artifacts are rejected. A clean checkout bootstraps through `devenv shell` and passes `devenv test` with no manual installation. Every run is traceable to source/config/data/model/environment versions.
 
 ## 5. Phase 2 — Motion ingestion, curation and retargeting
 
@@ -328,6 +331,7 @@ Maintain a versioned benchmark manifest containing hardware, workloads, seed lis
 
 | Suite | Examples | Runs when |
 | --- | --- | --- |
+| Environment | Clean-checkout bootstrap, `devenv test`, lock drift between developers and CI, excluded-runtime gate, host-platform coverage | Toolchain, `devenv.lock` or CI definition changes |
 | Schema / ingestion | Frames, channel order, malformed input, timestamp gaps, license metadata | Data/model contract changes |
 | Dependencies | Features, native linkage, build scripts, maintenance, license, fallback plan | Dependency/version/backend changes |
 | Optimization | Constraint residuals, setup/update/solve tails, infeasible cases, timeout fallback | Solver/formulation/model changes |
@@ -360,20 +364,22 @@ Keep deterministic correctness checks separate from expensive stochastic trainin
 | Small real datasets overfit | Held-out sessions and learning curves | Narrow adaptation scope and collect informative additional trials |
 | Competitive policies exploit simulator/scoring | Scripted contact tests and opponent diversity | Correct scoring/model; invalidate affected training runs |
 | Paper claims cannot be verified/reproduced | Evidence ledger and minimal reproduction | Keep idea experimental; do not block baseline delivery |
+| Locked environment unusable on a required host or drifting from CI | Clean-checkout bootstrap check and lock-revision comparison between developer, CI and benchmark runs | Pin inputs in `devenv.lock`; build the CI image from the same lock for hosts without Nix; treat an onboarding failure as a defect in `devenv.nix` |
 
 ## 17. First executable backlog
 
 The first implementation batch should be small enough to produce evidence before architecture expands:
 
-1. Create evidence-ledger and architecture-decision formats.
-2. Benchmark one Rust training/inference backend and one Rust physics candidate.
-3. Define typed motion/robot/action contracts with tiny fixtures.
-4. Implement BVH inspection and canonical conversion.
-5. Load a reference robot, compute FK and display one retargeted static pose.
-6. Run one actuated joint with recorded command/measurement timestamps.
-7. Train, checkpoint and reload a tiny PPO policy in a Rust simulator task.
-8. Replay a policy through a preallocated runtime and report sensor-to-command latency.
-9. Review feasibility and measured costs before expanding into humanoid motion tracking.
+1. Create the devenv environment, commit `devenv.lock`, and verify that a clean checkout builds and tests through `devenv shell` / `devenv test`.
+2. Create evidence-ledger and architecture-decision formats.
+3. Benchmark one Rust training/inference backend and one Rust physics candidate.
+4. Define typed motion/robot/action contracts with tiny fixtures.
+5. Implement BVH inspection and canonical conversion.
+6. Load a reference robot, compute FK and display one retargeted static pose.
+7. Run one actuated joint with recorded command/measurement timestamps.
+8. Train, checkpoint and reload a tiny PPO policy in a Rust simulator task.
+9. Replay a policy through a preallocated runtime and report sensor-to-command latency.
+10. Review feasibility and measured costs before expanding into humanoid motion tracking.
 
 The final output of each batch is working code, reproducible artifacts, an evaluation report and an updated decision record. The project advances when those artifacts support the next phase, not when a list of frameworks has been assembled.
 
@@ -383,6 +389,7 @@ The addendum introduces concrete outputs without requiring all candidates to ent
 
 | Deliverable | Phase | Completion evidence |
 | --- | --- | --- |
+| Development-environment decision | 0–1 | Committed `devenv.lock`, clean-checkout bootstrap record, `devenv test` CI job, exercised host platforms and a passing excluded-runtime gate; closes `SPECS.md` C-14 |
 | Source-backed dependency register | 0–1 | Canonical URLs, inspected versions, evidence state, license and capability-specific maturity |
 | Learning backend decision | 0 | Burn workload results; alternative comparison if required; training/export/inference parity |
 | Physics capability and gap report | 0, 3 | Existing Rapier CCD/multibody evaluation, verified alternative results, bounded authorship tasks |
