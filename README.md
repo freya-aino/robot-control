@@ -11,6 +11,75 @@ from the working tree on 2026-10-26 and remains available only in version
 control; see [SPECS.md Section 1.1](SPECS.md#11-relationship-to-prior-repository-contents)
 for its disposition.
 
+## Implementation
+
+This repository is a devenv-managed Rust workspace implementing SPECS.md and
+PLAN.md. Enter the environment and run the full gate with:
+
+```
+devenv shell   # or: direnv allow, if configured
+devenv test    # fmt-check + clippy -D warnings + cargo test --workspace
+```
+
+Every crate below has a real, tested implementation grounded in a specific
+SPECS.md section (no stub crates remain) and its own `README.md` describing
+what it implements, the reasoning behind any deviation or gap-filling
+decision, and what is deliberately not implemented yet. The project's
+architectural decisions are recorded as ADRs in `docs/decisions/`; the
+evidence and development-automation ledgers required by SPECS.md Section 3
+and PLAN.md Phase 0 are in `docs/ledger/`.
+
+### Crates
+
+| Crate | SPECS.md section | What it is |
+| --- | --- | --- |
+| [`robot-types`](crates/robot-types/README.md) | §§3, 5, 6, 7, 9, 10, 12 | Shared vocabulary: units, time, math, frames, IDs, schema/evidence/mode/tier types, RNG, observation/action specs, motion and episode records, transitions, bundle manifests |
+| [`robot-artifacts`](crates/robot-artifacts/README.md) | §7 | Content-addressed storage, the bounded TOML subset, the binary chunk format, run/artifact manifests and promotion ledger |
+| [`robot-model`](crates/robot-model/README.md) | §6, §7.1 | The kinematic tree, inertias, actuators, sensors, forward kinematics, URDF import |
+| [`motion-io`](crates/motion-io/README.md) | §8.1 | BVH motion-capture import |
+| [`motion-process`](crates/motion-process/README.md) | §8.2 | Motion resampling (filtering/contact/segmentation not yet implemented) |
+| [`motion-retarget`](crates/motion-retarget/README.md) | §8.3 | Damped-least-squares task-space IK |
+| [`motion-validate`](crates/motion-validate/README.md) | §8.3 | Retargeting validation reports and acceptance thresholds |
+| [`robot-nn`](crates/robot-nn/README.md) | gap-filling, §9/§10 | A small MLP with zero-allocation inference, kept isolated from training code |
+| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Single-DOF pendulum and point-mass contact qualification benchmarks |
+| [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Reward registry and a balance/stabilization task |
+| [`robot-learn`](crates/robot-learn/README.md) | §§7.6, 9.2, 9.5 | Backprop, Adam, GAE, a diagonal Gaussian policy, rollout buffers, PPO |
+| [`robot-skills`](crates/robot-skills/README.md) | §10.6 | The three retrieval tiers (R0 exact index, R1 working set, R2 in-loop router) |
+| [`robot-adapt`](crates/robot-adapt/README.md) | §11.3 | System identification (first, mandatory row of the adaptation-method table) |
+| [`robot-perception`](crates/robot-perception/README.md) | §11.2 | Linear/multiplicative-error-state Kalman filtering, contact classification |
+| [`robot-supervisor`](crates/robot-supervisor/README.md) | §12.1, §12.2 | The last-stage fault policy and safety supervisor, structurally isolated from policy/retrieval/personality |
+| [`robot-hardware`](crates/robot-hardware/README.md) | §12 | The hardware-adapter trait, a loopback device and a replay-only device |
+| [`robot-control`](crates/robot-control/README.md) | §5 | The control loop tying timing, supervisor and hardware adapter together |
+| [`robot-eval`](crates/robot-eval/README.md) | §14 | Acceptance profiles (immutable once evaluated) and cross-seed statistics |
+| [`robot-persona`](crates/robot-persona/README.md) | §12.5 | Bounded expressive intent over already-validated skills |
+| [`robot-devtools`](crates/robot-devtools/README.md) | §§2.3.1, 13.1 | The dependency knowledge base's citation/staleness data model (developer/CI-only; no shipping crate depends on it) |
+| [`robot-viewer`](crates/robot-viewer/README.md) | §6, §11.2 | Inspection data layer (skeletons, contacts, tracking error, synchronized playback) — no rendering toolkit is wired in; see its README for why |
+| [`robot-cli`](crates/robot-cli/README.md) | PLAN.md §4 | The `robot` binary: a real, honestly-scoped subset of the proposed CLI surface, with every unimplemented command named explicitly rather than omitted |
+
+### What's genuinely limited, right now
+
+- **PPO on the pendulum-stabilization task does not reliably demonstrate
+  measured improvement** within the compute budget tried. The gradient
+  machinery itself is validated independently (an isolated one-step-bandit
+  test passes); the remaining gap is multi-step credit assignment/tuning,
+  not a known implementation bug. Recorded as an honest negative result per
+  `robot-learn`'s README and SPECS.md Section 3's evidence discipline,
+  rather than hidden behind a passing-looking assertion.
+- **`robot-sim` is single-body only** — a 1-DOF pendulum and a point-mass
+  contact model, not articulated multi-body dynamics. No physics-engine
+  dependency has passed the qualification gate of Appendix B.6.
+- **No GUI/rendering or constrained-QP-solver dependency is qualified**, so
+  `robot-viewer` stops at a data layer and `motion-retarget`'s IK is a
+  damped-least-squares baseline rather than the QP/whole-body solve SPECS.md
+  Section 8.3 also names as a later option.
+- **C-04 (canonical frames/gravity/quaternion convention) and most of
+  Appendix C's other open questions remain genuinely open** — not resolved
+  by this implementation, by design; see the ADRs in `docs/decisions/` for
+  which gaps were filled and how, versus left open.
+- No commit has been made to version control as part of this
+  implementation pass; everything above is uncommitted in the working tree
+  pending review.
+
 ## Vendor SDK integration recommendations
 
 Rewriting an SDK is possible, but its value depends on the implementation,
