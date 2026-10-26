@@ -6,6 +6,7 @@ members = [
     "crates/robot-model",
     "crates/motion-io",
     "crates/motion-process",
+    "crates/motion-retarget",
 ]
 
 [workspace.package]
