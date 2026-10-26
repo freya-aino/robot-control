@@ -62,3 +62,13 @@ MUJOCO_LOG.TXT
 mlflow.db
 config.json
 model_checkpoints/*
+
+# Rust
+/target/
+
+# devenv (Section 2.2): local shell state and generated hook config are
+# machine-local build products, not source. devenv.nix, devenv.yaml and
+# devenv.lock ARE committed; these are not.
+.devenv*
+.pre-commit-config.yaml
+.direnv/

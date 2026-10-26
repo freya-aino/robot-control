@@ -1,0 +1,15 @@
+# SPECS.md Section 2.2: declared inputs for the locked development
+# environment, including the pinned nixpkgs and the Rust toolchain overlay.
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixos-unstable
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
