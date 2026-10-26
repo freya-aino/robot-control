@@ -26,6 +26,7 @@
 #![warn(clippy::all)]
 
 pub mod actuator;
+pub mod fixtures;
 pub mod joint;
 pub mod kinematics;
 pub mod link;

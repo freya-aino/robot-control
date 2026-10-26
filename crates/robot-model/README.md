@@ -15,6 +15,7 @@ profile of SPECS.md Section 7.1. Depends only on `robot-types`.
 | `profile` | §7.1 | `RobotProfile`: identity uniqueness, dangling-reference checks, joint-graph-is-a-tree validation, and the stricter `activate()` gate (extension strictness + independent e-stop) required before a control path |
 | `kinematics` | §6 | `forward_kinematics`: one unambiguous computation over the validated tree |
 | `urdf` | §7.1 | A minimal authored XML reader plus the URDF kinematic/mass subset this project supports |
+| `fixtures` | §3 | Vendored real-robot descriptions built into validated `RobotProfile`s — currently Unitree's G1 humanoid, 29-DOF rev 1.0 |
 
 ## Why `RigidPose` instead of `robot_types::frames::Transform`
 
@@ -50,10 +51,36 @@ dependency until it clears qualification, and because "the platform owns
 semantic validation" regardless of which parser eventually supplies the raw
 XML tree.
 
+## The vendored Unitree G1 fixture
+
+`fixtures::unitree_g1_29dof()` builds a validated `RobotProfile` for
+Unitree's G1 humanoid, 29-DOF revision 1.0, from a vendored URDF — see
+`assets/robots/unitree_g1/PROVENANCE.md` at the repository root for the
+exact source commit, license (BSD-3-Clause, Unitree Robotics), SHA-256,
+and what was checked (no `mimic`/`transmission`/`floating`/`planar`
+constructs) before vendoring it.
+
+This is a kinematics-only fixture, deliberately. Its actuators are all
+`urdf::placeholder_actuator` (joint limits standing in for a real
+envelope — URDF has no transmission/gain/thermal/latency data at all),
+and its `FirmwareContract` declares `has_independent_estop: false`
+because this crate has no cited, verified source for the real robot's
+e-stop circuit — not because the real G1 lacks one. `.validate()`
+succeeds; `.activate()` correctly fails with `NoIndependentEstop` until
+a real, cited firmware contract replaces this one. Use it for forward
+kinematics, IK retargeting (`motion-retarget`) and inspection
+(`robot-viewer`), not as a claim this profile is safe to drive hardware.
+
+No mesh geometry is vendored — the URDF's `.STL` references are kept as
+opaque strings, same as any other imported URDF, since this project has
+neither a renderer nor a mesh-consuming physics engine yet.
+
 ## Testing
 
-`cargo test -p robot-model` — 66 tests: joint/link/actuator/sensor validation
+`cargo test -p robot-model` — 70 tests: joint/link/actuator/sensor validation
 boundaries, profile graph checks (dangling references, non-tree in-degrees, a
 disconnected-but-locally-valid cycle), forward-kinematics composition checked
-against hand-computed rotations, and URDF import including every explicit
-rejection case.
+against hand-computed rotations, URDF import including every explicit
+rejection case, and the vendored G1 fixture (profile validation, the
+29-DOF count, the expected joint names, the activation refusal above, and
+forward kinematics running over the full real tree at the zero posture).
