@@ -88,6 +88,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "robot-devtools"
+version = "0.1.0"
+dependencies = [
+ "robot-artifacts",
+ "robot-types",
+]
+
+[[package]]
 name = "robot-eval"
 version = "0.1.0"
 dependencies = [

@@ -22,6 +22,7 @@ members = [
     "crates/robot-persona",
     "crates/robot-viewer",
     "crates/robot-cli",
+    "crates/robot-devtools",
 ]
 
 [workspace.package]
