@@ -73,8 +73,10 @@ impl Twist {
         }
     }
 
+    /// As a 6x1 column matrix (angular components first), for the
+    /// multi-DOF articulated-body algebra in `crate::articulated`.
     #[must_use]
-    fn to_column(self) -> Matrix {
+    pub(crate) fn to_column(self) -> Matrix {
         Matrix::column(&[
             self.angular.x,
             self.angular.y,
@@ -101,8 +103,10 @@ impl Wrench {
         linear: Vec3::ZERO,
     };
 
+    /// As a 6x1 column matrix (angular components first), for the
+    /// multi-DOF articulated-body algebra in `crate::articulated`.
     #[must_use]
-    fn to_column(self) -> Matrix {
+    pub(crate) fn to_column(self) -> Matrix {
         Matrix::column(&[
             self.angular.x,
             self.angular.y,
@@ -113,19 +117,12 @@ impl Wrench {
         ])
     }
 
+    /// Inverse of [`Wrench::to_column`].
     #[must_use]
-    fn from_column(m: &Matrix) -> Self {
+    pub(crate) fn from_column(m: &Matrix) -> Self {
         Self {
             angular: Vec3::new(m[(0, 0)], m[(1, 0)], m[(2, 0)]),
             linear: Vec3::new(m[(3, 0)], m[(4, 0)], m[(5, 0)]),
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn scaled(self, factor: f64) -> Self {
-        Self {
-            angular: self.angular * factor,
-            linear: self.linear * factor,
         }
     }
 
@@ -235,6 +232,16 @@ impl SpatialInertia {
         Self(Matrix::zeros(6, 6))
     }
 
+    /// Wraps an already-assembled 6x6 matrix directly, for the
+    /// multi-DOF articulated-body algebra in `crate::articulated` (the
+    /// `U * D^-1 * U^T` reduction term for a joint with more than one
+    /// degree of freedom, e.g. a `Free` joint, is not expressible via
+    /// [`SpatialInertia::from_parts`]'s mass/COM/inertia-tensor inputs).
+    #[must_use]
+    pub(crate) fn from_matrix(m: Matrix) -> Self {
+        Self(m)
+    }
+
     /// Builds the spatial inertia of a rigid body about its own frame
     /// origin, from mass, centre-of-mass offset (in this frame) and
     /// rotational inertia about the centre of mass (in this frame's
@@ -301,20 +308,6 @@ impl SpatialInertia {
     #[must_use]
     pub(crate) fn sub(&self, rhs: &Self) -> Self {
         Self(self.0.sub(&rhs.0).expect("6x6 - 6x6"))
-    }
-
-    /// The rank-1 outer product of a force vector with itself, as a
-    /// spatial inertia — used for the articulated-body algorithm's
-    /// `U * U^T / D` reduction term.
-    #[must_use]
-    pub(crate) fn rank_one(u: Wrench) -> Self {
-        let col = u.to_column();
-        Self(col.mul(&col.transposed()).expect("6x1 * 1x6"))
-    }
-
-    #[must_use]
-    pub(crate) fn scaled(&self, factor: f64) -> Self {
-        Self(self.0.scaled(factor))
     }
 
     /// Transforms a spatial inertia expressed about a child frame's

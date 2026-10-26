@@ -83,10 +83,13 @@ fn run_sim(args: &[String]) -> i32 {
             let dt_seconds = flag_value(&args[1..], "--dt")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0001);
-            commands::sim::multibody(steps, dt_seconds)
+            let floating = args[1..].iter().any(|a| a == "--floating");
+            commands::sim::multibody(steps, dt_seconds, floating)
         }
         Some(other) => unknown_subcommand("sim", other),
-        None => usage_error("robot sim <qualify|multibody> [--steps N] [--dt SECONDS]"),
+        None => {
+            usage_error("robot sim <qualify|multibody> [--steps N] [--dt SECONDS] [--floating]")
+        }
     }
 }
 
@@ -135,7 +138,7 @@ fn print_usage() {
     eprintln!("  robot data inspect <path>");
     eprintln!("  robot motion validate <path>");
     eprintln!("  robot sim qualify [--steps N] [--dt SECONDS]");
-    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS]");
+    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating]");
     eprintln!("  robot eval summarize <values...>");
     eprintln!();
     eprintln!("named in PLAN.md but not implemented yet:");

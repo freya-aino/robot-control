@@ -68,13 +68,25 @@ pub fn qualify(steps: u32, dt_seconds: f64) -> i32 {
     }
 }
 
-/// Runs the vendored Unitree G1 (29 DOF) through `robot_sim::articulated`'s
-/// Articulated-Body Algorithm for `steps` steps of `dt_seconds` each, bolted
-/// at the pelvis under gravity alone (zero applied torque), printing a
-/// progress trace and a finiteness/energy sanity check. Returns the process
-/// exit code.
-pub fn multibody(steps: u32, dt_seconds: f64) -> i32 {
-    let profile = match robot_model::fixtures::unitree_g1_29dof() {
+/// Runs the vendored Unitree G1 (29 DOF, or 35 with `floating`) through
+/// `robot_sim::articulated`'s Articulated-Body Algorithm for `steps` steps
+/// of `dt_seconds` each under gravity alone (zero applied torque),
+/// printing a progress trace and a finiteness/energy sanity check.
+/// Returns the process exit code.
+///
+/// `floating = false` bolts the pelvis to world (every joint swings under
+/// gravity, the base cannot move) — the original demonstration. `floating
+/// = true` uses `robot_model::fixtures::unitree_g1_29dof_floating_base`
+/// instead: the pelvis itself is a `Free` joint and can fall, which is
+/// the capability this command was extended for, and the progress trace
+/// reports pelvis height instead of a generic `max|q|`.
+pub fn multibody(steps: u32, dt_seconds: f64, floating: bool) -> i32 {
+    let profile = if floating {
+        robot_model::fixtures::unitree_g1_29dof_floating_base()
+    } else {
+        robot_model::fixtures::unitree_g1_29dof()
+    };
+    let profile = match profile {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: could not build the vendored G1 fixture: {e}");
@@ -86,14 +98,25 @@ pub fn multibody(steps: u32, dt_seconds: f64) -> i32 {
     let dt = Duration::from_secs_f64(dt_seconds);
 
     // A small displacement from the zero posture, not a claim about any
-    // real G1 standing pose: this is a fixed-base demonstration of the
-    // solver, not a balance controller.
-    let mut state = MultibodyState::at_rest(vec![0.01; body.dof()]);
+    // real G1 standing pose: this is a demonstration of the solver, not
+    // a balance controller. The floating base starts at an identity
+    // quaternion (q[3] = w = 1) at the origin.
+    let mut q = vec![0.01; body.position_width()];
+    if floating {
+        q[3] = 1.0;
+    }
+    let mut state = MultibodyState {
+        q,
+        qd: vec![0.0; body.dof()],
+    };
     let tau = vec![0.0; body.dof()];
 
-    println!(
-        "G1 multibody simulation (fixed base, no ground contact): {steps} steps at {dt_seconds} s"
-    );
+    let mode = if floating {
+        "floating base, no ground contact"
+    } else {
+        "fixed base, no ground contact"
+    };
+    println!("G1 multibody simulation ({mode}): {steps} steps at {dt_seconds} s");
     println!("  degrees of freedom:      {}", body.dof());
 
     let report_every = (steps / 10).max(1);
@@ -110,11 +133,16 @@ pub fn multibody(steps: u32, dt_seconds: f64) -> i32 {
                     return EXIT_FAILURE;
                 }
             };
-            let max_q = state.q.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-            println!(
-                "  t={:>7.3}s  kinetic_energy={energy:>10.4} J  max|q|={max_q:.4} rad",
-                (step + 1) as f64 * dt_seconds
-            );
+            let t = (step + 1) as f64 * dt_seconds;
+            if floating {
+                println!(
+                    "  t={t:>7.3}s  kinetic_energy={energy:>10.4} J  pelvis_height={:.4} m",
+                    state.q[2]
+                );
+            } else {
+                let max_q = state.q.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+                println!("  t={t:>7.3}s  kinetic_energy={energy:>10.4} J  max|q|={max_q:.4} rad");
+            }
         }
     }
 
@@ -143,6 +171,11 @@ mod tests {
 
     #[test]
     fn multibody_runs_the_real_g1_without_diverging() {
-        assert_eq!(multibody(200, 0.0005), 0);
+        assert_eq!(multibody(200, 0.0005, false), 0);
+    }
+
+    #[test]
+    fn multibody_with_a_floating_base_runs_without_diverging() {
+        assert_eq!(multibody(200, 0.0001, true), 0);
     }
 }

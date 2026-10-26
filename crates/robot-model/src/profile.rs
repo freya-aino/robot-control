@@ -387,7 +387,7 @@ impl RobotProfile {
     /// Number of actuated degrees of freedom.
     #[must_use]
     pub fn dof(&self) -> usize {
-        self.actuated_joints().count()
+        self.actuated_joints().map(|j| j.kind.dof_count()).sum()
     }
 
     /// A topological order of links, root first, such that every link

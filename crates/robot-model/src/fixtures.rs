@@ -12,13 +12,17 @@
 //! [`profile::RobotProfile::activate`] refuses them, rather than asserting
 //! a hardware safety property this crate has no cited source for.
 
+use crate::joint::{JointKind, JointLimits, JointSpec};
+use crate::link::{LinkSpec, MassProperties};
+use crate::pose::RigidPose;
 use crate::profile::{FirmwareContract, ProfileError, RobotProfile, PROFILE_SCHEMA_VERSION};
 use crate::urdf::{import_from_str, placeholder_actuator, UrdfError};
 use core::fmt;
-use robot_types::frames::{FrameId, GravityConvention};
-use robot_types::ids::Name;
+use robot_types::frames::{FrameId, GravityConvention, Vec3};
+use robot_types::ids::{JointId, LinkId, Name};
 use robot_types::schema::ExtensionTable;
 use robot_types::time::Duration;
+use robot_types::units::{NewtonMetres, RadiansPerSecond};
 
 /// Unitree G1 humanoid, 29-DOF, revision 1.0, vendored from
 /// `unitreerobotics/unitree_rl_gym`. See
@@ -116,6 +120,64 @@ pub fn unitree_g1_29dof() -> Result<RobotProfile, FixtureError> {
     Ok(profile)
 }
 
+/// The vendored G1 of [`unitree_g1_29dof`], with its former root
+/// (`pelvis`) re-attached to a new, explicit, massless `world` link via
+/// a [`JointKind::Free`] joint, instead of being the profile's root
+/// (implicitly fixed to whatever frame holds it) directly.
+///
+/// `crates/robot-sim/SIMULATION_SPECS.md` Section 3 is the design record
+/// for why a floating base is built this way — an explicit `world` link
+/// plus a `Free` joint, assigned by the simulation layer, never by URDF
+/// import — rather than as a relaxation of the URDF importer's own
+/// rejection of a `floating` joint type. The new joint carries no
+/// actuator (nothing drives a floating base directly; `robot_sim::
+/// articulated::MultibodyState` applies whatever external wrench a
+/// caller supplies through its six generalized-force slots) and, like
+/// [`unitree_g1_29dof`], only `.validate()`s — the firmware contract
+/// still declares no independent e-stop, so `.activate()` still
+/// correctly refuses it.
+///
+/// The new joint is inserted *first* in `profile.joints`, ahead of the
+/// G1's own 29 joints: `robot_sim::articulated::ArticulatedBody`
+/// assigns every joint's `q`/`qd` slots in `RobotProfile::actuated_joints`
+/// (storage) order, so this is what puts the floating joint's 7-wide
+/// position and 6-wide velocity/force slots at index 0 rather than
+/// scattered after the G1's own 29 — the conventional "free joint first"
+/// layout, matching MuJoCo's own `qpos`/`qvel` convention.
+pub fn unitree_g1_29dof_floating_base() -> Result<RobotProfile, FixtureError> {
+    let mut profile = unitree_g1_29dof()?;
+
+    let world_link = LinkId::new(profile.links.len() as u32);
+    let floating_joint = JointId::new(profile.joints.len() as u32);
+    let old_root = profile.root_link;
+
+    profile.links.push(LinkSpec {
+        id: world_link,
+        name: Name::new("world").expect("valid literal"),
+        mass: MassProperties::MASSLESS,
+        collision: Vec::new(),
+    });
+    profile.joints.insert(
+        0,
+        JointSpec {
+            id: floating_joint,
+            name: Name::new("floating_base").expect("valid literal"),
+            kind: JointKind::Free,
+            parent: world_link,
+            child: old_root,
+            origin: RigidPose::IDENTITY,
+            axis: Vec3::ZERO,
+            limits: JointLimits::unbounded(RadiansPerSecond(1000.0), NewtonMetres(0.0)),
+            sign: 1.0,
+            zero_offset: 0.0,
+        },
+    );
+    profile.root_link = world_link;
+
+    profile.validate()?;
+    Ok(profile)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +231,38 @@ mod tests {
         let zeros = vec![0.0; profile.dof()];
         let poses = crate::kinematics::forward_kinematics(&profile, &zeros).unwrap();
         assert_eq!(poses.as_slice().len(), profile.links.len());
+    }
+
+    #[test]
+    fn the_floating_base_variant_adds_a_world_link_and_a_free_joint() {
+        let fixed = unitree_g1_29dof().unwrap();
+        let floating = unitree_g1_29dof_floating_base().unwrap();
+
+        assert_eq!(floating.dof(), fixed.dof() + 6);
+        assert_eq!(floating.links.len(), fixed.links.len() + 1);
+        assert_eq!(floating.joints.len(), fixed.joints.len() + 1);
+
+        let world = floating
+            .links
+            .iter()
+            .find(|l| l.name.as_str() == "world")
+            .expect("world link exists");
+        assert_eq!(floating.root_link, world.id);
+
+        let floating_joint = floating
+            .joints
+            .iter()
+            .find(|j| j.name.as_str() == "floating_base")
+            .expect("floating_base joint exists");
+        assert_eq!(floating_joint.kind, JointKind::Free);
+        assert_eq!(floating_joint.parent, world.id);
+        assert_eq!(floating_joint.child, fixed.root_link);
+    }
+
+    #[test]
+    fn the_floating_base_variant_still_refuses_activation() {
+        let profile = unitree_g1_29dof_floating_base().unwrap();
+        let err = profile.activate(&[]).unwrap_err();
+        assert!(matches!(err, ProfileError::NoIndependentEstop));
     }
 }

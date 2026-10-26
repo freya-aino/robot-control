@@ -14,6 +14,19 @@ use robot_types::ids::{JointId, LinkId, Name};
 use robot_types::units::{NewtonMetres, Radians, RadiansPerSecond, Range};
 
 /// The kind of motion a joint permits.
+///
+/// [`JointKind::Free`] is a simulation-time construct, never importable
+/// from URDF (`robot_model::urdf` rejects a `floating` joint type by name)
+/// — see `crates/robot-sim/SIMULATION_SPECS.md` Section 1.6 and Section 3.
+/// It exists to let a profile's root attach to an explicit, typically
+/// massless `world` link via a `Free` joint, giving the attached body six
+/// unconstrained degrees of freedom (translation plus rotation) rather
+/// than the single scalar every other kind here carries. A single-scalar
+/// API — [`JointSpec::transform_at`], and anything built on it such as
+/// `robot_model::kinematics::forward_kinematics` — cannot represent a
+/// `Free` joint's position and panics loudly rather than guess; a
+/// `Free`-aware caller (`robot_sim::articulated`) reads the richer
+/// position representation Section 3 of that document describes instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JointKind {
     /// Rotation about a single axis, with position limits.
@@ -24,6 +37,9 @@ pub enum JointKind {
     Prismatic,
     /// No relative motion. Still a graph edge, for a rigidly attached link.
     Fixed,
+    /// Six unconstrained degrees of freedom (translation plus rotation) —
+    /// a floating base. See this enum's own doc comment.
+    Free,
 }
 
 impl JointKind {
@@ -39,6 +55,25 @@ impl JointKind {
         !matches!(self, Self::Fixed)
     }
 
+    /// Whether this kind rotates or translates about a single, meaningful
+    /// `axis` — true for every actuated kind except [`JointKind::Free`],
+    /// which has no single axis to speak of.
+    #[must_use]
+    pub const fn has_single_axis(self) -> bool {
+        matches!(self, Self::Revolute | Self::Continuous | Self::Prismatic)
+    }
+
+    /// Degrees of freedom this kind contributes: 0 for [`JointKind::Fixed`],
+    /// 1 for every single-axis kind, 6 for [`JointKind::Free`].
+    #[must_use]
+    pub const fn dof_count(self) -> usize {
+        match self {
+            Self::Fixed => 0,
+            Self::Revolute | Self::Continuous | Self::Prismatic => 1,
+            Self::Free => 6,
+        }
+    }
+
     /// The canonical identifier used in profiles and URDF import.
     #[must_use]
     pub const fn id(self) -> &'static str {
@@ -47,6 +82,7 @@ impl JointKind {
             Self::Continuous => "continuous",
             Self::Prismatic => "prismatic",
             Self::Fixed => "fixed",
+            Self::Free => "free",
         }
     }
 }
@@ -217,7 +253,7 @@ impl JointSpec {
                 joint: self.name.clone(),
             });
         }
-        if self.axis.normalized(1e-12).is_none() && self.kind.is_actuated() {
+        if self.axis.normalized(1e-12).is_none() && self.kind.has_single_axis() {
             return Err(JointError::DegenerateAxis {
                 joint: self.name.clone(),
             });
@@ -299,6 +335,15 @@ impl JointSpec {
     /// relative to the parent link's own frame.
     ///
     /// For [`JointKind::Fixed`] the value is ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.kind` is [`JointKind::Free`]: a `Free` joint's
+    /// position is seven numbers (translation plus a quaternion), which a
+    /// single `f64` cannot represent. Calling this on a `Free` joint is a
+    /// caller bug this project's "reject unsupported constructs explicitly"
+    /// convention treats as loud failure, not a silently wrong pose — see
+    /// [`JointKind`]'s own doc comment for the caller that does support it.
     #[must_use]
     pub fn transform_at(&self, value: f64) -> RigidPose {
         let motion = match self.kind {
@@ -310,6 +355,10 @@ impl JointSpec {
                 self.axis
                     .normalized(1e-12)
                     .map_or(Vec3::ZERO, |u| u * value),
+            ),
+            JointKind::Free => panic!(
+                "JointKind::Free has no single-scalar value representation; \
+                 use robot_sim::articulated for floating-base dynamics"
             ),
         };
         self.origin.compose(&motion)
@@ -483,5 +532,49 @@ mod tests {
         j.axis = Vec3::unit_x();
         let pose = j.transform_at(0.5);
         assert!((pose.translation.x - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_free_joint_has_six_degrees_of_freedom_and_is_actuated() {
+        assert_eq!(JointKind::Free.dof_count(), 6);
+        assert!(JointKind::Free.is_actuated());
+        assert!(!JointKind::Free.is_bounded());
+        assert!(!JointKind::Free.has_single_axis());
+    }
+
+    #[test]
+    fn a_free_joint_with_a_zero_axis_still_validates() {
+        let mut j = joint(
+            JointKind::Free,
+            JointLimits::unbounded(RadiansPerSecond(1.0), NewtonMetres(1.0)),
+        );
+        j.axis = Vec3::ZERO;
+        assert!(j.validate().is_ok());
+    }
+
+    #[test]
+    fn a_free_joint_rejects_position_limits() {
+        let j = joint(
+            JointKind::Free,
+            JointLimits::bounded(
+                Range::<Radians>::new(Radians(-1.0), Radians(1.0)).unwrap(),
+                RadiansPerSecond(1.0),
+                NewtonMetres(1.0),
+            ),
+        );
+        assert!(matches!(
+            j.validate(),
+            Err(JointError::UnexpectedPositionLimits { .. })
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "no single-scalar value representation")]
+    fn transform_at_panics_on_a_free_joint() {
+        let j = joint(
+            JointKind::Free,
+            JointLimits::unbounded(RadiansPerSecond(1.0), NewtonMetres(1.0)),
+        );
+        let _ = j.transform_at(0.0);
     }
 }
