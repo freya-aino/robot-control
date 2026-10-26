@@ -1,0 +1,23 @@
+[package]
+name = "robot-learn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Rollouts, authored autodiff, the PPO baseline and the experience stores of SPECS.md Section 7.6"
+
+[dependencies]
+robot-types = { path = "../robot-types" }
+robot-nn = { path = "../robot-nn" }
+robot-sim = { path = "../robot-sim" }
+robot-artifacts = { path = "../robot-artifacts" }
+
+[dev-dependencies]
+# Only the test suite trains against a concrete task; the PPO loop itself
+# takes any reward/termination function and has no dependency on robot-tasks.
+robot-tasks = { path = "../robot-tasks" }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
