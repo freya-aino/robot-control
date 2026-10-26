@@ -12,6 +12,7 @@ members = [
     "crates/robot-sim",
     "crates/robot-tasks",
     "crates/robot-learn",
+    "crates/robot-skills",
 ]
 
 [workspace.package]
