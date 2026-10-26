@@ -7,6 +7,7 @@ members = [
     "crates/motion-io",
     "crates/motion-process",
     "crates/motion-retarget",
+    "crates/motion-validate",
 ]
 
 [workspace.package]

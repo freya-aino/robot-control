@@ -26,6 +26,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "motion-validate"
+version = "0.1.0"
+dependencies = [
+ "robot-model",
+ "robot-types",
+]
+
+[[package]]
 name = "robot-artifacts"
 version = "0.1.0"
 dependencies = [
