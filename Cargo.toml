@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/robot-types",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "NOASSERTION"
+publish = false
+
+# SPECS.md Appendix B.6 admits no dependency until its gates pass, and
+# SPECS.md Appendix B.1 starts every surveyed candidate at `unverified`.
+# The default build therefore has an empty third-party dependency closure.
+# See docs/decisions/0003-std-only-default-closure.md.
+[workspace.dependencies]
+
+[profile.release]
+panic = "abort"
+overflow-checks = true
+debug = 1
+
+[profile.bench]
+debug = 1
