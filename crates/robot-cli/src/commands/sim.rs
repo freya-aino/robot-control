@@ -1,13 +1,19 @@
-//! `robot sim qualify` — PLAN.md §4's proposed command, scoped here to the
-//! one benchmark `robot-sim` actually implements: SPECS.md §9.1's
-//! "analytic pendulum" energy-conservation check (Appendix B.4 item 2).
+//! `robot sim qualify` and `robot sim multibody` — PLAN.md §4's proposed
+//! `robot sim qualify` command, plus a second one this revision adds for
+//! the multi-body solver in `robot_sim::articulated`.
 //!
-//! A full qualification run (actuator step response, static standing,
-//! foot slip, push recovery, controlled impact) needs the multi-body
-//! simulation this crate does not have; this command does not pretend
-//! otherwise.
+//! `qualify` is SPECS.md §9.1's "analytic pendulum" energy-conservation
+//! check (Appendix B.4 item 2). `multibody` runs the vendored Unitree G1
+//! fixture's real 29-DOF joint tree through the Articulated-Body
+//! Algorithm — bolted at the pelvis (fixed base, no ground contact; see
+//! `robot_sim::articulated`'s doc comment for why), not a standing or
+//! walking claim. A full qualification run (actuator step response,
+//! static standing, foot slip, push recovery, controlled impact) needs
+//! ground contact and a free-floating base this crate does not have yet;
+//! this command does not pretend otherwise.
 
 use super::EXIT_FAILURE;
+use robot_sim::articulated::{ArticulatedBody, MultibodyState};
 use robot_sim::pendulum::{Pendulum, PendulumParams, PendulumState};
 use robot_types::time::Duration;
 
@@ -62,6 +68,65 @@ pub fn qualify(steps: u32, dt_seconds: f64) -> i32 {
     }
 }
 
+/// Runs the vendored Unitree G1 (29 DOF) through `robot_sim::articulated`'s
+/// Articulated-Body Algorithm for `steps` steps of `dt_seconds` each, bolted
+/// at the pelvis under gravity alone (zero applied torque), printing a
+/// progress trace and a finiteness/energy sanity check. Returns the process
+/// exit code.
+pub fn multibody(steps: u32, dt_seconds: f64) -> i32 {
+    let profile = match robot_model::fixtures::unitree_g1_29dof() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: could not build the vendored G1 fixture: {e}");
+            return EXIT_FAILURE;
+        }
+    };
+    let body = ArticulatedBody::from_profile(&profile);
+    let gravity = profile.gravity.acceleration();
+    let dt = Duration::from_secs_f64(dt_seconds);
+
+    // A small displacement from the zero posture, not a claim about any
+    // real G1 standing pose: this is a fixed-base demonstration of the
+    // solver, not a balance controller.
+    let mut state = MultibodyState::at_rest(vec![0.01; body.dof()]);
+    let tau = vec![0.0; body.dof()];
+
+    println!(
+        "G1 multibody simulation (fixed base, no ground contact): {steps} steps at {dt_seconds} s"
+    );
+    println!("  degrees of freedom:      {}", body.dof());
+
+    let report_every = (steps / 10).max(1);
+    for step in 0..steps {
+        if let Err(e) = state.step(&body, &tau, gravity, dt) {
+            eprintln!("error: step {step}: {e}");
+            return EXIT_FAILURE;
+        }
+        if step % report_every == 0 || step + 1 == steps {
+            let energy = match body.kinetic_energy(&state.q, &state.qd) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("error: step {step}: {e}");
+                    return EXIT_FAILURE;
+                }
+            };
+            let max_q = state.q.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            println!(
+                "  t={:>7.3}s  kinetic_energy={energy:>10.4} J  max|q|={max_q:.4} rad",
+                (step + 1) as f64 * dt_seconds
+            );
+        }
+    }
+
+    let finite = state.q.iter().chain(&state.qd).all(|v| v.is_finite());
+    if !finite {
+        println!("  result:                  FAIL (non-finite state)");
+        return EXIT_FAILURE;
+    }
+    println!("  result:                  PASS (ran to completion, finite throughout)");
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +139,10 @@ mod tests {
     #[test]
     fn a_wildly_large_timestep_can_fail() {
         assert_eq!(qualify(2_000, 0.5), EXIT_FAILURE);
+    }
+
+    #[test]
+    fn multibody_runs_the_real_g1_without_diverging() {
+        assert_eq!(multibody(200, 0.0005), 0);
     }
 }
