@@ -19,6 +19,7 @@ members = [
     "crates/robot-hardware",
     "crates/robot-control",
     "crates/robot-eval",
+    "crates/robot-persona",
 ]
 
 [workspace.package]
