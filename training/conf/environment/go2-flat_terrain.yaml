@@ -1,9 +1,0 @@
-defaults:
-  - default
-  - _self_
-
-model_path: "./external/unitree_mj_models/go2/scene.xml"
-initial_noise_scale: 0.1
-
-observation_size: 37 # qpos + qvel
-action_size: 12 # 12 actuators

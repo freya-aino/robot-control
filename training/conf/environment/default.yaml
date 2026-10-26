@@ -1,8 +1,0 @@
-num_parallel_environments: ${num_parallel_environments}
-sim_frames_per_step: ${sim_frames_per_step} # 1 - 20
-mujoco_timestep: ${mujoco_timestep} # seconds
-
-model_path: ~
-initial_noise_scale: ~
-observation_size: ~
-action_size: ~

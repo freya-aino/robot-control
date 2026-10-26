@@ -1,6 +1,0 @@
-torso_name: "base"
-torso_height_reward_scale: 1.0
-energy_reward_scale: 1.0
-torso_distance_from_origin_reward_scale: 0.1
-#body_angle_reward_scale: 1.0
-#joint_limit_reward_scale: 1.0

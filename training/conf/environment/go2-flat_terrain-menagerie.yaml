@@ -1,9 +1,0 @@
-defaults:
-  - default
-  - _self_
-
-model_path: "./external/mujoco_menagerie/unitree_go2/scene_mjx.xml"
-initial_noise_scale: 0.1
-
-observation_size: 37 # qpos + qvel
-action_size: 12 # 12 actuators

@@ -4,8 +4,8 @@ Status: proposed architecture and acceptance contract. Not ratified; no clause b
 
 | Field | Value |
 | --- | --- |
-| Document version | 0.3.1-draft |
-| Last revised | 2026-10-24 |
+| Document version | 0.7.1-draft |
+| Last revised | 2026-10-26 |
 | Companion documents | `PLAN.md` (phasing, gates, backlog); evidence ledger; decision records; per-robot acceptance and safety profiles; `devenv.nix`, `devenv.yaml` and `devenv.lock` as the executable form of Section 2.2 |
 | Normative scope | Sections 1–15 bind the implementation. Appendix A is definitional, Appendix B is advisory until its gates pass, Appendix C records what is still undecided |
 | Change control | Changes to Sections 2, 4, 5, 7, 12 or 14 require a decision record and a review of every dependent acceptance profile, fixture and consumer crate |
@@ -18,6 +18,11 @@ Status: proposed architecture and acceptance contract. Not ratified; no clause b
 | 0.2 | Appendix B replaced with the supplied Rust ecosystem survey revised v2.0 | — |
 | 0.3.0-draft | Document control, normative-language convention, glossary (Appendix A), operating-mode and evidence-promotion tables, foreign-dependency exception procedure, safety case (Section 12), acceptance traceability, open-questions register (Appendix C) | 2026-10-24 |
 | 0.3.1-draft | devenv-provisioned development environment (Section 2.2), locked-environment recording in Section 13, acceptance row A-22, glossary and open-question entries. Touches Sections 2 and 14, so the change-control rule applies and the decision record is tracked as [C-14](#appendix-c--open-questions-and-unresolved-decisions) until written | 2026-10-24 |
+| 0.4.0-draft | Appendix B replaced with the supplied Rust ecosystem survey revised v3.0. Adds the external-model-service dependency class (Section 2.3), the agent-advisory boundary in Sections 5 and 12.6, the optional agent layer in Section 6, acceptance rows A-23 and A-24, glossary entries and open questions C-15 to C-17. Touches Sections 2, 5, 12 and 14, so the change-control rule applies and the decision record is tracked as [C-15](#appendix-c--open-questions-and-unresolved-decisions) until written | 2026-10-25 |
+| 0.5.0-draft | Supplied ADK-Rust integration appendix folded into the existing structure instead of being added as an appendix. Specifies the three admissible uses of an agent layer — development-time automation, offline policy and personality sampling assistance, and a maintained low-level dependency knowledge base — in Section 2.3.1, with the knowledge base in Section 13.1, sampling assistance in Sections 9.5 and 12.5, acceptance rows A-25 to A-27, qualification gate 10, risk rows and open questions C-18 and C-19. Touches Sections 2, 12, 13 and 14, so the change-control rule applies and the decision record remains tracked as [C-15](#appendix-c--open-questions-and-unresolved-decisions) | 2026-10-25 |
+| 0.6.0-draft | Adds extensible robot descriptor and shared experience/replay contracts in Sections 7.1 and 7.6, RL extension points and conformance requirements in Sections 9.3 and 9.6, Rust mechanism candidates in Appendix B, implementation guidance in Appendix D, acceptance rows A-28 to A-31, and open questions C-20 and C-21. Touches Sections 7 and 14, so the change-control rule applies and the decision record is tracked as [C-20](#appendix-c--open-questions-and-unresolved-decisions) and [C-21](#appendix-c--open-questions-and-unresolved-decisions) until written | 2026-10-26 |
+| 0.7.0-draft | Folds the surveyed low-data humanoid learning methods into the existing structure: the hierarchical latency invariant in Section 5.1, the staged latent competitive pipeline of Section 9.4 following the now `paper_verified` RoboStriker method, retrieval-augmented policy learning in Section 9.7, retrieval tiers and deadline attribution in Section 10.6, expanded limited-data adaptation methods in Section 11.3, three further extension points and two storage clauses in Sections 9.3 and 7.6, research-register and Appendix A/B entries, acceptance rows A-32 to A-35, and open questions C-22 to C-24. Touches Sections 5, 7 and 14, so the change-control rule applies and the decision record is tracked as [C-22](#appendix-c--open-questions-and-unresolved-decisions) until written | 2026-10-26 |
+| 0.7.1-draft | Records the removal of the Python prior art from the working tree: Section 1.1 is restated as the disposition of retired assets reachable only in version control, Section 2.2 item 8 points manual comparison runs at a historical commit, and C-01 is resolved with reintroduction routed through the Section 2.1 exception procedure. Touches Sections 1 and 2, so the change-control rule applies and the migration decision record is the resolution of [C-01](#appendix-c--open-questions-and-unresolved-decisions) | 2026-10-26 |
 
 ### Normative language
 
@@ -54,8 +59,9 @@ Sections 1–5 fix policy: what is built, in what language, on what evidence, in
 15. [Explicit non-goals for the first release](#15-explicit-non-goals-for-the-first-release)
 
 - [Appendix A — Terminology, units and conventions](#appendix-a--terminology-units-and-conventions)
-- [Appendix B — Rust ecosystem survey and dependency qualification](#appendix-b--rust-ecosystem-survey-and-dependency-qualification-revised-v20)
+- [Appendix B — Rust ecosystem survey and dependency qualification](#appendix-b--rust-ecosystem-survey-and-dependency-qualification-revised-v30)
 - [Appendix C — Open questions and unresolved decisions](#appendix-c--open-questions-and-unresolved-decisions)
+- [Appendix D — Rust extensibility patterns](#appendix-d--rust-extensibility-patterns)
 
 ## 1. Purpose and scope
 
@@ -74,18 +80,18 @@ The principal architecture is hierarchical:
 
 Deliverables include reusable crates, command-line tools, declarative experiment configurations, versioned artifacts, simulator and hardware interfaces, evaluation suites, and operational documentation.
 
-### 1.1 Relationship to existing repository contents
+### 1.1 Relationship to prior repository contents
 
-This repository already contains a Python stack: `training/` (PyTorch, JAX, MuJoCo MJX, Warp, Hydra, MLflow, ONNX export) and `unitree/` (CycloneDDS configuration and a Unitree SDK connector). Section 2 excludes every one of those runtimes from the default implementation. The specification therefore MUST state their disposition rather than silently describing a system that does not match the working tree.
+This repository previously contained a Python stack: `training/` (PyTorch, JAX, MuJoCo MJX, Warp, Hydra, MLflow, ONNX export), `unitree/` (CycloneDDS configuration and a Unitree SDK connector) and `test.ipynb`. That code was removed from the working tree on 2026-10-26, which closes the divergence from Section 2 that [C-01](#appendix-c--open-questions-and-unresolved-decisions) tracked. The working tree now contains documentation only, and the Rust workspace of Section 6 is unwritten; the specification states the disposition of the retired assets because they remain reachable in version control and are still cited as prior art.
 
-| Existing asset | Disposition |
+| Retired asset | Disposition after removal |
 | --- | --- |
-| `training/` Python training code | Prior art and behavioral reference. Not a dependency, not a build target, and not permitted in any deployable path. It MAY be read for algorithm intent and MAY be executed manually, outside CI, to produce comparison numbers recorded as `unverified` baselines |
-| `training/conf/` experiment configurations | Requirements input. The task, reward and randomization intent expressed there SHOULD be migrated into the configuration schema of Section 9.3; the YAML files themselves are not the canonical format |
-| `unitree/` DDS/SDK connector | Protocol reference for `robot-hardware`. Field layouts, rates and command semantics observed here are hypotheses requiring the hardware verification of Section 7.1, not a validated protocol specification |
-| `test.ipynb` and notebook workflows | Scratch artifacts. Excluded from acceptance, reproducibility and artifact-lineage requirements |
+| `training/` Python training code | Prior art and behavioral reference, retained only in history. It MAY be read at a named commit for algorithm intent. It MUST NOT be restored into the working tree, and any manual comparison run happens from a checkout of that commit in the separately named non-default environment of Section 2.2 item 8, with its numbers recorded as `unverified` baselines |
+| `training/conf/` experiment configurations | Requirements input. The task, reward and randomization intent expressed there SHOULD be migrated into the configuration schema of Section 9.3, with the source commit cited; the YAML files themselves are not the canonical format and are not reintroduced |
+| `unitree/` DDS/SDK connector | Protocol reference for `robot-hardware`. Field layouts, rates and command semantics observed there are hypotheses requiring the hardware verification of Section 7.1. Transcribing them into Rust is authorship against a cited historical reference, not a port |
+| `test.ipynb` and notebook workflows | Scratch artifacts, deleted. Excluded from acceptance, reproducibility and artifact-lineage requirements, and not recreated in any form |
 
-Three consequences are binding. The Rust workspace of Section 6 MUST NOT import, subprocess, or link against any of the above. Numbers produced by the Python stack MUST NOT be reported as platform results without restating their provenance. Retiring or relocating this code is a migration decision requiring a decision record; until that record exists, its continued presence is a known divergence from Section 2 and is tracked as [C-01](#appendix-c--open-questions-and-unresolved-decisions), not an implicit exception.
+Four consequences are binding. The Rust workspace of Section 6 MUST NOT import, subprocess, or link against any of the above, and the removal does not weaken that prohibition — a deleted dependency and an excluded dependency are the same requirement. Numbers produced by the retired Python stack MUST NOT be reported as platform results without restating their provenance, including the commit they were produced at. Reintroducing any of this code, in whole or in part, is a Section 2.1 exception request and not a revert. Removal is not evidence: nothing about the Rust stack became more verified by deleting the prior art, and every evidence state of Section 3 is unchanged by it.
 
 ## 2. Language and dependency policy
 
@@ -93,9 +99,9 @@ All project-authored executable code MUST be Rust: ingestion, numerical processi
 
 The default implementation targets Rust-native libraries and Rust-authored compute kernels. Candidate dependencies include Burn for differentiable models, CubeCL for Rust GPU kernels, nalgebra for linear algebra, Rapier for initial rigid-body experiments, tracing for diagnostics, and egui for tools. These are candidates requiring version, license, backend, and performance validation; they are not assertions that a complete humanoid robotics stack already exists in Rust.
 
-Appendix B incorporates the supplied Rust ecosystem survey revised v2.0, assigns concrete candidate roles, and defines dependency qualification gates. Its maturity assessments are provisional. A Rust API alone does not establish that a library or its enabled dependency closure satisfies this policy. Generated C and required Python code-generation workflows do not satisfy the Rust-only policy. Development tools with foreign engines are also identified explicitly rather than silently classified as Rust-native.
+Appendix B incorporates the supplied Rust ecosystem survey revised v3.0, assigns concrete candidate roles, and defines dependency qualification gates. Its maturity assessments are provisional. A Rust API alone does not establish that a library or its enabled dependency closure satisfies this policy. Generated C and required Python code-generation workflows do not satisfy the Rust-only policy. Development tools with foreign engines are also identified explicitly rather than silently classified as Rust-native. A crate written entirely in Rust whose advertised capability is produced by a hosted model endpoint is Rust-native in language and foreign in behavior; Section 2.3 governs that case.
 
-Distinguish two dependency classes explicitly:
+Distinguish the following dependency classes explicitly:
 
 | Class | Policy |
 | --- | --- |
@@ -104,6 +110,7 @@ Distinguish two dependency classes explicitly:
 | OS, device firmware, GPU drivers | External platform dependencies; inventory them |
 | C/C++ simulator, vendor SDK, ONNX runtime, or other foreign library through FFI | Excluded from the default implementation; any future exception requires an explicit scope decision and separate feature/profile |
 | Python frameworks exposed through subprocesses or bindings | Excluded |
+| External model service: a hosted inference endpoint invoked at runtime over the network | Excluded from the default build; permitted only under Section 2.3, never on a control path |
 
 Do not label a wrapper around a foreign training or simulation stack a Rust-native implementation. The first engineering gate must establish whether the Rust-only simulation and autodiff stack can meet the task. If not, report the gap and propose Rust implementation work; do not silently substitute Isaac Lab, PyTorch, MuJoCo, or another non-Rust engine. External research can inform algorithms without becoming a runtime dependency.
 
@@ -140,9 +147,41 @@ The following are binding:
 5. `devenv processes` MAY host development-only services such as the viewer, a local telemetry collector or a replay device. Nothing declared there is part of the control path of Section 5 or a runtime dependency of a deployed robot.
 6. Nix expressions and the `scripts` they declare are environment provisioning, in the same class as TOML configuration under Section 2's opening paragraph, and are not a language exception. They MUST NOT accumulate application logic: a script entry is a thin alias over a `cargo` or `robot-cli` invocation, and anything containing branching, parsing or numerics belongs in Rust.
 7. Deployment MUST NOT require Nix or devenv on the robot host. The deliverables remain the Rust binaries and policy bundles of Section 7.4; the locked environment reproduces the build, it does not become part of the product.
-8. The runtimes excluded by Section 2 and Section 1.1 MUST NOT appear in the default environment. Manual execution of the Python prior art, or an approved Section 2.1 exception, lives in a separately named non-default environment whose foreign nature is visible at its call site, and the exclusion gate still runs in the default one.
+8. The runtimes excluded by Section 2 and Section 1.1 MUST NOT appear in the default environment. Manual execution of the retired Python prior art from a historical commit, or an approved Section 2.1 exception, lives in a separately named non-default environment whose foreign nature is visible at its call site, and the exclusion gate still runs in the default one. The prior art's removal from the working tree does not retire this clause, because the exclusion gate is what keeps it out of the default closure.
 
 The known limitation is host coverage: Nix supports Linux and macOS, and Windows only through WSL2. Which host platforms the locked environment is actually exercised on, which toolchain input supplies Rust, and whether CI runs devenv natively or inside an image built from the same lock, are open under [C-14](#appendix-c--open-questions-and-unresolved-decisions). A reproducible environment is not a hermetic build: Nix pins inputs, it does not make `cargo` fetch nothing, so dependency locking under Appendix B.6 remains separately required.
+
+### 2.3 External model services and agent layers
+
+The v3.0 survey of Appendix B introduced a case the two preceding classes do not describe: a dependency that is Rust-authored, links no foreign binary and runs no local foreign runtime, yet obtains its advertised capability from a third-party model endpoint over the network. Language purity is satisfied and behavioral control is not. Such a dependency is an **external model service**, and the following are binding wherever one appears:
+
+1. The Cargo feature enabling it MUST be absent from `default` features and from the default CI job, and the exclusion gate of Section 2.1 item 4 MUST treat an unexpected model-service client in the default dependency closure as a build failure.
+2. An external model service MUST NOT be reachable from the control path or policy path of Section 5, from the supervisor of Section 12.1, or from a policy bundle of Section 7.4. This prohibition is not waivable by a Section 2.1 exception: Section 2.1 governs foreign code, and no scope decision admits a network round trip to the control tick.
+3. Every capability built on this class MUST define an offline-degradation mode and MUST be tested in it. The autonomous control loop, the safety envelope and all acceptance rows of Section 14 MUST pass with every model-service feature disabled, per row A-24.
+4. A local-inference substitution path MUST be named for each such capability, together with the authored work that path requires, before the capability is scheduled. "A hosted model is available today" is not a substitution path.
+5. A model-service response is untrusted input under Section 13. It MUST be schema-validated and envelope-checked before it reaches any consumer, and it enters the system only through the validated, timestamped queue interfaces of Section 5, subject to the staleness policy that applies to any other asynchronous proposal.
+6. Model identity, version or endpoint changes are version changes under Section 3: every claim resting on the previous model is demoted, because a hosted model is not pinnable by a lockfile and its behavior may change without notice.
+7. Non-model components of the same crate family — session stores, markdown indexing, transport, telemetry, schema validation — are ordinary Rust-native dependencies and are qualified independently of the model-service gate. A crate family MUST NOT be adopted as an umbrella; per-crate qualification under Appendix B.6 applies.
+
+Which agent-layer capabilities, if any, this project adopts is open under [C-15](#appendix-c--open-questions-and-unresolved-decisions); the interim position is that none is scheduled and all remain feature-gated and optional.
+
+#### 2.3.1 Admissible uses of an agent layer
+
+The supplied integration appendix for the Rust agent framework proposes a wide capability surface. Only three uses of it are admissible in this project, and they are ordered by how far they sit from the robot. Each use has a different risk profile, a different qualification route and a different failure consequence, and they MUST NOT be conflated in a decision record, a feature flag or a dependency line.
+
+| Use | Where it runs | What it may produce | What it may never do |
+| --- | --- | --- | --- |
+| **U1 — Development-time automation** | Developer and CI hosts only, inside the locked environment of Section 2.2, never on a robot host | Parsing, integration and code-review helpers; dataset and descriptor handling; test-run and environment orchestration; artifact and ledger bookkeeping | Produce any artifact that enters a build, bundle or result without the same review, schema validation and test gate as hand-written work |
+| **U2 — Offline design and sampling assistance** | Offline, between experiments, per Section 9.5 | Candidate priors, curricula, scenario and opponent variations, expressive and personality variations as sampling proposals | Select, score or tune anything itself; replace the measurement that decides whether a proposal is kept |
+| **U3 — Dependency knowledge base** | Development and operations tooling, per Section 13.1 | Curated, cited records of the low-level dependencies and hardware interfaces the system relies on, used when diagnosing a fault | Be cited as evidence under Section 3, or serve as the control for any hazard under Section 12.2 |
+
+The following bind all three:
+
+1. U1, U2 and U3 are **development, design and operations tooling**. None of them is a runtime capability of a robot, and none of them changes the control architecture of Sections 5, 6 and 12. Their complete removal MUST leave every deliverable buildable and every acceptance row closable, which is the standing check of row A-25.
+2. Output from any of the three is a **proposal or a record, never a decision**. It becomes part of the project only by passing the gate that would apply to the same content from a human: review and CI for code, Section 3 evidence promotion for claims, Section 9 measurement for design choices, Appendix B.6 for dependencies.
+3. Each use MUST be separately feature-gated and separately decided. "The framework is adopted" is not a decision; the decision names which of U1, U2 and U3 is enabled, with which crates, at which pinned versions.
+4. Anything outside these three — agent-selected strategy during a bout, an agent in the supervision or promotion path, an agent-owned safety check, a robot-hosted agent runtime — is a non-goal under Section 15 and is not made admissible by a feature flag.
+5. A generated artifact MUST be attributable: the record states which tool, model identity and version produced it, so that a later defect can be traced to its origin rather than to an anonymous commit.
 
 ## 3. Evidence policy and corrections to the research premise
 
@@ -169,7 +208,10 @@ Specific corrections that constrain this design:
 - Sparse activation reduces active parameter count; it does not guarantee lower wall-clock latency than a small dense policy. Routing, transfers, dispatch, synchronization, and cache misses must be measured.
 - Asynchronous retrieval removes blocking work from a control thread, but still introduces decision age and potential stale intent. It is not zero-latency decision-making.
 - Retrieval routing does not eliminate selection collapse, skill starvation, or dataset imbalance. Adding an expert can change routing and transition behavior and requires regression evaluation.
-- A unit-norm latent vector bounds its representation, not joint torques, balance, or contact forces.
+- A unit-norm latent vector bounds its representation, not joint torques, balance, or contact forces. A latent action space restricts *where exploration can go*; the decoder that realizes it is still an ordinary learned controller subject to Sections 5 and 12.
+- Retrieval-augmented policy learning retrieves **data**, not motor commands. The published few-shot results are offline data-selection results: a retriever chooses which prior trajectories join a training batch. Reusing the word "retrieval" for the runtime skill router of Section 10 conflates an offline corpus search with a deadline-bound selection and must not be done in a report.
+- A hierarchical decomposition reduces the *difficulty* of the upper layers; it does not reduce the latency obligation of the lower ones. Published hierarchies frequently run every layer at one rate — RoboStriker runs both its latent strategy policy and its decoder at 50 Hz — so a tiered-rate architecture is this project's requirement, not an inherited result.
+- "Low-data" in the surveyed literature usually means low *real-robot* data on top of large-scale simulation or a large prior corpus. It is not a claim that the total training budget is small, and it must not be reported as one.
 - Cross-simulator agreement is useful evidence, not a guarantee of hardware success. Real contact calibration remains necessary.
 - No fixed percentage of motion transferability, minimum number of real rollouts, adaptation duration, or fraction of success attributable to retargeting is assumed.
 - Do not infer proprietary Unitree training architecture, exact datasets, curriculum, or autonomous capabilities from public demonstrations. Separate documented features from engineering reconstruction.
@@ -182,14 +224,21 @@ Maintain the following leads; verify identity, claims, implementation availabili
 
 | Lead from the conversation | Intended investigation | Initial disposition |
 | --- | --- | --- |
-| RoboStriker, arXiv:2601.22517 | Motion tracking, latent distillation, competitive self-play | Verify paper and exact architecture, dimensions, rates, losses, and release status |
+| RoboStriker, arXiv:2601.22517 (v1, submitted 2026-01-30) | Motion tracking, latent distillation, competitive self-play | `paper_verified` as of 2026-10-26: primary source retrieved and the method located in text. Licenses quoting the staged method of Section 9.4 and its stated conditions only. No source release was identified, so nothing is `code_inspected`, and every reported number was produced in a foreign simulator on one robot |
+| NFSP (Heinrich and Silver, arXiv:1603.01121); fictitious play | Opponent averaging, anti-cycling, reservoir-sampled average policy | Cited by RoboStriker as the basis of LS-NFSP; verify the original convergence conditions separately from the humanoid result |
+| AMP (arXiv:2104.02180), ASE, DeepMimic | Adversarial motion priors and reusable skill embeddings as style regularizers | Reference algorithms for the style term of Section 9.4; a discriminator reward is a style constraint, never a safety or feasibility constraint |
+| BehaviorRetrieval, FlowRetrieval, RAEA, RAG-Diff | Retrieval-augmented imitation and policy adaptation | Verify the retrieval unit, embedding source and whether retrieval occurs offline, between episodes or in the loop; each choice has a different cost under Section 10.6 |
+| RMA and A-RMA (rapid motor adaptation) | Two-phase latent system identification from recent proprioceptive history | The reference form of the history-conditioned row of Section 11.3; verify the adaptation-module training procedure and its deployment observation set |
+| SGFT (simulation-guided fine-tuning, ICLR 2025) | Real-world fine-tuning guided by a simulation-derived value or shaping term | Candidate for the adapter row of Section 11.3; verify what the method requires on hardware before any on-robot update is scheduled |
+| MOSAIC, H-Zero, PolySim, ZEST and related 2025–2026 sim-to-real humanoid leads | Residual adaptation, cross-embodiment few-shot transfer, multi-simulator randomization | Unverified leads collected during the Section 9.7/11.3 survey; investigation order follows Appendix B.5, and none is a dependency |
 | Unitree G1 boxing / Iron Fist King | Public product behavior, hardware constraints, demonstrations | Treat training internals as unknown unless directly documented |
 | GMR, PHC, H2O/OmniH2O, ExBody, ProtoMotions | Retargeting, imitation, whole-body control | Reference algorithms; Rust implementations required |
 | ASAP, arXiv:2502.01143 | Learning simulator/action mismatch from real trajectories | Verify where correction operates during training and deployment |
 | SPiRL, NPMP, ControlVAE, PhysicsVAE, NCP | Skill priors and latent controllers | Establish a simple reproducible baseline before extensions |
 | STRAP, arXiv:2412.15182; SMOSE | Retrieval and sparse expert control | Verify objective, retrieval unit, benchmark and actual latency evidence |
 | ARLI, DARP, ReGIL, MABR, COLLIE, SafeFlow, InstantMimic, H-Zero, R²S², LATENT | Delay-aware control, retrieval, reusable representations, transfer | Unverified leads; no core dependency |
-| PAMoR, SocialHumanoid, StreamTalk, LiveGesture, PersonaGestor, Animus | Optional personality and expressive motion | Unverified leads; separate from motion safety and baseline delivery |
+| PAMoR, SocialHumanoid, StreamTalk, LiveGesture, PersonaGestor, Animus | Optional personality and expressive motion | Unverified leads; separate from motion safety and baseline delivery. The persistent-identity sketch has a candidate Rust mechanism in Appendix B.2.13; a mechanism is not a requirement |
+| `adk-rust` (zavora-ai) and the ADK name collision | Agent orchestration: workflow agents, session lifecycle, markdown skill indexing, graph memory, agent-to-agent transport, guardrails | `unverified`; three unrelated projects share the "ADK" name and every reference MUST name the project and crate. Non-model crates are qualified separately from the model-service gate of Section 2.3, and any use is read against the three admissible uses of Section 2.3.1 |
 | “JitRL”, “Learn-to-Teach 2507.XXXXX”, claimed percentage improvements | Possible topics rather than usable citations | Require an identifiable primary source; placeholder identifiers are rejected |
 
 A failed verification is a result: retain a correction record instead of preserving an unsupported claim.
@@ -228,6 +277,7 @@ The following are initial design targets, not measured guarantees. Each robot pr
 | Fast recovery / contact reflex | Every host control tick | Can interrupt the normal skill schedule |
 | Tactical router and opponent forecast | 10–50 Hz, task dependent | Bounded local computation; stale-output rejection |
 | Semantic search and repertoire planning | 1–10 Hz | Asynchronous; produces proposals, not motor commands |
+| Optional agent advisory, if ever enabled | 1 Hz or slower, or between rounds | Out of process, feature-gated per Section 2.3; produces expiring advisory records, never commands; the loop above it runs unchanged when it is absent |
 | Training and adaptation | Offline or isolated background process | Never contend with the deployed control process |
 
 At an initial 100 Hz policy rate, the system has a 10 ms period. Establish a hardware-specific budget for sensor acquisition, estimation, inference, supervision, and command transport. Initial engineering objective: p99.9 policy-path completion below 8 ms under representative load, with remaining margin, and no deadline overruns during a specified qualification run. This is a target to validate, not a hard-real-time proof.
@@ -247,9 +297,27 @@ A system can hold compute duration well inside budget while sensor-to-command ag
 
 The control path MUST NOT perform file reads, network database queries, model downloads, heap allocation after activation, locks with unbounded contention, GPU compilation, logging flushes, or model loading. Tokio or similar asynchronous runtimes may serve orchestration, but not the deadline-critical loop.
 
+No external model service of Section 2.3 and no agent runtime built on one may execute inside a deadline-critical section, in any mode, under any approved exception. Where an agent layer exists at all it runs outside the control process and its output enters only as an expiring advisory record through the same validated queue interface, freshness limit and rejection accounting as any other asynchronous proposal, measured as decision age in the table above. An advisory that has expired is dropped, not held: a stale directive is indistinguishable from a wrong one. Removing the agent layer entirely MUST leave the control loop functionally unchanged, which is the point of row A-24.
+
 Rayon work stealing and general-purpose telemetry subscribers are not presumed suitable for this loop. Use dedicated bounded resources for control and separate pools for rollout/data processing. Capture preallocated timestamp/event records in the loop and construct/export telemetry off-thread; benchmark enabled instrumentation against a disabled baseline.
 
 Use monotonic timestamps, fixed-capacity queues, explicit freshness limits, CPU affinity and scheduling configuration where available, and a watchdog independent of the policy process. Log overflow must never block actuation; emit dropped-record counts. Safety-relevant incidents require a reserved event channel and bounded pre/post-event recording buffer.
+
+### 5.1 Hierarchical decomposition and the latency invariant
+
+The learned stack is hierarchical by construction, and the hierarchy is ordered by deadline rather than by conceptual importance. The governing invariant is that **the lower a component sits, the tighter its latency obligation and the smaller its permitted variability**. A design that places a large or variable-cost network below a small one violates this section regardless of its accuracy.
+
+The following bind every hierarchical policy, including the staged pipeline of Section 9.4 and any router of Section 10:
+
+1. Every learned component MUST be assigned to exactly one tier of the table above, and that assignment MUST be recorded in the policy bundle of Section 7.4 alongside the component's measured compute duration. A component with no declared tier MUST NOT be activated.
+2. Tier rates MUST be non-increasing with height: no component may run faster than a component below it, and the lowest learned tier MUST run at the policy rate or faster. Two tiers MAY share a rate, which is the degenerate case and MUST be recorded as such rather than described as a hierarchy.
+3. Each tier carries its own deadline, its own worst-case budget and its own fallback. A tier MUST remain functional when the tier above it is late, absent or has produced only an expired output; the response to a missing upper-tier decision is the declared hold-or-default behavior of that tier, never an extended deadline below.
+4. Outputs crossing a tier boundary MUST be bounded, validated and timestamped, and consumers MUST reject them on the freshness limit of their own tier. Decision age is attributed to the tier that produced the decision, not to the tier that applied it.
+5. Lower tiers MUST NOT acquire dependencies that upper tiers have: no retrieval query, corpus access, dynamic dispatch, allocation or variable-iteration optimization may be introduced below the tier at which it was qualified. Pushing an expensive mechanism downward is a change to Section 5 and requires the change-control record.
+6. The per-tier budget MUST be measured, not inferred from parameter count. Section 3's correction about sparse activation applies to every tier: a smaller network is a hypothesis about latency until the tail is measured under representative load.
+7. Removing the highest tier MUST leave a controller that is still safe, even if it is no longer tactical. This is the hierarchical form of the removal tests in rows A-24 and A-30, and it is what makes strategic layers optional rather than load-bearing.
+
+The frequency separation is also an evidence boundary. A result obtained with every layer running at one rate does not establish that the same decomposition holds when the strategy layer is slowed to its intended tier, because decision age that was zero in the published setting becomes nonzero here. Any tiered deployment of a method validated at a single rate MUST re-measure task performance at the tier rates actually used.
 
 ## 6. Proposed workspace and component responsibilities
 
@@ -275,8 +343,13 @@ These are planned logical boundaries; they do not describe or depend on existing
 | `robot-artifacts` | Content hashes, manifests, lineage, signing and promotion |
 | `robot-persona` | Optional identity and bounded expressive intent |
 | `robot-cli`, `robot-viewer` | Experiment tooling, inspection, synchronized playback |
+| `robot-devtools` | Development-time automation and the dependency knowledge base of §13.1: descriptor and dataset handling, integration and parsing helpers, test-run orchestration, ledger and inventory bookkeeping. Developer and CI hosts only; never a dependency of any deployable crate |
 
 Training and deployment share observation/action schemas and tested normalization logic. Deployment does not depend on training autograd code. Avoid a plugin design that permits arbitrary dynamic code loading in the control process: build-time Rust implementations are the default, and optional experimental workers run outside that process.
+
+The v3.0 survey proposes an additional `robot-brain` package hosting agent orchestration, opponent memory and operator-facing advisory agents. No such package is created by this revision. Its responsibilities, where they are adopted at all, are an optional out-of-process extension of `robot-persona` and the tooling crates, and they are subject to Section 2.3 in full: feature-gated, absent from the default build, unreachable from `robot-control`, `robot-hardware` and the supervisor, and removable without affecting them. Whether the boundary justifies its own package is open under [C-16](#appendix-c--open-questions-and-unresolved-decisions); a survey's proposed crate name is not an architectural requirement, as already stated for `robot-state`, `robot-ctrl` and `robot-test` in Appendix B.3.
+
+The three admissible uses of Section 2.3.1 attach to this layout as follows: development-time automation (U1) lives in `robot-devtools` and the `devenv` scripts of Section 2.2 and is a `dev-dependency` of nothing that ships; assisted sampling (U2) is an offline producer of configurations consumed by `robot-learn`, `robot-tasks` and `robot-persona`, with no reverse dependency; and the dependency knowledge base (U3) is records in this repository with tooling in `robot-devtools`. A dependency edge from `robot-control`, `robot-hardware`, `robot-skills` or any bundle-producing crate to any of the three is a policy violation, detectable by the exclusion gate of Section 2.1 and asserted by row A-25.
 
 Use Appendix B.3 to select initial dependency candidates for these crate families. Candidate selection does not authorize dependencies that conflict with Section 2.
 
@@ -292,6 +365,8 @@ Each versioned robot profile describes:
 - Sensor frames, timestamps, rates, covariance, calibration and missing-data behavior.
 - Root convention, gravity, contact surfaces, feet and hand geometry, payload and glove changes.
 - Firmware/protocol version, watchdog semantics, command expiration, emergency stop interface, and allowed operating modes.
+
+Every profile MUST carry a `schema_version` and typed, stable IDs for joints, links, actuators and sensors. IDs MUST NOT be reused for a different entity within a profile lineage. The required core schema MUST remain small and explicit; additional declarative metadata belongs in open, namespaced extension tables with declared value types and capability tags. Unknown core fields and unknown extensions MUST be rejected before a profile is activated on a control path. Non-control tooling MUST preserve unknown namespaced extensions without interpreting them when it reads and writes a profile. A capability tag is a claim to validate against the profile's typed fields, not a substitute for them. Schema changes MUST provide explicit migrations, and each migration MUST preserve or report loss of meaning.
 
 URDF import is an initial interchange target, not a complete dynamics specification. Store missing actuator/contact metadata separately. Unsupported model features must be rejected explicitly rather than silently dropped.
 
@@ -322,6 +397,19 @@ Use chunked binary arrays for high-rate numerical data and columnar records for 
 Select IPC and persistent-record encoding separately using Appendix B's serialization candidates. Every wire/archive format requires explicit versioning, size limits, framing, endianness/alignment rules where applicable and validation before access. Serialization is not a transport or a schema-migration strategy. Durable episode records must remain readable across supported software upgrades.
 
 Split datasets by subject, recording session, and original motion before generating windows or augmentations. For competitive learning, separate evaluation opponent pools. Track license eligibility, retention policy, consent where relevant, and dataset revisions.
+
+### 7.6 Experience and replay storage contract
+
+On-policy rollouts and off-policy replay MUST use the same versioned transition and episode schema. A transition MUST identify its episode, timestep, environment and robot-profile version, and contain the observation, action, reward terms, next observation, termination and time-limit-truncation state, validity masks, and any task data required to reproduce reward or goal relabeling. Preserve timestamps, provenance and random-stream identity where they affect the target or replay result. An episode MUST also carry its configuration, seed manifest and completion reason. This schema is distinct from the robot episode record in Section 7.3: a training transition is a typed view of the required training evidence, not a replacement for raw hardware records.
+
+1. Training storage MUST expose bounded chunks in a structure-of-arrays (SoA) layout or an equivalently measured layout; it MUST NOT require materializing the entire corpus or a complete replay buffer as one allocation. The initial in-memory replay implementation SHOULD use preallocated fixed-capacity ring storage with explicit overwrite and generation-ID semantics. On-policy rollout storage MUST report capacity exhaustion rather than silently overwrite samples before the learner consumes them.
+2. Storage and sampling MUST be separate interfaces. A sampler MAY provide uniform, prioritized (including a sum-tree implementation), sequence/window sampling, or goal relabeling such as HER-style relabeling. Sampling returns MUST identify source generations and, where applicable, probabilities and importance weights; stale or overwritten references MUST be rejected.
+3. N-step targets, generalized advantage estimation (GAE), masks and other learner-specific targets MUST be derived views or batches over canonical transitions, not incompatible serialized transition formats. Derived caches MUST identify the source transition generations and computation/configuration version.
+4. Each environment and sampler MUST have an independently recorded seed stream. Replaying the same stored transitions and sampler seed MUST reproduce indices, weights and relabeled goals, subject to explicitly recorded parallel-reduction nondeterminism. Parallel rollout workers MUST have stable environment IDs and independent RNG streams, consistent with Appendix B.2.12.
+5. Persistent chunks MUST use the versioned, bounded encodings of Section 7.5. The in-memory view SHOULD permit zero-copy access where alignment, validation and versioning allow it; zero-copy is not permission to trust unvalidated bytes or to make Rust ABI the durable schema. Migration and malformed-input behavior remain explicit.
+6. Buffer policy, sampler, target/view construction and persistence MUST be independently replaceable. A new algorithm MUST be able to reuse the canonical transition schema without editing the robot model, simulator, or control runtime. These interfaces are training/offline interfaces; they MUST NOT be reachable from the deadline-critical control path.
+7. An algorithm MAY require more than one concurrent store over the same schema — a competitive learner of Section 9.4 maintains both an on-policy rollout buffer and a reservoir-sampled behavior buffer, and a retrieval-augmented learner of Section 9.7 reads a prior corpus alongside the current rollout. Multiple stores MUST therefore be composable without a second transition format: each store declares its retention policy (bounded ring, reservoir, append-only corpus), its admission rule, and whether its contents are drawn from the current policy, a historical policy or an external corpus. Transitions MUST record which policy or corpus produced them and at which generation, because a record whose origin is unknown cannot be used as a behavior target.
+8. Where a transition stores an action in a learned latent space rather than the actuator action space, it MUST record the latent-space identity and version and the decoder artifact required to interpret it. A latent transition is not interchangeable with a joint-space transition, and a buffer MUST reject a mixture unless the schema explicitly carries both.
 
 ## 8. Motion acquisition and retargeting
 
@@ -377,9 +465,25 @@ Domain randomization must be calibrated and sensitivity-driven. Include plausibl
 
 ### 9.3 Algorithm interface
 
-Every algorithm supplies a manifest and implementations for initialization, observation requirements, action contract, experience collection, update, checkpoint, export, and evaluation. Configuration includes compute budget, seeds, prerequisites and expected scientific claim.
+Every algorithm supplies a capability manifest and implementations for initialization, observation requirements, action contract, experience collection, update, checkpoint, export, and evaluation. Configuration includes compute budget, seeds, prerequisites and expected scientific claim. The manifest MUST declare stable method ID and version, supported interfaces/capabilities, observation and action schema versions, required data, feature gate, determinism limits, and artifact compatibility.
 
-Support on-policy rollout buffers initially; add replay only for algorithms that need it. A shared learner interface must not pretend that PPO, offline imitation, supervised distillation, model identification and self-play have identical update semantics.
+The following are separate extension points. An implementation MUST be addable behind the named interface and a Cargo feature without requiring edits to unrelated core crates. The dispatch column states the permitted form; Section 9.6 defines the common requirements.
+
+| Extension point | Contract boundary | Dispatch and scope |
+| --- | --- | --- |
+| Algorithm / learner | Initialization, collection/update semantics, checkpoint and evaluation capabilities declared in the manifest | The learner is offline and MAY use dynamic dispatch; any implementation shared with deployed inference MUST use static dispatch on the control path |
+| Environment and vectorization backend | Reset/step, termination vs truncation, snapshots, stable environment IDs and per-environment RNG | Dynamic dispatch MAY be used offline; never a control-path dependency |
+| Rollout and replay storage | Shared transition/episode schema and bounded storage from Section 7.6 | Dynamic dispatch MAY be used offline; sampler is a separate interface |
+| Policy / model module | Observation/action contract, recurrence, inference state and exportable operator set | Compiled implementation and static dispatch on a control path; offline training MAY compose modules dynamically, but exported actor must satisfy Sections 7.4 and 10.3 |
+| Reward-term registry | Named, versioned reward/cost terms and their logged components | Name-keyed registry built before an offline run; no control-path lookup |
+| Curriculum / randomization provider | Scenario proposals, parameter distributions, bounds and held-out-set exclusions | Name-keyed registry built before an offline run; dynamic dispatch offline only |
+| Evaluation hook | Metrics, fixtures, baselines, statistical report and acceptance-profile reference | Dynamic dispatch MAY be used offline; evaluation cannot modify held-out sets |
+| Export path | Validated conversion from training state to versioned policy artifact and parity checks | Dynamic dispatch MAY be used in tooling; deployed loading follows the fixed, validated bundle contract and Section 5 |
+| Skill-space / latent interface | Encoder, decoder and prior over a learned action space: dimensionality, bounds or manifold constraint, versioned identity, and the decoder artifact a latent transition depends on | Offline composition is free; a deployed decoder is a tier of Section 5.1 with static dispatch and the exportable operator set of Sections 7.4 and 10.3 |
+| Opponent and population provider | Which policies an agent trains against: latest snapshot, sampled historical population, learned average policy, scripted opponent or held-out evaluation pool | Name-keyed registry built before an offline run; the held-out pool is defined independently of the provider, per Sections 9.4 and 9.5 |
+| Experience-retrieval provider | Query construction, similarity metric, retrieval unit, admission filter and the provenance labels written onto retrieved data | Offline and between-episode only; never a control-path dependency, and subject to the tier rules of Section 10.6 |
+
+Support on-policy rollout buffers initially; add replay only for algorithms that need it, using Section 7.6. A shared learner interface MUST NOT pretend that PPO, offline imitation, supervised distillation, model identification and self-play have identical update semantics. A name-keyed registry MAY select among implementations already linked into the offline executable, but it MUST be constructed once before work begins and MUST NOT support register/unregister or lookup from a control tick. This is build-time composition, not dynamic code loading; Section 6's prohibition remains binding.
 
 Research intake workflow: verify source → extract executable assumptions → implement minimal Rust baseline → reproduce a small benchmark → compare fixed budgets → promote or reject with evidence. Pin paper versions and commits. Imported mathematical ideas must have ablation tests and separate feature flags.
 
@@ -391,9 +495,89 @@ After tracking works, compare:
 - A latent-conditioned tracker with learned encoder/prior and distillation losses.
 - A bank of specialized compact experts with shared observation/action contracts.
 
-Use the verified RoboStriker methodology, if available, as one candidate for latent competitive learning. Do not fix a 32-dimensional unit sphere, exact control frequency, or a particular self-play algorithm solely from the conversation.
+#### 9.4.1 The staged latent pipeline
 
-Boxing self-play requires robust hit attribution, contact filtering, target zones, stance/fall rules, episode termination, ring boundaries and task-specific force/energy budgets. Validate scoring against scripted scenarios before optimizing it. Maintain historical opponent snapshots, varied scripted opponents, held-out evaluation opponents and anti-cycling measurements. Victories against the latest self are insufficient evidence of progress.
+RoboStriker (arXiv:2601.22517) is `paper_verified` as of 2026-10-26 and is adopted as the **reference decomposition** for latent competitive learning, not as a result this project has reproduced. The method it describes, and which Section 9.4.2 turns into requirements, proceeds in stages that are separately trainable and separately falsifiable:
+
+| Stage | What is learned | Why it is a separate stage |
+| --- | --- | --- |
+| 1. Motion tracker | A single-agent policy tracking retargeted capture references from proprioception, a short reference window and the previous action, trained with weighted exponential tracking terms, regularization and early termination | Produces physically consistent motor competence before any task or opponent exists; failures here are tracking failures, not strategy failures |
+| 2. Latent skill distillation | A student encoder, decoder and state-conditioned prior distilled from the frozen tracker, with the latent distribution constrained to a bounded manifold and regularized toward the prior | Converts a reference-driven tracker into a sampleable action space; the prior is what later keeps a strategy inside physically plausible regions |
+| 3. Behavioral warm-up | A latent-space policy driven by goal-oriented, ego-centric task observations against a passive or scripted target, with a motion-prior style term alongside the task reward | Overcomes reward sparsity before a reactive opponent exists; the published ablation that skipped it collapsed |
+| 4. Competitive co-evolution | Self-play in the latent space with opponent averaging: a best-response learner and a supervised average policy over a reservoir of the agent's own historical best-response behavior, mixed by an anticipatory parameter | Opponent averaging is what addresses strategy cycling; self-play directly in the actuator action space was the weakest published variant |
+
+The transferable claims are the ordering and the separation of concerns: skills before tactics, a bounded action space before competition, a scripted target before a reactive one, and averaged opponents before a claim of progress. The specific values the paper reports — a 32-dimensional unit hypersphere, a 50 Hz policy rate, a 29-degree-of-freedom robot, the reward weights and the reservoir capacity — are conditions of that experiment, not settings this project inherits. They were obtained in a foreign simulator excluded by Section 2, on one embodiment, with no inspected source release.
+
+#### 9.4.2 Requirements for a staged latent pipeline
+
+1. Stages MUST be separately trainable, separately checkpointed and separately evaluated. Each stage declares what it consumes, what artifact it produces and the measurement that qualifies it. A later stage MUST NOT be used to excuse an unqualified earlier one: a tracker that does not track is not repaired by competition.
+2. Each stage MUST be a distinct capability manifest under Section 9.3, behind its own feature flag. Deleting the competitive stage MUST leave a usable tracker, and deleting the latent stage MUST leave the conditioned-tracker alternative of the comparison above buildable.
+3. A learned latent action space MUST declare its dimensionality, its bound or manifold constraint, its versioned identity and the decoder artifact that interprets it, per Section 7.6 item 8 and the skill-space extension point of Section 9.3. The dimensionality and the constraint are measured choices from the ablation required below, never copied from a paper.
+4. A prior or divergence penalty that keeps a strategy near the distilled manifold is a **training constraint**. It MUST NOT be recorded as a hazard control under Section 12.2, and the supervisor of Section 12.1 MUST remain independent of it. Section 3 already states that a bounded latent bounds a representation and not a contact force.
+5. A style or motion-prior term, including an adversarial discriminator reward, is likewise a style objective. It MAY be used to keep behavior near the capture distribution; it MUST be logged as a separate reward component per Section 9.2, and a report MUST NOT present a style score as evidence of feasibility, stability or safety.
+6. Competitive training MUST maintain, at minimum, the current policy, a historical opponent population and a held-out evaluation pool, through the opponent-provider extension point. The held-out pool MUST be defined independently of the training opponent distribution, as Section 9.5 item 3 already requires of proposed distributions.
+7. An opponent-averaging mechanism — a learned average policy over a reservoir of historical best responses, uniform sampling from a snapshot population, or an equivalent — MUST be implemented and MUST be ablated against naive latest-snapshot self-play. Anti-cycling is a claim that requires the comparison, not an architecture diagram.
+8. The reservoir or population store is a store over the canonical schema of Section 7.6, not a private format. Its retention rule, capacity, admission probability and seed stream are recorded, and a run that cannot reproduce its sampled population is not reproducible.
+9. The staged pipeline MUST satisfy Section 5.1 when deployed. The strategy layer runs at the tactical tier and the decoder at the policy tier or faster; where an experiment runs both at one rate, that is recorded and the tiered configuration is re-measured before any hardware claim.
+10. The required comparison is against the two non-latent alternatives listed at the head of this section, at equal budget, reporting task outcome, physical stability and command smoothness separately. A latent pipeline that wins only on the tactical metric has not justified its additional stages.
+
+Boxing self-play requires robust hit attribution, contact filtering, target zones, stance/fall rules, episode termination, ring boundaries and task-specific force/energy budgets. Validate scoring against scripted scenarios before optimizing it. Maintain historical opponent snapshots, varied scripted opponents, held-out evaluation opponents and anti-cycling measurements. Victories against the latest self are insufficient evidence of progress. Contact-derived rewards and terminal outcome conditions are scoring definitions under Section 12.2's energy budget, and the budget is enforced outside the policy that is rewarded by it.
+
+### 9.5 Assisted sampling in policy design
+
+Policy quality depends on what is sampled: which priors are tried, which curricula and randomization ranges are explored, which scenarios and opponents are held out, and which expressive variations are offered to Section 12.5. Proposing candidates for those sets is the second admissible use of an agent layer (U2 of Section 2.3.1). It is offline design assistance, operating between experiments on a developer host, and the following are binding:
+
+1. Assisted sampling MAY propose candidate priors, curricula, randomization ranges, scenario and opponent variations, reward-term candidates and expressive style variations. It MUST NOT select among them, score them, weight them or tune a threshold. Selection is the measurement defined by Sections 9.2, 9.4, 10.5 and 14, unchanged.
+2. A proposal is admitted only through the algorithm interface of Section 9.3: a manifest, an ablation and a separate feature flag, with the expected claim stated before the run. An imported idea whose only support is that a model suggested it has evidence state `unverified` and licenses nothing, per Section 3.
+3. Proposals MUST NOT be allowed to narrow the held-out set. Evaluation seeds, held-out disturbances and held-out opponents are defined independently of whatever proposed the training distribution; otherwise the generator and the examiner are the same process.
+4. Every accepted proposal records its origin — tool, model identity and version, request parameters, date — in the run record of Section 13, and a model change demotes the claims resting on it per Section 3. The accepted proposal itself, once reproduced in our code and measured, stands on that measurement rather than on its origin.
+5. Assisted sampling runs only offline. It is not a training-time component, not a reward term, and not a runtime sampler inside a policy. Nothing in the deployed bundle of Section 7.4 may call it.
+6. Negative results are retained. A proposal set that produced no measured improvement is recorded as such, so the same suggestions are not re-sampled indefinitely.
+
+Durable orchestration of long training campaigns — resumable runs, parked approvals, event replay — belongs to the same offline class, under the experimental-status restriction of Appendix B.2.13 and the promotion procedure of Section 11.1: a tool that records an approval does not grant it.
+
+### 9.6 Extensibility requirements
+
+The interfaces in Section 9.3 and the data contract in Section 7.6 exist to make methodology replaceable without turning the learner or deployed controller into a plugin host. The following requirements apply to every extension:
+
+1. Public extension traits MUST evolve additively. A new optional capability MUST use a new subtrait, adapter, or method with a safe default; it MUST NOT add a new required method to an existing implementor-facing trait or silently change established semantics. Breaking changes require an explicit schema/API version and migration plan.
+2. Every implementation MUST publish a machine-readable capability manifest with a unique stable name, implementation/schema versions, supported observation/action/data contracts, declared limits, and feature gate. Capability names MUST be validated for uniqueness before a run starts. Cargo features select code at build time; they MUST NOT enable loading executable code at runtime.
+3. Each optional algorithm or methodology MUST have its own feature flag. The default feature set remains the qualified baseline, and disabling an extension MUST leave the baseline buildable and its applicable acceptance rows closable.
+4. Generic parameters or closed enums SHOULD be preferred where the concrete implementation is known at build time, particularly for bounded or deadline-critical paths. Trait objects and name-keyed registries MAY be used for offline experiment composition only. A registry is constructed once at process startup from linked implementations; it MUST NOT mutate during a run. No registry lookup, dynamic dispatch, or deserialization of tagged trait objects is permitted inside a deadline-critical path.
+5. Every extension implementation MUST pass the common conformance suite before it is enabled in an experiment: schema/capability validation; termination and truncation semantics; deterministic fixture and seed handling; checkpoint/resume; malformed-input and failure behavior; and, where export is claimed, training/inference parity and artifact validation. Tests MUST include at least one negative case and be independent of implementation-specific expected outputs.
+6. A feature-removal test MUST demonstrate that disabling or removing an optional method does not break the baseline learner, shared data schema, or deployable controller. An extension test MUST demonstrate that a conforming implementation can be added without edits to the control loop or unrelated core crates.
+
+Registry implementations and other dependency candidates are listed in Appendix B and remain subject to B.6. Appendix D explains the Rust mechanisms and their limits; it does not approve a dependency or relax Sections 2, 5 or 6.
+
+### 9.7 Retrieval-augmented policy learning
+
+Retrieval-augmented policy learning addresses the data problem directly: when the target behavior has only a handful of demonstrations or real episodes, a retriever selects the most relevant fragments of a large prior corpus and those fragments join the training set. The published few-shot results in this family — sub-trajectory retrieval matched by subsequence alignment over foundation-model embeddings, behavior- and flow-similarity retrieval, and experience retrieval for adaptation — share one structure and one caveat. The structure is query, corpus, retrieval unit, admission filter, and a learner that trains on the union of target data and retrieved data. The caveat is that this is **offline data selection**, and Section 3 forbids reporting it as a runtime capability.
+
+This section governs retrieval that produces *training data*. Retrieval that produces a *runtime decision* is the policy bank of Section 10, and the two MUST NOT be described as one mechanism or share a measurement.
+
+#### 9.7.1 Contract
+
+A retrieval-augmented method is admitted through the experience-retrieval provider of Section 9.3 and MUST declare each of the following in its manifest:
+
+| Element | Requirement |
+| --- | --- |
+| Corpus | The exact dataset revisions, their licenses under Section 7.5 and their embodiment provenance. A corpus assembled from robots other than the target is a cross-embodiment claim under Section 11.1 |
+| Query | What is matched: a target demonstration, a sub-trajectory, a goal, a state window or a task descriptor; and the observation fields it may legally read |
+| Retrieval unit | The granularity returned — full episode, fixed window, aligned sub-trajectory or single transition — recorded as a view over the canonical schema of Section 7.6, never as a new format |
+| Similarity | The metric, the embedding or feature source, its version, and whether alignment is exact, approximate or time-warped. Semantic similarity is not physical compatibility; Section 10.1's distinction applies here too |
+| Admission filter | The feasibility, embodiment-compatibility and license checks a retrieved fragment passes before it may enter a batch |
+| Mixing | How retrieved and target data are weighted or scheduled in the update, and what the learner does when retrieval returns nothing |
+
+#### 9.7.2 Requirements
+
+1. Retrieval MUST run offline or between episodes. No corpus query, index lookup or embedding computation may occur on the control path, under Section 5 and the tiers of Section 10.6.
+2. Every retrieved transition MUST be labeled with its source corpus, source episode, embodiment and retrieval generation, per Section 7.6 item 7. A batch whose composition cannot be reconstructed is not a reproducible experiment, and a result that cannot name what it trained on is not a result.
+3. The retriever MUST NOT be allowed to reach held-out data. Evaluation episodes, held-out disturbances, held-out opponents and the validation session of Section 11.3 MUST be excluded from the corpus by construction and the exclusion MUST be tested, not asserted. A retriever that can reach the test set is the Section 9.5 item 3 failure in a new form.
+4. A retrieval-augmented result MUST be compared against the same learner trained on the target data alone and against the same learner trained on the whole corpus, at equal update budget. Without both, an improvement cannot be attributed to selection rather than to data volume.
+5. Retrieval quality MUST be reported separately from task outcome: how many fragments were retrieved, how many the admission filter rejected and why, the corpus coverage actually used, and the sensitivity of the outcome to the number retrieved. A single success rate hides a retriever that is doing nothing.
+6. Embedding models used to build a corpus index are offline artifacts subject to Sections 2 and 2.3. A hosted embedding service is an external model service; an index built with one records the model identity and version, and a model change demotes dependent claims under Section 3.
+7. Exact search over the corpus is the default implementation, per Appendix B.2.5. Approximate indexing is adopted only after the crossover measurement, and recall loss MUST be reported as a property of the training set it selected, not hidden in a build step.
+8. The retriever MUST be removable. Disabling the feature leaves the baseline learner, the shared schema and the applicable acceptance rows unchanged, which is row A-30 applied to this extension point.
 
 ## 10. Retrieval-indexed policy bank and low latency
 
@@ -404,6 +588,8 @@ Semantic similarity organizes intent: “jab”, “retreat”, “guard”, “
 The retriever therefore produces candidate skills; a state-conditioned feasibility filter and fast router select executable candidates. Text embeddings may be computed offline with a Rust model. Start with structured skill tags and numerical features, and add learned embeddings only when they improve a measured outcome.
 
 For small libraries, benchmark exact vector search in Rust before adopting approximate nearest-neighbor indexing. A remote vector database is not part of the control path.
+
+A skill MAY additionally carry a human-readable descriptor — capabilities, preconditions, failure modes and counter-indications as Markdown — indexed at build or load time and matched lexically. Such a descriptor is documentation and operator-facing catalog, and its indexing involves no model call; it is data under Section 2's opening paragraph, not code. It MAY contribute a routing signal that composes with the numerical retrieval of Section 10.2, and it MUST NOT replace it or relax any feasibility check: prose asserting that a skill is applicable is not a statement about joint velocity, support or reach. The descriptor's authoritative fields remain the typed ones of Section 10.2, and a disagreement between the two is a defect in the descriptor.
 
 ### 10.2 Skill descriptor and execution state
 
@@ -428,6 +614,25 @@ Do not assume weighted averaging of motor commands is safe. Blending requires ex
 Compare dense, conditioned, retrieval-only, learned-router and hybrid designs at equal hardware and training budgets. Report repertoire coverage, task success, transition failures, disturbance recovery, active parameters, resident memory, energy where measurable, latency tails and decision age. Measure retrieval amortization and cold-cache behavior explicitly.
 
 Parallel expert training is useful but not necessarily independent: shared transitions, normalization, training distributions and safety assumptions couple the experts. Running several experts simultaneously may increase single-step latency on small devices.
+
+### 10.6 Retrieval tiers and deadline attribution
+
+"Retrieval" names three different operations in this project, at three different costs. They MUST be distinguished in design, in configuration and in every report, because the published latency numbers for one say nothing about another.
+
+| Tier | Operation | Where it runs | Binding constraint |
+| --- | --- | --- | --- |
+| R0 — corpus retrieval | Selecting prior trajectories or sub-trajectories to train on, per Section 9.7 | Offline, on a developer or CI host | No deadline; subject to license, provenance and held-out exclusion rules. Never present in a deployed bundle |
+| R1 — between-episode retrieval | Choosing a working set of experts, an opponent model or an adaptation context before a bout or between rounds | Offline-equivalent, outside the control process | Completes before the mode entry preconditions of Section 4 are satisfied; a failure degrades to the previous working set, never to a late load |
+| R2 — in-loop selection | The skill router and feasibility filter of Sections 10.1 to 10.4 | Inside the control process, at the tactical tier of Section 5.1 | Bounded local computation over resident data only, with stale-output rejection and measured tails; this is the only tier with a deadline |
+
+The following are binding:
+
+1. An R2 lookup MUST operate on a resident, preloaded index. It MUST NOT read a file, query a database, compute an embedding, allocate, or block on a staging operation. Index updates occur at R1 and are published to R2 as generation-tagged immutable handles under Section 10.3.
+2. R2 cost MUST be measured as part of the policy-path compute duration and reported in the tails of Section 5, separately from decision age. An asynchronous retrieval that merely moves work off the control thread converts latency into decision age; Section 3 already records this and the report MUST show both numbers.
+3. A method validated at R0 MUST NOT be promoted to R1 or R2 on the strength of that validation. Each tier requires its own measurement, and moving a mechanism downward is the Section 5.1 item 5 prohibition.
+4. Published inference-latency figures for retrieval-augmented systems are evidence about their setting only. A reported millisecond figure obtained on other hardware, at another rate, with another index size, licenses nothing here; Appendix B.2.5 requires the crossover and worst-observed timing on target hardware.
+5. Caching a previous retrieval result is permitted at R1 and R2 only with an explicit expiry and a recorded decision age. A cache without an expiry is a stale decision with better latency, which is not an improvement.
+6. Every tier MUST have a defined empty-result behavior. R0 falls back to target data alone, R1 retains the current working set, and R2 retains the current controller or invokes the fallback of Section 10.4. No tier may stall a decision while waiting for a retrieval.
 
 ## 11. Transfer and data-efficient improvement
 
@@ -464,8 +669,23 @@ Closed-loop control uses sensor feedback every tick without changing model weigh
 | Simulator correction model | Learn a model explaining real-vs-sim transition mismatch; retrain policy in corrected simulation | Requires well-defined alignment and validation of correction |
 | Bounded robot-side residual | Train correction offline using deployable observations only; constrain authority | Can destabilize the base policy or hide sensor errors |
 | Small adapter fine-tuning | Update selected policy parameters with held-out real-data evaluation | Few parameters do not imply few required samples |
+| Two-phase latent identification (RMA-class) | Phase 1 trains a privileged-conditioned policy in randomized simulation; phase 2 trains a small adaptation module to regress that latent from a recent proprioceptive window, and only the module's output enters the deployed observation | A regressed latent is only as good as the randomization ranges it was fitted over; it reports a plausible context, not a measured parameter, and it fails silently outside them |
+| Simulation-guided fine-tuning | Real-world updates shaped by a value or objective term derived from simulation rather than by unguided real exploration | Requires on-hardware updating, which Section 4 permits only under an explicitly enabled mode; the guiding term inherits every error of the simulator that produced it |
+| Retrieval-conditioned adaptation | Select prior episodes similar to the observed deployment condition, per Section 9.7, and adapt on the union with the few real episodes | Similarity in observation space is not similarity in dynamics; the admission filter, not the metric, is what makes it safe |
+| Cross-embodiment few-shot transfer | Pretrain over several embodiments with morphology conditioning, then adapt to a held-out robot from a small sample | Section 11.1's requirements apply in full; a held-out-robot result is evidence about the pretraining set, and a single target robot is not a transfer claim |
+| Multi-simulator or multi-model randomization | Randomize across distinct dynamics models rather than only over parameters of one | Requires a second qualified simulator, which Section 9.1 does not currently grant; otherwise it is parameter randomization with extra vocabulary |
 
 Implement identification first, then history adaptation; treat residual RL and online weight updates as later experiments. Do not require paired perfect simulated/real state at execution. Do not assume a unique target action correction can be inferred from state error alone.
+
+The rows above are ordered by increasing hardware exposure, and that ordering is binding: a method MUST NOT be scheduled before the methods above it have been measured and found insufficient on the same robot. Each method additionally carries the following obligations.
+
+1. Each adaptation method is an extension under Sections 9.3 and 9.6, with its own manifest, feature flag and conformance run. Adaptation is not a special case exempt from the extension rules.
+2. Every method MUST declare the observation set available at deployment and MUST NOT consume privileged simulator state at inference. This is the existing Section 9.2 audit applied to adapters, and it is the specific defect Section 3 records in the earlier residual sketch.
+3. Any component that runs on the robot — an adaptation module, a context encoder, a residual head — is a tier under Section 5.1 with a declared rate, a measured budget and a defined behavior when its input history is short, stale or discontinuous. An adaptation module that has not yet filled its history window MUST produce the declared default context, not an extrapolation.
+4. Adaptation authority MUST be bounded and the bound enforced outside the adapted component. A learned correction is clamped by the supervisor of Section 12.1 like any other command, and widening a bound to accommodate an adapter is a safety-profile change, not a tuning step.
+5. Every method MUST be evaluated against the frozen pre-adaptation baseline on the held-out session, reporting both improvement and regression, and MUST support rollback to that baseline as an immediately available artifact under Section 13.
+6. Sample-efficiency claims MUST be stated in the units that cost something: real minutes, real episodes, physical interventions and wall-clock downtime. Simulation steps consumed by the method belong in the same report, because a method that needs a week of simulation to save ten minutes of hardware time has moved the cost rather than removed it.
+7. On-hardware weight updates remain a later experiment and require the mode gating of Section 4 plus a separate decision; nothing in this table authorizes continuous learning on a robot.
 
 Use event-triggered logging of uncertainty, slip, saturation, tracking error and contact anomalies, plus representative successful background samples. This avoids retaining every high-rate stream while limiting failure-selection bias. Select calibration motions for information gain subject to the operating envelope. Keep a held-out session for validation and compare learning curves versus real minutes, transitions and interventions.
 
@@ -514,13 +734,43 @@ Personality is optional and operates through bounded intent: posture style, cade
 
 Expression MUST NOT widen any envelope, extend any dwell time against a recovery request, or introduce a motion that has not passed the same validation as a task skill. A celebration is a skill with a transition contract, not an exemption.
 
+Opponent memory, where it is implemented, is a persistent store written between rounds or between bouts and read at strategy rate. Appendix B.2.13 identifies a candidate mechanism — a versioned entity/observation graph — for what Section 3 previously recorded only as an unverified persistent-identity sketch. Any such store is subject to three constraints: its read path MUST NOT depend on network availability or on a hosted backend, so an embedded or local backend is required wherever it is consulted during operation; its contents are an input to strategy, never to the supervisor or the motor loop; and a store that is unavailable, empty or stale MUST degrade to the opponent-agnostic behavior rather than stalling a decision. Retention, consent and deletion obligations for recorded opponent data follow Section 7.5.
+
+Where personality is expressed as a set of style parameters and expressive-skill choices, the candidates for that set MAY be proposed by the offline assisted sampling of Section 9.5. A personality is then a sampled, versioned configuration over already-validated skills, recognizable and testable under the metrics above. It is not a generated behavior: no runtime model call produces posture, cadence, celebration or tactical preference, and a style variation that has not passed the same validation as a task skill is not available to be expressed.
+
+### 12.6 Agent-layer governance
+
+If the optional agent layer of Section 6 is ever enabled, it is governed as a supervised input source and not as a controller:
+
+1. A guardrail, schema validation or audit-logging component MAY be an additional, earlier check on an advisory record. It MUST NOT be described or relied upon as a safety control, and it MUST NOT be placed in the position of the supervisor of Section 12.1, which remains the last stage before the actuator interface and MUST NOT import it.
+2. Under Section 12.2, a hazard whose only control is a model-produced judgment is not controlled. Controls MUST remain independent of the agent layer, exactly as they must remain independent of the learned policy.
+3. Agent-layer outputs that reach an operator — advisories, commentary, speech — MUST be distinguishable in the record from measured state, so that a generated statement is never read back as an observation.
+4. Every agent-layer decision, guardrail intervention and approval gate is a logged artifact under Section 13, with the model identity and version that produced it.
+5. Human approval gates implemented through an agent runtime are a convenience over a procedure, not a substitute for one. Promotion to hardware follows Section 11.1 and Section 14 regardless of which tool records the approval.
+
 ## 13. Reproducibility and operational requirements
 
 Every run records source revision, compiler/toolchain, the `devenv.lock` revision that supplied it, dependency lock, hardware/driver details, seeds, data hashes, robot model, simulator configuration, reward definition and all model versions. A run whose environment cannot be named is not reproducible, whatever else it recorded. Determinism is a documented mode and tolerance, not an assumed property of GPU execution.
 
 Provide restartable training, atomic checkpoints, bounded storage quotas, artifact retention, structured metrics and replayable failure episodes. Production bundles are immutable. Promotion includes compatibility validation, evaluation report and an immediately available last-known-good artifact.
 
-Treat downloaded datasets and model files as untrusted input: enforce size limits, reject malformed dimensions, fuzz parsers and verify checksums. Restrict command-network access and authenticate remote control where the transport allows it. This is operational integrity, not a dependency on a cloud control plane.
+Treat downloaded datasets and model files as untrusted input: enforce size limits, reject malformed dimensions, fuzz parsers and verify checksums. Restrict command-network access and authenticate remote control where the transport allows it. This is operational integrity, not a dependency on a cloud control plane. A response from an external model service of Section 2.3 is untrusted input of the same kind and is validated before use.
+
+A hosted model is not reproducible by recording its name. Where any part of a reported result passed through an external model service, the record MUST name the provider, model identifier, version or snapshot, request parameters and date, and MUST state that the result is not replayable if the provider does not guarantee a pinned snapshot. A durable event log produced by an agent runtime is an operational record, and it becomes a reproducibility artifact only once that runtime itself is out of experimental status and qualified under Appendix B.6.
+
+### 13.1 Low-level dependency knowledge base
+
+A humanoid fails at its lowest layers: a firmware revision, a bus timing parameter, a driver quirk, an actuator thermal curve, a kernel option, a crate version with a known defect. Diagnosing such a fault by rediscovering the layer each time is the normal and the expensive outcome. The third admissible use of an agent layer (U3 of Section 2.3.1) is to help assemble and maintain a **dependency knowledge base**: a project-owned, versioned record of every low-level dependency the system relies on, so that a hardware fault is resolved against maintained project knowledge rather than against a search engine.
+
+The knowledge base is an artifact of this project, not a service. The following are binding:
+
+1. Scope is the full low-level inventory: Rust dependencies and their native linkage, the OS, kernel options, drivers and firmware of Section 2's platform class, bus and transport parameters, actuator and sensor interface documents, and the per-robot profile versions they apply to. The inventory required by Section 2 and Appendix B.6 item 1 is its primary key, so an entry cannot exist for something the dependency audit does not know about.
+2. Every entry MUST be **cited and attributed**: source document, version and date, who or what added it, and the evidence state of each claim under Section 3. An uncited entry is a note, and a note MUST NOT be read as a specification.
+3. The knowledge base MUST NOT be cited as evidence in a release report, and it MUST NOT be the control for any hazard under Section 12.2. It shortens diagnosis; it does not close an acceptance row. A claim that matters is promoted through Section 3 against the primary source, and the knowledge-base entry then references the ledger rather than substituting for it.
+4. Entries MUST be invalidated by version change. A firmware, driver, crate or robot-profile change marks every dependent entry stale, exactly as it demotes a claim under Section 3. A stale entry is visibly stale, not silently wrong.
+5. The knowledge base MUST be readable and usable without any model service: it is text and structured records under version control in this repository, indexed locally. Assisted retrieval or assisted drafting over it is a convenience under U1, subject to Section 2.3 in full, and its unavailability degrades to reading the records directly.
+6. Fault records close the loop: a diagnosed hardware fault produces an entry naming the symptom, the measurement that identified the layer, the resolution and the dependency version it applies to, linked to the episode records and incident channel of Section 5. This is what makes the base a project asset rather than a collected reading list.
+7. The knowledge base is operational knowledge and MAY contain supplier or robot-specific material; its retention and distribution follow Section 7.5 and the licensing decision of [C-13](#appendix-c--open-questions-and-unresolved-decisions).
 
 ## 14. Acceptance and evaluation matrix
 
@@ -550,6 +800,19 @@ Each row states the evidence that closes it and the section that defines the req
 | A-20 | Hardware | §4, §12 | Mode-gated progression, watchdog and emergency-stop checks; no simulation-only result labeled hardware validation |
 | A-21 | Boxing | §9.4, §12.2 | Scoring validated independently; held-out opponents and disturbance scenarios; contact tests follow noncontact qualification |
 | A-22 | Environment reproducibility | §2.2, §13 | Clean-checkout `devenv shell` bootstrap and `devenv test` pass at the committed `devenv.lock`; every reported result names that revision; the default environment contains no excluded runtime |
+| A-23 | Agent-layer qualification, if adopted | §2.3, §6, §12.6, B.6 | Only the per-crate qualified, non-model subset enters the build at a pinned version; experimental crates carry no production duty; advisory records are schema-validated, expiring and rejected when stale, with rejection counts reported; no agent component is reachable from the control path or the supervisor |
+| A-24 | Offline degradation | §2.3, §12.6 | With every external-model-service feature disabled, the full autonomous control loop, safety envelope and all applicable rows of this matrix pass unchanged; each dependent capability either continues or fails safe with the service unreachable |
+| A-25 | Development-time automation hygiene | §2.3.1, §2.2 | Automation runs only on developer and CI hosts inside the locked environment, never on a robot host; every generated artifact that entered the repository is attributable and passed the same review, schema validation and CI gate as authored work; removing the automation leaves every deliverable buildable and every row of this matrix closable |
+| A-26 | Assisted sampling discipline | §9.3, §9.5 | Each accepted proposal has a manifest, an ablation and a prespecified claim; held-out seeds, disturbances and opponents were defined independently of the proposal source; proposal origin and model version are recorded, and negative results are retained |
+| A-27 | Dependency knowledge base | §13.1, B.6 | Every low-level dependency in the Section 2 inventory has an entry with citation, version and evidence state; version changes mark dependent entries stale; the base is readable with no model service available; closed hardware faults have fault records linked to their episode records; no acceptance row or hazard control cites the base as its evidence |
+| A-28 | RL extension conformance | §9.3, §9.6 | Every enabled learner, environment, storage/sampler, policy/model, reward, curriculum, evaluation and export implementation passes the shared conformance suite, including schema/capability validation, deterministic fixtures, checkpoint/resume, malformed-input behavior and applicable export parity |
+| A-29 | Experience and replay storage | §7.3, §7.5, §7.6 | On-policy and off-policy paths consume the same versioned transition/episode schema; chunk bounds, ring wrap/overwrite, stale-generation rejection, sampler probabilities/weights, target views, migrations and seeded replay are tested on representative data |
+| A-30 | Extension and removal isolation | §6, §9.3, §9.6 | A new conforming method can be added behind its existing interface/feature without edits to unrelated core crates or the control loop; disabling/removing it leaves the baseline build, shared schemas and applicable controller acceptance rows unchanged |
+| A-31 | Robot profile extensibility | §7.1, §7.5 | Typed stable IDs, namespaced extension tables, capability validation, unknown-field rejection on activation, tooling round-trip preservation and version-to-version migrations are tested with valid, unknown and malformed profile fixtures |
+| A-32 | Hierarchical latency tiers | §5.1, §7.4 | Every learned component declares a tier; tier rates are non-increasing with height; per-tier compute duration, deadline margin and decision age are measured separately under representative load; each tier's behavior with a late, absent or expired upper-tier output is tested; removing the highest tier leaves a safe controller |
+| A-33 | Staged latent pipeline | §9.4, §5.1 | Each stage is separately checkpointed and separately qualified; the latent space declares dimensionality, bound and decoder identity; the style and prior terms are logged as separate components and cited as no hazard control; opponent averaging is ablated against latest-snapshot self-play on held-out opponents; the pipeline is compared at equal budget against the conditioned tracker and the expert bank |
+| A-34 | Retrieval-augmented learning | §9.7, §7.6 | Corpus revisions, licenses, retrieval unit and similarity version are recorded; every retrieved transition carries its provenance; held-out exclusion from the corpus is tested rather than asserted; the method is compared against target-only and whole-corpus training at equal update budget; retrieval and admission-rejection counts are reported; disabling the retriever leaves the baseline unchanged |
+| A-35 | Retrieval tier discipline | §10.6, §5 | R0, R1 and R2 are separately configured and separately measured; no R2 path performs file, network, embedding or allocation work; R2 cost appears in the policy-path tails and decision age is reported alongside it; each tier's empty-result behavior and cache expiry are exercised |
 
 Numeric physical thresholds depend on robot mass, reach, actuator specifications, sensing and task constraints. Set them in a versioned acceptance profile before evaluating a candidate; do not tune thresholds after observing the result. Use multiple seeds and confidence intervals for stochastic outcomes, and include negative results.
 
@@ -557,7 +820,7 @@ An acceptance profile is itself an artifact and MUST record: the robot profile a
 
 ## 15. Explicit non-goals for the first release
 
-The first release does not promise universal zero-shot robot control, production autonomous boxing, full video-to-motion reconstruction, an unverified Rust GPU simulator, arbitrary online policy learning on hardware, a language model in the servo loop, or reproduction of every named paper. It delivers the contracts and measured foundations needed to add those capabilities deliberately.
+The first release does not promise universal zero-shot robot control, production autonomous boxing, full video-to-motion reconstruction, an unverified Rust GPU simulator, arbitrary online policy learning on hardware, a language model in the servo loop, an agent-orchestrated strategy, personality or operations layer, a robot-hosted agent runtime, an agent-selected action or an agent-owned safety or promotion gate, durable agent-run training campaigns, or reproduction of every named paper. It delivers the contracts and measured foundations needed to add those capabilities deliberately. Development-time automation, offline sampling assistance and the dependency knowledge base of Section 2.3.1 are tooling rather than release capabilities: no release claim rests on them, and none of them is a promise of this release either.
 
 ## Appendix A — Terminology, units and conventions
 
@@ -567,8 +830,11 @@ This appendix is definitional. It creates no requirements, but a term used in Se
 
 | Term | Expansion | Note in this document |
 | --- | --- | --- |
+| A2A | Agent-to-agent protocol | Inter-agent transport named in B.2.13; orchestration only, never a control transport |
 | ABA | Articulated-body algorithm | Forward-dynamics method |
+| ADK | Agent Development Kit | Ambiguous: at least three unrelated projects use the name. Never write "ADK" unqualified; name the project and crate per B.2.13 |
 | AMASS | Archive of Motion Capture as Surface Shapes | Corpus aggregating source datasets with independent licenses |
+| AMP | Adversarial motion prior | A discriminator-based style objective per §9.4; a style term, never a feasibility or safety constraint |
 | ANN | Approximate nearest neighbor | Search method, never "artificial neural network" here |
 | BVH | Biovision Hierarchy | Text skeletal motion format; first-release input |
 | C3D | Coordinate 3D | Binary marker/analog biomechanics format |
@@ -581,16 +847,20 @@ This appendix is definitional. It creates no requirements, but a term used in Se
 | HNSW | Hierarchical navigable small world | ANN index structure |
 | IMU | Inertial measurement unit | |
 | IPC | Inter-process communication | |
+| MARL | Multi-agent reinforcement learning | The class containing the self-play of §9.4 |
 | MCAP | Message capture container format | Distinct from Rerun's RRD |
 | MPC | Model-predictive control | Baseline or correction, not an adaptation algorithm |
 | MPPI / CEM | Model-predictive path integral / cross-entropy method | Sampling-based control |
+| NFSP / LS-NFSP | Neural fictitious self-play / its latent-space variant | Opponent-averaging self-play; LS-NFSP is the RoboStriker variant described in §9.4.1 |
 | OOD | Out of distribution | |
 | PD | Proportional-derivative control | Baseline controller |
 | PHC | Perpetual Humanoid Control | See the correction in §3 |
 | PPO | Proximal policy optimization | Authored baseline learner |
 | QP / SQP | Quadratic program / sequential quadratic programming | |
+| RMA | Rapid motor adaptation | The two-phase latent identification row of §11.3 |
 | RNEA | Recursive Newton-Euler algorithm | Inverse-dynamics method |
 | RRD | Rerun recording format | Viewer artifact, never the canonical record |
+| S-DTW | Subsequence dynamic time warping | Candidate alignment metric for sub-trajectory retrieval under §9.7 |
 | SMPL | Skinned Multi-Person Linear model | Parametric human-body model family with licensed assets |
 | SRBD | Single rigid-body dynamics | Reduced model for MPC |
 | URDF | Unified Robot Description Format | Interchange input, not a dynamics specification |
@@ -611,6 +881,10 @@ This appendix is definitional. It creates no requirements, but a term used in Se
 | Policy bundle | A deployable, immutable, checksummed artifact per §7.4 |
 | Skill | A named behavior with an initiation set, termination condition and transition contracts per §10.2 |
 | Expert | A model implementing one or more skills, interchangeable only where schemas and contracts match |
+| Tier | One level of the hierarchical decomposition of §5.1, defined by its rate, deadline, budget and fallback. Lower tiers have tighter deadlines; the assignment is recorded, not implied by a diagram |
+| Latent action space | A learned, bounded action space produced by the distillation stage of §9.4, identified by version and inseparable from the decoder artifact that interprets it |
+| Corpus retrieval (R0), between-episode retrieval (R1), in-loop selection (R2) | The three retrieval tiers of §10.6. Only R2 has a deadline, and evidence does not transfer between them |
+| Prior corpus | A dataset of prior trajectories available to the retrieval-augmented learning of §9.7, distinct from the target data and from any held-out set |
 | Transition contract | The explicit statement of which states permit a switch and how recurrent state is reset or transformed |
 | Initiation set | The set of states in which a skill may legally begin |
 | Operating envelope | The physical limits a robot is permitted to operate within for a given mode, enforced by the supervisor |
@@ -620,6 +894,14 @@ This appendix is definitional. It creates no requirements, but a term used in Se
 | Shadow mode | Computing commands from live sensors with the transmit path disabled and the disable verified, per §4 |
 | Locked environment | The toolchain, native inputs and development tools resolved by the committed `devenv.lock`, per §2.2. "Locally" is not an environment |
 | Default environment | The devenv environment entered by `devenv shell` with no profile selection, from which Section 2's excluded runtimes are absent and the §2.1 exclusion gate runs |
+| External model service | A dependency class under §2.3: Rust-authored, linking no foreign binary, whose advertised capability is produced by a hosted inference endpoint reached over the network. Rust-native in language, foreign in behavior |
+| Agent layer | The optional, out-of-process, feature-gated orchestration described in §6 and §12.6. It proposes; it never commands |
+| Advisory record | A validated, timestamped, expiring proposal emitted by the agent layer. Dropped when stale; never a motor command, never a safety control |
+| Offline degradation | Required behavior of a capability when its external model service is disabled or unreachable: continue in reduced form or fail safe, per row A-24, never stall a decision |
+| Skill descriptor | The human-readable Markdown catalog entry of §10.1. Data, not code; a routing signal, never a feasibility check |
+| Development-time automation | Use U1 of §2.3.1: tooling on developer and CI hosts only, whose output passes the same gates as authored work and whose removal changes no deliverable |
+| Assisted sampling | Use U2 of §2.3.1 and §9.5: offline proposal of design candidates. It proposes a candidate set; measurement selects from it |
+| Dependency knowledge base | Use U3 of §2.3.1 and §13.1: the project-owned, cited, version-invalidated record of low-level dependencies used when diagnosing faults. Not evidence under §3 and not a hazard control |
 
 ### A.3 Units, frames and timing conventions
 
@@ -629,11 +911,11 @@ The canonical coordinate frame, gravity direction, root convention and quaternio
 
 Time is monotonic within a process and stored as explicit nanosecond integers with a named clock. Wall-clock mapping is recorded separately where correlation with external systems is required. A timestamp field MUST declare whether it is a sampling instant or an arrival time, per Section 5.
 
-## Appendix B — Rust Ecosystem Survey and Dependency Qualification (Revised v2.0)
+## Appendix B — Rust Ecosystem Survey and Dependency Qualification (Revised v3.0)
 
 ### B.1 Provenance, maturity and corrections
 
-This appendix supersedes the previous survey integration with the user-supplied revised v2.0, adding optimization, state estimation, observability, testing, serialization and parallelism. Its reported versions, maintenance status, paper references, performance figures and inspection claims have not been independently checked for this document. All incoming entries start at `unverified` under Section 3 until a primary-source record establishes a higher evidence state. In particular, the supplied `paper_verified` label for HULKs and `code_inspected` label for Burn are not inherited automatically. The register retains local subsection numbering for existing references; the new capability inventories follow B.2.7.
+This appendix supersedes the previous survey integration with the user-supplied revised v3.0, which retains the v2.0 content and adds agent orchestration, session and memory stores, markdown skill indexing, inter-agent transport and guardrail tooling. Its reported versions, maintenance status, paper references, performance figures and inspection claims have not been independently checked for this document. All incoming entries start at `unverified` under Section 3 until a primary-source record establishes a higher evidence state. In particular, the supplied `paper_verified` label for HULKs and `code_inspected` label for Burn are not inherited automatically, and the v3.0 agent-layer entries of B.2.13 are `unverified` without exception. The register retains local subsection numbering for existing references; the v3.0 agent inventory is B.2.13.
 
 Maturity is assessed per capability and enabled backend, not simply per project. Record release history, maintainers, issue response, tests, deployment evidence, license and dependency closure. Distinguish an established general-purpose library from a qualified humanoid-control implementation. Stars, downloads and project benchmarks do not replace workload testing.
 
@@ -651,6 +933,14 @@ Corrections and qualifications to the supplied survey:
 10. `tracing` is not inherently asynchronous or allocation-free, nor does OpenTelemetry integration automatically meet control deadlines. A subscriber/exporter can add blocking or allocating work.
 11. Zero-copy archives do not imply stable Rust ABI, validated input or automatic schema evolution. Cap'n Proto and Protobuf generators may require external tools; generated Rust alone does not settle the full toolchain audit.
 12. The specification has no “no hand-derived gradients” principle. Estimator feature lists and const generics do not establish numerical accuracy or reduced runtime overhead. A blanket “divergence < 0.1%” is undefined without a metric and reference.
+13. “ADK” identifies at least three unrelated projects: Google's Agent Development Kit, this survey's `adk-rust` by zavora-ai, and `rust-adk` by Yougigun. A citation naming only “ADK” supports nothing. Every reference MUST name the owning project and the exact crate, and registry ownership MUST be confirmed before any dependency line is written, because a plausible crate name is a supply-chain surface and not an identity.
+14. A pure-Rust agent framework that calls a hosted model is Rust-native in language only. The survey's own “zero Python” framing describes the client, not the capability: the behavior lives on a third party's server, is not pinned by `Cargo.lock`, and may change without notice. This is the external-model-service class of Section 2.3, not the Rust-native class.
+15. Self-reported “experimental” status is a disqualification for production duty, not a caveat. Where the survey assigns an experimental crate a role such as hardware-safety guardrails, that assignment is rejected outright; see also correction 17. Experimental components may be used for offline tooling only.
+16. Reported interface counts — numbers of agent types, tools, memory backends or protocol features — are inventory, not capability. None of them evidences latency, failure behavior under an unreachable endpoint, or correctness of a single decision.
+17. A guardrail, policy filter or audit log in an agent framework is not a safety control under Section 12. It operates on text or structured proposals, carries no authority over actuators, and cannot be credited in a hazard register. The supervisor of Section 12.1 remains the control, and the agent layer's checks are at best an earlier, additional filter per Section 12.6.
+18. “Sub-millisecond” or “microsecond” figures quoted for agent-layer components are not control-path qualifications and MUST NOT be compared with the budgets of Section 5. Any component that may reach the network has unbounded worst-case latency regardless of its median, and an agent layer is excluded from the deadline-critical loop by Section 2.3 rather than admitted on a benchmark.
+19. Markdown descriptors indexed by keyword search are a catalog and a routing signal, never a feasibility check. Prose asserting that a skill applies is not a statement about joint velocity, support polygon or reach, and MUST NOT relax the compatibility filter of Section 10. Lexical search quality also degrades with vocabulary drift, so descriptor conventions must be fixed before the index is relied upon.
+20. A graph memory with temporal versioning records what was believed and when; it does not make the belief true. Opponent-model entries are evidence-bearing records under Section 3 with their own provenance, and a store that is unavailable or stale MUST degrade to opponent-agnostic behavior per Section 12.5. Its read path MUST NOT require a network service or a hosted backend.
 
 Maintain Section 3's evidence states. Record cross-engine agreement as an evaluation result attached to a simulator reproduction; do not introduce an incomparable promotion level called `cross_sim_agreement`.
 
@@ -679,6 +969,8 @@ The survey reports Burn features including `flex`, multiple GPU backends and fas
 | `rl_traits` | Environment/agent interfaces with reported terminated/truncated distinction | Audit semantics before adopting traits or documenting divergence |
 
 Retain the authored PPO baseline. Audit GAE, truncation bootstrapping, action log probabilities, entropy, clipping, advantage normalization, optimizer state and checkpoint behavior. Compare small deterministic fixtures and learning curves; matching seeds alone does not guarantee matching training across implementations.
+
+No surveyed Rust crate provides the multi-agent, opponent-averaging or distillation machinery that Section 9.4 requires, and none provides the retrieval-augmented data selection of Section 9.7. Those are authored work over the extension points of Section 9.3 and the storage contract of Section 7.6: a supervised average-policy learner, a reservoir store, an opponent/population provider and a retrieval provider. Treat the reference crates above as sources of interface semantics for the single-agent case only; a trait set that has no notion of an opponent or of a population generation is not evidence that one is unnecessary.
 
 #### B.2.3 Physics and robotics mathematics
 
@@ -714,8 +1006,12 @@ BVH remains the first-release input. SMPL support must separately specify parame
 | Rust exact vector search | Simple measurable baseline | Default; benchmark scalar/SIMD implementation, metric and dimensions |
 | `instant-distance` | Pure-Rust HNSW candidate; maintenance unverified | Qualify only when measured library scale justifies approximate search |
 | `usearch`, `faiss` Rust interfaces | Bindings over foreign implementations | Excluded from default build despite Rust APIs |
+| Authored sequence alignment for sub-trajectory retrieval | No qualified Rust implementation of subsequence dynamic time warping identified for this use | Authored candidate for the offline retrieval unit of §9.7; benchmark cost against corpus size and window length, and test the degenerate and tied-cost cases before trusting an alignment |
+| Embedding sources for a retrieval index | Structured skill tags and numerical features first, per §10.1; a learned or foundation-model embedding is a separate, versioned artifact | A hosted embedding endpoint is an external model service under §2.3 and is excluded from the default build; a locally executed Rust model is qualified like any other §2 dependency |
 
 Measure the exact/approximate crossover on target hardware. Include search recall, filtering, index build/update cost, resident memory, serialization and worst observed timing. A fast neighbor lookup that returns infeasible skills does not satisfy the routing contract.
+
+The three retrieval tiers of Section 10.6 are qualified separately. A candidate measured for offline corpus selection is not thereby qualified for the in-loop router, and an index structure that is acceptable at R0 may be inadmissible at R2 because it allocates, memory-maps a file or rebuilds incrementally.
 
 #### B.2.6 Robot frameworks and transport
 
@@ -818,31 +1114,70 @@ Use bounded dedicated worker pools, per-environment RNG streams and stable envir
 
 `glam`, additionally named by the v2.0 survey, is a graphics/vector-math candidate for tools; avoid introducing duplicate physics/frame conventions alongside nalgebra without a measured benefit and tested conversions.
 
+#### B.2.13 Agent orchestration and model-backed tooling
+
+Added by the v3.0 survey. Every entry here is `unverified`, and the class distinction of Section 2.3 applies per crate: a crate that reaches a hosted endpoint is an external model service, while a session store, index or transport is an ordinary Rust-native candidate qualified on its own merits. Nothing in this subsection is scheduled, and nothing here may appear in a default build. Each candidate below is additionally read against the three admissible uses of Section 2.3.1 — development-time automation (U1), offline sampling assistance (U2), dependency knowledge base (U3) — and a candidate that serves none of them is reference-only regardless of its qualification state.
+
+| Candidate | Survey-reported scope | Class and qualification decision |
+| --- | --- | --- |
+| Agent and runner core, reported as `adk-agent` and `adk-runner` (zavora-ai `adk-rust`) | Agent runtime: sequential, parallel, loop and conditional workflow agents; tool invocation; typed tool interfaces | External model service wherever a model call is involved. Confirm project and crate ownership per correction 13 before any dependency line; no control-path use under any circumstance |
+| Model-provider clients in the same family | Clients for several hosted model providers | External model service. Default-off feature, offline-degradation test required, provider/model/version recorded per Section 13 |
+| Session and durable event store, with SQLite or server-backed options | Session lifecycle, durable event log, resumable runs | Rust-native candidate; qualify the chosen backend, schema evolution, growth bounds and crash recovery. An operational log, not a reproducibility artifact until the runtime itself is qualified |
+| Markdown skill indexing, reported as `adk-skill` | Build/load-time indexing of Markdown capability descriptors, lexical matching | Rust-native candidate; the descriptor tier of Section 10.1. Routing signal only, never a feasibility check, per correction 19 |
+| Graph memory with temporal versioning | Entity/observation graph, bi-temporal history, several storage backends | Rust-native candidate for the opponent memory of Section 12.5, provided an embedded local backend is qualified. Network-dependent read path is excluded per correction 20 |
+| Agent-to-agent transport | Inter-agent messaging and discovery | Rust-native candidate for orchestration only; it is not a robot control transport and is not compared against Section 5 budgets |
+| Guardrail, policy-filter and audit components | Input/output filtering, policy checks, audit logging | Rust-native candidate for tooling. Explicitly **not** a safety control per correction 17 and Section 12.6; any survey assignment of hardware-safety duty is rejected |
+| Telemetry component, reported as `adk-telemetry` | Agent-run instrumentation | Rust-native candidate, qualified under B.2.10 like any other subscriber; keep construction and export off any control thread |
+| Components the survey labels experimental, including its managed-run and enterprise crates | Durable managed runs, enterprise features | Offline tooling only; no production duty per correction 15, including the durable-run log the survey cites for training campaigns |
+| A local model-serving path, authored on the Burn shortlist or a qualified Rust inference crate | The substitution that would remove the external-model-service class entirely | Rust-native, and the only route by which a model-dependent capability could ever reach a default build. Unscoped; see B.5 item 10 |
+
+Before any part of this family is adopted, three things must hold: the crate identity and ownership are confirmed from the registry; the non-model subset is separable, so that the useful stores and indexes can be taken without the model client; and a named local-inference substitution path exists for each model-dependent capability per Section 2.3 item 4. A reported ability to swap model providers is not a substitution path, because every option in the list is still a hosted endpoint.
+
+The survey's eight integration proposals — including agent-run training campaigns, markdown skill catalogs, opponent-memory graphs, multi-agent commentary and operator advisories — are ideas to evaluate individually against Section 14, not a roadmap. Their adoption status is open under [C-15](#appendix-c--open-questions-and-unresolved-decisions).
+
+#### B.2.14 Extensible Rust interfaces and replay storage
+
+The mechanisms below are candidates for implementing Sections 7.1, 7.6, 9.3 and 9.6, not requirements to adopt a crate. Qualify any selected dependency under B.6 and keep registration, dynamic dispatch and deserialization outside the deadline-critical path.
+
+| Mechanism | Candidate use | Qualification boundary |
+| --- | --- | --- |
+| Generics and monomorphization | Static dispatch for concrete learner, model and storage implementations | Preferred where bounded execution or control-path use matters; measure code size and compile-time costs when many combinations are instantiated |
+| Closed enums with `enum_dispatch` | A finite, build-known set of implementations behind a trait-shaped API | Compare with a hand-authored enum; implementations are closed at build time and no dynamic plugins are implied |
+| `inventory` or `linkme` | Build-linked name/capability catalog for offline method discovery | `inventory` registrations use constructor-based initialization; `linkme` collects const static entries into linker sections. Verify target/linker support, startup behavior and failure modes; neither is a runtime code loader |
+| `typetag` with `inventory`, and `erased-serde` | Offline serialization of heterogeneous trait objects where a closed schema cannot use an enum | `typetag` relies on `inventory`/constructors and builds a tag-to-deserializer map on first trait-object deserialization; erased serialization does not provide schema evolution. Exclude from control-path configuration, policy bundles and replay records unless separately encoded by explicit versioned schemas |
+| SoA or tiled AoSoA chunks | Batch-friendly transition and rollout layout | Treat layout as an authored data-model choice; benchmark fields, batch sizes, vectorization, memory use and indexed sampling before choosing SoA over AoS/AoSoA |
+| Fixed-capacity ring buffers | Bounded in-memory replay or rollout storage | Decide overwrite/full behavior, generation IDs, wraparound, sampling access and snapshot semantics. A FIFO/SPSC queue is not automatically a random-access replay buffer |
+
+Primary mechanism documentation: [Rust generics](https://doc.rust-lang.org/book/ch10-01-syntax.html), [`enum_dispatch`](https://docs.rs/enum_dispatch), [`inventory`](https://docs.rs/inventory), [`linkme`](https://docs.rs/linkme), [`typetag`](https://docs.rs/typetag), [`erased-serde`](https://docs.rs/erased-serde), and the [`ringbuffer` crate](https://docs.rs/ringbuffer). These links establish mechanism descriptions only; they do not establish suitability, maintenance, license, platform support or performance for this project.
+
 ### B.3 Concrete workspace anchors
 
 | Crate family | Initial shortlist / authored work |
 | --- | --- |
-| `robot-types` | Typed units/frames/time; evaluate a units crate such as `uom` |
-| `robot-model` | `urdf-rs` plus authored semantic validation and actuator metadata |
+| `robot-types` | Typed units/frames/time and versioned observation/action/transition schemas; evaluate a units crate such as `uom` |
+| `robot-model` | `urdf-rs` plus authored semantic validation, stable typed IDs, namespaced profile extensions and actuator metadata |
 | `motion-io` | BVH candidates, `c3dio`; qualified or authored numeric human-body format support |
 | `motion-retarget` | nalgebra, qualified Jacobians and constrained solver; authored task mapping |
 | `robot-sim` | Rapier existing multibody/contact path first; compare verified alternative modules |
-| `robot-learn` | Burn shortlist, authored PPO, audited RL references |
-| `robot-skills` | Exact Rust search; `instant-distance` only after crossover measurement |
+| `robot-learn` | Burn shortlist, authored PPO, capability manifests and additive extension traits; audited RL references |
+| `robot-skills` | Exact Rust search; `instant-distance` only after crossover measurement; the R0/R1/R2 tiers of §10.6 kept as separate, separately qualified code paths |
 | `robot-hardware` | Protocol-specific Rust adapters; qualify `roslibrust`/Zenoh if interoperability is needed |
 | `robot-control` | Authored deterministic runtime; compare HULKs/Copper patterns and qualified IPC |
 | `robot-adapt` | Authored identification baseline; investigate verified dynamics-gradient modules |
 | `robot-viewer` | Rerun or egui; `urdf-viz` for model inspection |
-| `robot-artifacts` | Rust columnar/binary tooling; canonical schemas separate from visualization formats |
+| `robot-artifacts` | Rust columnar/binary tooling; canonical schemas separate from visualization formats; versioned episode and replay chunks |
 | `robot-perception` estimation module | Qualify multicalc/numeris/typed_kalman/kfilter or authored estimator against the same fixtures |
 | `motion-retarget`, `robot-control` optimization modules | Clarabel and other verified Rust solver candidates; qualified MPC/WBC modules where justified |
 | `robot-eval`, parser test targets | Rust property/mutation/fault harnesses; optional foreign-engine fuzzing only after separate exception |
 | Orchestration telemetry | tracing; optional off-thread OpenTelemetry and metrics exporter |
 | Offline rollout/data workers | Rayon/custom pools and bounded Crossbeam primitives where needed |
+| `robot-learn`, `robot-artifacts` | Authored sampler/storage traits, SoA or measured chunk layouts, bounded ring storage; qualify registry/dispatch crates only for offline composition |
+| Optional agent layer, if adopted | Per-crate qualified non-model components from B.2.13, default-off and out of process; no model client in any default build |
+| `robot-devtools` and the knowledge base of §13.1 | Authored Rust tooling over version-controlled records; local lexical and exact search first per B.2.5; optional assisted drafting or retrieval strictly under §2.3. Developer and CI hosts only |
 
 These anchors are a shortlist, not permission to add every library. Prefer the smallest qualified dependency set.
 
-The survey's proposed `robot-state`, `robot-ctrl` and `robot-test` names map to the existing estimation, control and evaluation boundaries above. Extract new crates only if ownership or dependency isolation warrants it; do not maintain duplicate responsibilities.
+The survey's proposed `robot-state`, `robot-ctrl` and `robot-test` names map to the existing estimation, control and evaluation boundaries above. Extract new crates only if ownership or dependency isolation warrants it; do not maintain duplicate responsibilities. The v3.0 survey's proposed `robot-brain` is treated the same way: its responsibilities attach to `robot-persona` and the tooling crates per Section 6, and whether it becomes a package is open under [C-16](#appendix-c--open-questions-and-unresolved-decisions).
 
 ### B.4 Simulator and adaptation qualification
 
@@ -865,8 +1200,11 @@ The survey's proposed `robot-state`, `robot-ctrl` and `robot-test` names map to 
 7. **Estimator validation:** define the floating-base sensor model and qualification fixtures before adopting broad filter suites.
 8. **Wire/archive contracts:** benchmark versioned bounded encodings and migration behavior; author application schemas regardless of serializer choice.
 9. **Robustness and observability:** build parser/property/fault harnesses and nonblocking instrumentation with a Rust-compatible toolchain.
+10. **Local inference, if the agent layer is ever wanted:** the real gap behind every v3.0 proposal is a qualified Rust local-inference path, not a client for a hosted endpoint. Scope it against the Burn shortlist of B.2.1 before scheduling any model-dependent capability. Lowest priority; it blocks nothing in the baseline.
 
-The survey's claimed absences become verification tasks, not automatic instructions to rewrite large subsystems.
+11. **Low-level dependency knowledge, as a maintained artifact:** the inventory required by B.6 item 1 exists per candidate but is not yet a maintained, cited, version-invalidated base usable during a hardware fault, per Section 13.1. The gap is curation and tooling discipline, not a missing library; a dependency a fault traces to is a dependency whose interface documents, firmware revisions and known defects should already be recorded. Medium priority once hardware work begins, and it does not depend on any agent capability.
+
+The survey's claimed absences become verification tasks, not automatic instructions to rewrite large subsystems. A newly surveyed capability does not change this priority order: the baseline of items 1 to 4 is unaffected by the existence of an agent framework.
 
 ### B.6 Gates for dependency promotion
 
@@ -880,6 +1218,9 @@ For each selected candidate:
 6. Record fallback/replacement cost and ownership if maintenance stops.
 7. Promote only the qualified modules/backends; retain untested features as experimental.
 8. Compare the previous baseline or credible alternative at a fixed workload/budget; where no alternative exists, record authorship and maintenance cost estimates.
+9. For a candidate in the external-model-service class of Section 2.3, additionally: confirm registry ownership of the exact crate; demonstrate that the feature is absent from the default dependency closure; record provider, model identifier, version and request parameters; test the unreachable-endpoint, timeout, truncated-response and malformed-response paths; and show the offline-degradation behavior required by row A-24. A gate passed against one hosted model does not carry to another model or to a changed snapshot.
+
+10. For a candidate used only as development-time automation under use U1 of Section 2.3.1, gates 3 to 5 apply to the artifacts it produces rather than to a runtime path, and two additional conditions hold: it MUST NOT appear as a dependency of any crate that ships, and the work it automates MUST remain performable without it at a recorded cost. A tool whose absence blocks the build is not tooling, it is a dependency, and it is gated as one.
 
 A failed gate leaves the candidate reference-only. Update the gap register and plan rather than assuming the dependency is usable. No claim in this appendix constitutes permission for foreign-runtime exceptions or confirmation of hardware validation.
 
@@ -899,6 +1240,17 @@ Likelihood and impact are project-specific assessments to make after qualificati
 | QP/MPC misses deadline or is infeasible | Tail measurements, solver statuses, residual failures | Bound iterations, simplify qualified task and invoke validated fallback; do not assume analytic IK preserves constraints |
 | Telemetry changes control behavior | Enabled/disabled timing divergence, full queues | Bounded event capture, drop counters and isolated exporters |
 | Archive/wire incompatibility or malformed data | Upgrade replay failures, invalid archived pointers/dimensions | Versioned envelopes, validation, migration fixtures and input limits |
+| Hosted model changes or is withdrawn | Behavior drift with no code or lockfile change; endpoint deprecation | Keep every model-dependent capability default-off and offline-degradable; demote dependent claims on model change per §3; prefer a local-inference path before scheduling the capability |
+| Agent layer acquires implicit authority | An advisory becomes load-bearing; a guardrail is cited in a hazard register | Supervisor independence tests, §12.6, and the A-24 removal test as a standing check |
+| Dependency confusion on an ambiguously named agent crate | A plausible crate name resolves to an unrelated or hostile package | Confirm registry ownership before the dependency line, pin exact versions, and audit the closure per B.6 item 1 |
+| Single-maintainer agent framework stalls or churns | Concentrated commit history and frequent breaking releases reported by the survey; wide API surface | Keep every use optional and behind our own traits; pin exact versions; prefer the thin components whose authored replacement is bounded and whose cost is recorded under B.6 item 6 |
+| Generated development artifact enters the repository unreviewed | A commit no author can explain; a test passing against generated expectations | U1 output passes the same review and CI gate as authored work, is attributable per Section 2.3.1 item 5, and never generates both an implementation and the test that accepts it |
+| Assisted sampling narrows its own evaluation | Improvements that do not reproduce on held-out seeds, disturbances or opponents | Held-out sets defined independently of the proposal source, per Section 9.5 item 3; ablation and prespecified claim per Section 9.3 |
+| A retrieval corpus overlaps the evaluation set | Few-shot improvements that vanish on a genuinely unseen session; suspiciously exact retrieved matches | Construct the corpus by exclusion and test the exclusion, per Section 9.7 item 3; record provenance on every retrieved transition |
+| A hierarchy is claimed but every layer runs at one rate | Identical configured rates across tiers; decision age reported as zero | Section 5.1 item 2 requires the degenerate case to be recorded as such, and item 1 requires a declared tier per component |
+| An upper tier becomes load-bearing for safety | A fall or envelope violation when the strategy layer is late or disabled | Per-tier fallback testing under row A-32 and the highest-tier removal test of Section 5.1 item 7 |
+| A training constraint is cited as a safety control | A latent prior, style discriminator or manifold bound appearing in a hazard register | Section 9.4.2 items 4 and 5 forbid it; Section 12.2 already requires controls independent of the learned component |
+| Knowledge-base entry drifts from the dependency it describes | A fault diagnosed against a stale firmware or driver note; confident wrong answers during an incident | Version-keyed invalidation per Section 13.1 item 4, mandatory citation, and the prohibition on citing the base as evidence or as a hazard control |
 
 ## Appendix C — Open questions and unresolved decisions
 
@@ -906,7 +1258,7 @@ This specification deliberately leaves decisions open rather than inventing defa
 
 | ID | Question | Blocks | Resolution mechanism | Interim position |
 | --- | --- | --- | --- | --- |
-| C-01 | What happens to the existing Python `training/` and `unitree/` code? | §1.1; any claim that the repository satisfies §2 | Migration decision record | Retained as prior art and protocol reference; excluded from build, CI and all deployable paths |
+| C-01 | What happens to the existing Python `training/` and `unitree/` code? | §1.1; any claim that the repository satisfies §2 | Migration decision record | **Resolved 2026-10-26.** Removed from the working tree; retained in version control as cited prior art and protocol reference, and excluded from build, CI and all deployable paths. Reintroduction requires a §2.1 exception |
 | C-02 | Which reference robot model, and which first hardware target? | Simulator qualification, joint-level training, every numeric threshold, the per-robot safety profile | Decision record after availability is known | Hardware-agnostic APIs proceed; a documented reference embodiment is used for simulation |
 | C-03 | Can the Rust-only physics and autodiff stack meet humanoid contact and throughput requirements? | R0 feasibility, the scale of authored work, any GPU physics commitment | `PLAN.md` Phase 0 exit gate; B.4 | Assumed insufficient until measured; authored work is scoped only against demonstrated gaps |
 | C-04 | Canonical frames, gravity direction, root convention, quaternion ordering and timing model | Every schema in §7, every transform, all fixture data | Decision record; recorded into A.3 | No project-wide convention may be assumed; transforms name their frames explicitly |
@@ -920,5 +1272,41 @@ This specification deliberately leaves decisions open rather than inventing defa
 | C-12 | Is GPU batched simulation required, and who authors it? | Training budgets, Phase 3 scope | Measured CPU throughput first, then a costed proposal | Not assumed from GPU neural-network support |
 | C-13 | License and redistribution terms for this project's own outputs | Publication of bundles, datasets and reports | Decision record | Unresolved; no external distribution until it is |
 | C-14 | Which Rust toolchain input and host platforms does the locked devenv environment support, and does CI run devenv natively or in an image built from the same lock? | §2.2 onboarding, the A-22 row, the benchmark-host decision in C-08, and the change-record obligation for this §2/§14 revision | Decision record after the environment is bootstrapped and exercised in `PLAN.md` Phase 0–1 | nixpkgs-pinned stable Rust through `devenv.yaml` inputs; Linux x86_64 is the only host assumed exercised; macOS and WSL2 are unverified |
+| C-15 | Does this project adopt any agent-layer capability at all, and if so which of the v3.0 proposals, under what offline-degradation and local-inference commitment? | §2.3, §6, §12.6, B.2.13, rows A-23 and A-24, and the change-record obligation for this §2/§5/§12/§14 revision | Decision record after the non-model subset is separately qualified under B.6 and a local-inference path is costed per B.5 item 10 | None adopted and none scheduled; every component stays default-off, out of process and removable, and the baseline of Phases 0–4 proceeds without it |
+| C-16 | Is a separate `robot-brain` package justified, or do agent responsibilities stay inside `robot-persona` and the tooling crates? | §6 workspace layout, B.3 anchors | Decision record, only after C-15 resolves to adopt something | No package is created; the survey's crate name is not an architectural requirement |
+| C-17 | What are the retention, consent and deletion terms for persistent opponent-memory records, and which embedded local backend holds them? | §12.5, §7.5, B.2.13 graph-memory row | Decision record alongside the data-handling terms of C-13 | No persistent opponent record is retained beyond a session; no hosted backend is permitted on any read path |
+| C-18 | Which of the three admissible uses of §2.3.1 — U1 development-time automation, U2 offline sampling assistance, U3 dependency knowledge base — is actually enabled, with which crates and under whose review? | §2.3.1, §9.5, §13.1, rows A-25 to A-27, and the change-record obligation for this §2/§12/§13/§14 revision | Three separate decision records, one per use; a single combined "adopt the framework" record is not accepted | None enabled. U1 and U3 are the cheapest and least coupled and are the expected first candidates; U2 is admissible but idle until there is a baseline to improve on |
+| C-19 | What is the required scope, owner and update cadence of the dependency knowledge base, and does it live in this repository or alongside the evidence ledger? | §13.1, row A-27, the fault-record loop with §5 incident recording | Decision record once the first hardware target of C-02 is known, because the inventory that matters is that robot's | Version-controlled records in this repository, keyed to the §2 dependency inventory, updated whenever a dependency version or a diagnosed fault changes; no separate service |
+| C-20 | Which static-dispatch, closed-enum or build-linked registry strategy is selected for RL extensions, and which target platforms support it without startup or control-path hazards? | §9.3, §9.6, Appendix D, rows A-28 and A-30, and the change-record obligation for this §14 revision | Decision record after a minimal offline prototype and platform/linker qualification under B.6 | Generic/static dispatch is the default for bounded paths; registry candidates remain offline-only and unselected; no dynamic code loading is permitted |
+| C-21 | Which in-memory and persistent backends implement the shared transition/episode schema, bounded chunks, replay ring and sampler interfaces? | §7.6, §9.3, B.2.14, rows A-28 and A-29, and the change-record obligation for this §7/§14 revision | Decision record after representative workload benchmarks, migration tests and determinism checks under B.6 | Canonical schema and interface boundaries are fixed; an authored preallocated ring and chunked storage are the initial design, but no backend crate or encoding is selected |
+| C-22 | What are the tier assignment, rate and budget for each learned component of the deployed hierarchy, and does the strategy layer survive being slowed from the experiment rate to its intended tier? | §5.1, §9.4, §10.6, rows A-32 and A-33, and the change-record obligation for this §5/§14 revision | Decision record after per-tier measurement on the benchmark host of C-08, once the first embodiment of C-02 is known | Two tiers are assumed — a tactical layer at 10–50 Hz over a policy-rate decoder — but no rate is committed, and a single-rate experiment is recorded as such rather than reported as a hierarchy |
+| C-23 | Which prior corpora are admissible for retrieval-augmented learning, what is the retrieval unit and similarity source, and is an embedding model involved at all? | §9.7, §7.5, §10.6, row A-34, and the license audit of C-07 | Decision record per corpus, after the license audit and a measured comparison against target-only and whole-corpus training | No corpus is assumed usable; structured features and exact search are the default, and no embedding service is adopted |
+| C-24 | Which limited-data adaptation methods beyond identification and history conditioning are actually scheduled, and under which operating mode may any of them update parameters on hardware? | §11.3, §4, row A-17 | Decision record per method, after the preceding rows of the Section 11.3 table have been measured and found insufficient on the target robot | Identification first, then history conditioning; the latent-identification, fine-tuning, retrieval-conditioned and cross-embodiment rows are unscheduled, and no on-hardware weight update is authorized |
 
 A blocked requirement is not a deferred requirement. Where an open question prevents a section from being testable, the corresponding Section 14 row cannot be closed, and a release report MUST say so rather than omitting the row.
+
+## Appendix D — Rust extensibility patterns
+
+This appendix describes implementation choices that may realize Sections 7 and 9. It is advisory: Section 9.6 and the decision records in Appendix C govern, and no pattern below authorizes dynamic code loading or changes the timing rules in Section 5.
+
+### D.1 Dispatch and composition
+
+Rust generics are monomorphized for concrete types and provide compile-time method dispatch. This is the preferred default for a control-path implementation and shared interfaces whose concrete type is known when the executable is built; it trades runtime indirection for compile-time and binary-size growth. Benchmark both effects rather than assuming the resulting binary is smaller or faster.
+
+A closed enum is appropriate when the implementations are known and finite at build time. `enum_dispatch` is a candidate macro to forward a trait-like API across enum variants; compare it with a manually authored enum and keep the set auditable. It is not an open plugin registry.
+
+Trait objects can simplify heterogeneous experiment composition, but their use is limited to offline training, evaluation and tooling. Name-keyed registries may resolve a manifest to an implementation once at process startup from code already linked into that executable. They MUST NOT register or unregister methods during a run and MUST NOT be queried on a control tick. `inventory` distributes registrations from linked crates through constructor-based initialization; `linkme` gathers const static entries into linker sections and therefore depends on supported linker/platform behavior. Qualify initialization, dead-stripping, target support and deterministic duplicate-name rejection before selecting either mechanism.
+
+`typetag` combines trait-object serialization with distributed registration, relying on `inventory` and constructor initialization; it constructs a tag-to-deserializer map on first trait-object deserialization. `erased-serde` supplies object-safe Serde interfaces. These are possible offline interchange mechanisms, not canonical schema or migration systems. Prefer a versioned explicit enum for a stable set of serialized variants, and never deserialize tagged trait objects on a control path or treat one as executable plugin loading.
+
+### D.2 Robot and experience data layout
+
+The robot descriptor and transition schema are authored Rust types independent of the chosen serializer. Stable typed IDs, explicit schema versions, namespaced extensions and migration rules preserve meaning as embodiments and methods grow. Registries describe capabilities; they do not replace validation of typed fields or grant authority to unknown metadata.
+
+SoA chunks place each field in a contiguous column and can make batched sampling and vectorized field access efficient; AoS or tiled AoSoA may be better for other access patterns. Benchmark representative observation/action dimensions, batch sizes, cache behavior, gather cost and memory use before freezing a layout. Keep serialization chunks bounded and versioned as required by Sections 7.5 and 7.6.
+
+A fixed-capacity ring gives bounded memory and predictable overwrite behavior, but the buffer contract must additionally define capacity exhaustion, generation IDs, wraparound and access by sampled transition index. A simple FIFO/SPSC ring is not a complete replay store: prioritized or sequence sampling needs separate index structures, and sampler state/RNG must be checkpointed if exact continuation is required. Keep sampler traits separate from storage so uniform, prioritized, sequence and goal-relabeling methods can evolve without changing the transition format.
+
+### D.3 Qualification references
+
+The mechanism descriptions in Appendix B.2.14 link to the Rust Book and crate documentation for `enum_dispatch`, `inventory`, `linkme`, `typetag`, `erased-serde` and `ringbuffer`. Those references are research starting points, not endorsements. Before adoption, record the exact version, license, platform and linker behavior, feature/dependency closure, startup behavior, benchmark results, schema compatibility and removal cost under Appendix B.6.
