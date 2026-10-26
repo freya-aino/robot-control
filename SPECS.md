@@ -4,7 +4,7 @@ Status: proposed architecture and acceptance contract. Not ratified; no clause b
 
 | Field | Value |
 | --- | --- |
-| Document version | 0.7.1-draft |
+| Document version | 0.7.2-draft |
 | Last revised | 2026-10-26 |
 | Companion documents | `PLAN.md` (phasing, gates, backlog); evidence ledger; decision records; per-robot acceptance and safety profiles; `devenv.nix`, `devenv.yaml` and `devenv.lock` as the executable form of Section 2.2 |
 | Normative scope | Sections 1–15 bind the implementation. Appendix A is definitional, Appendix B is advisory until its gates pass, Appendix C records what is still undecided |
@@ -23,6 +23,7 @@ Status: proposed architecture and acceptance contract. Not ratified; no clause b
 | 0.6.0-draft | Adds extensible robot descriptor and shared experience/replay contracts in Sections 7.1 and 7.6, RL extension points and conformance requirements in Sections 9.3 and 9.6, Rust mechanism candidates in Appendix B, implementation guidance in Appendix D, acceptance rows A-28 to A-31, and open questions C-20 and C-21. Touches Sections 7 and 14, so the change-control rule applies and the decision record is tracked as [C-20](#appendix-c--open-questions-and-unresolved-decisions) and [C-21](#appendix-c--open-questions-and-unresolved-decisions) until written | 2026-10-26 |
 | 0.7.0-draft | Folds the surveyed low-data humanoid learning methods into the existing structure: the hierarchical latency invariant in Section 5.1, the staged latent competitive pipeline of Section 9.4 following the now `paper_verified` RoboStriker method, retrieval-augmented policy learning in Section 9.7, retrieval tiers and deadline attribution in Section 10.6, expanded limited-data adaptation methods in Section 11.3, three further extension points and two storage clauses in Sections 9.3 and 7.6, research-register and Appendix A/B entries, acceptance rows A-32 to A-35, and open questions C-22 to C-24. Touches Sections 5, 7 and 14, so the change-control rule applies and the decision record is tracked as [C-22](#appendix-c--open-questions-and-unresolved-decisions) until written | 2026-10-26 |
 | 0.7.1-draft | Records the removal of the Python prior art from the working tree: Section 1.1 is restated as the disposition of retired assets reachable only in version control, Section 2.2 item 8 points manual comparison runs at a historical commit, and C-01 is resolved with reintroduction routed through the Section 2.1 exception procedure. Touches Sections 1 and 2, so the change-control rule applies and the migration decision record is the resolution of [C-01](#appendix-c--open-questions-and-unresolved-decisions) | 2026-10-26 |
+| 0.7.2-draft | Revises the simulation target, by explicit project direction, to require GPU-bound batched execution, variable fidelity and MuJoCo-caliber fidelity, detailed in a new companion document rather than in this file: `crates/robot-sim/SIMULATION_SPECS.md`. Section 9.1 cross-references it without relaxing the Rust-native requirement; Appendix B.2.1, B.2.3 and B.4 gain cross-references and one new qualification item (B.4 item 8, GPU-vs-CPU-reference agreement before any throughput claim). Does not touch Sections 2, 4, 5, 7, 12 or 14, so the Section-level change-control rule is not triggered; the new open question is tracked as [C-25](#appendix-c--open-questions-and-unresolved-decisions) and the decision itself is `docs/decisions/0005-mujoco-caliber-gpu-batched-simulation-target.md` | 2026-10-26 |
 
 ### Normative language
 
@@ -454,6 +455,8 @@ Qualify the Rust backend on pendulum, actuator step response, static standing, f
 Start with CPU vectorized environments. GPU batching is a separate engineering deliverable and cannot be assumed from GPU neural-network support. Estimate training duration from measured environment steps per second and required experiment sizes before expanding scale.
 
 Qualify Rapier's existing multibody-joint and collision capabilities before proposing a replacement articulation layer. Compare credible alternatives, including ferromotion modules if their reported implementation can be verified, using Appendix B.4. Foreign-engine cross-validation remains optional and requires the separate scope decision in Section 2; this specification does not grant that exception.
+
+The target was revised, by explicit project direction, to require GPU-bound batched execution, variable fidelity as a first-class interface, and fidelity on par with MuJoCo's own engine — specified in detail in `crates/robot-sim/SIMULATION_SPECS.md`, not here, so that the detailed, fast-moving design (batching strategy, solver algorithm, GPU-compute framework choice) does not require a `SPECS.md` revision each time it changes. That document is grounded in direct research against MuJoCo's own source/documentation and the Rust-ecosystem GPU-compute candidates of Appendix B.2.1 (Burn/CubeCL, Candle, and `wgpu` directly), not a restatement of Rapier qualification. It does not grant the MuJoCo-binding exception this section's closing sentence withholds: the Rust-native requirement stands, and MuJoCo's own implementation is a design reference, never a dependency. `docs/decisions/0005` records this as a decision, and C-25 tracks what the GPU-batched simulation specification still leaves open.
 
 ### 9.2 Baseline training
 
@@ -958,6 +961,8 @@ Maintain Section 3's evidence states. Record cross-engine agreement as an evalua
 
 The survey reports Burn features including `flex`, multiple GPU backends and fast incremental compilation. Treat these as version-specific claims to verify, not acceptance evidence. GPU driver dependencies remain external platform dependencies under Section 2.
 
+CubeCL (the GPU-kernel-compute layer Burn is built on) and `wgpu` (the graphics/compute API CubeCL's own GPU backends sit on, also usable standalone via hand-written WGSL) are candidates for `robot-sim`'s GPU-batched physics kernels as well as for `robot-learn`'s neural-network compute — see `crates/robot-sim/SIMULATION_SPECS.md` Section 11.3 for the detailed, source-grounded assessment of both for that specific, non-neural-network use. Qualification for the two roles is not assumed to transfer: a backend qualified for `robot-learn`'s tensor operations is not thereby qualified for `robot-sim`'s kernel-shaped, iterative, tree-recursive workload, and each is gated separately under B.6.
+
 #### B.2.2 Reinforcement learning
 
 | Candidate | Reported capability / maturity | Decision |
@@ -985,6 +990,8 @@ The ferromotion survey reports FK, analytic Jacobians, RNEA, ABA, mass matrices,
 Candidate implementations of IK may use nalgebra, qualified Jacobians and a Rust QP solver. Mink remains a Python/MuJoCo algorithm reference. Select a solver only after testing feasibility detection, constraint accuracy, iteration limits and timing; LM IK and constrained differential-QP IK are not interchangeable.
 
 Do not combine two physics solvers by casually assigning one dynamics and the other contact impulses. Any hybrid must specify state ownership, integration, impulse application and solver coupling, and pass energy/momentum and contact tests. Prefer evaluating complete candidate pipelines first.
+
+`crates/robot-sim/SIMULATION_SPECS.md` specifies the GPU-batched, variable-fidelity, MuJoCo-caliber target this row's qualification work is now measured against, including the batching-strategy choice (one GPU thread per environment, running the existing authored ABA/RNE recursion largely unchanged, rather than restructuring it into per-tree-level batched tensor operations) and why: see that document's Section 11.1. This does not relax the Rust-native requirement above it — MuJoCo itself is a design reference for that document's Sections 4-10, never a dependency.
 
 #### B.2.4 Motion and model formats
 
@@ -1188,6 +1195,7 @@ The survey's proposed `robot-state`, `robot-ctrl` and `robot-test` names map to 
 5. Test snapshot completeness: engine state alone may omit policy recurrence, RNG, sensors, pending commands and task state required for replay.
 6. If foreign cross-validation is separately authorized, compare matched fixtures through a non-default profile and publish divergence. Do not make this unavailable optional engine a prerequisite for default-build progress.
 7. For gradient-based identification, compare derivatives with finite differences on smooth fixtures, document behavior at contact changes and test parameter identifiability. Use held-out trajectories and calibrated torque estimates.
+8. For the GPU-batched backend `crates/robot-sim/SIMULATION_SPECS.md` Section 11 requires: check its output against the CPU reference backend of that document's Section 11.4 on shared fixtures at matched configuration before item 4's throughput measurement is trusted as evidence of anything beyond raw speed. A fast, unverified-for-correctness GPU backend is not a qualified one.
 
 ### B.5 Capability gaps and priority
 
@@ -1282,6 +1290,7 @@ This specification deliberately leaves decisions open rather than inventing defa
 | C-22 | What are the tier assignment, rate and budget for each learned component of the deployed hierarchy, and does the strategy layer survive being slowed from the experiment rate to its intended tier? | §5.1, §9.4, §10.6, rows A-32 and A-33, and the change-record obligation for this §5/§14 revision | Decision record after per-tier measurement on the benchmark host of C-08, once the first embodiment of C-02 is known | Two tiers are assumed — a tactical layer at 10–50 Hz over a policy-rate decoder — but no rate is committed, and a single-rate experiment is recorded as such rather than reported as a hierarchy |
 | C-23 | Which prior corpora are admissible for retrieval-augmented learning, what is the retrieval unit and similarity source, and is an embedding model involved at all? | §9.7, §7.5, §10.6, row A-34, and the license audit of C-07 | Decision record per corpus, after the license audit and a measured comparison against target-only and whole-corpus training | No corpus is assumed usable; structured features and exact search are the default, and no embedding service is adopted |
 | C-24 | Which limited-data adaptation methods beyond identification and history conditioning are actually scheduled, and under which operating mode may any of them update parameters on hardware? | §11.3, §4, row A-17 | Decision record per method, after the preceding rows of the Section 11.3 table have been measured and found insufficient on the target robot | Identification first, then history conditioning; the latent-identification, fine-tuning, retrieval-conditioned and cross-embodiment rows are unscheduled, and no on-hardware weight update is authorized |
+| C-25 | Does the one-GPU-thread-per-environment batching strategy actually outperform the per-tree-level vectorized alternative on our own fixtures; is CubeCL's control-flow performance acceptable for an iterative constraint solver in practice; what are the named fidelity tiers and their per-knob settings; is a `Ball` joint required for the first floating-base milestone or deferrable? | §9.1, `crates/robot-sim/SIMULATION_SPECS.md` Sections 11-12, Appendix B of that document | Working CPU-reference-backend prototype and a first GPU-batched prototype, measured against each other per `SIMULATION_SPECS.md` §14 | One-thread-per-environment is the current default (no Rust-native precedent exists for either strategy applied to a tree-recursive rigid-body solver, per that document's Appendix A); `Free` joint required, `Ball` deferrable; no fidelity tier names are fixed |
 
 A blocked requirement is not a deferred requirement. Where an open question prevents a section from being testable, the corresponding Section 14 row cannot be closed, and a release report MUST say so rather than omitting the row.
 

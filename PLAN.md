@@ -171,6 +171,8 @@ Live optical/inertial capture and video-to-motion inference follow the file-base
 
 ## 6. Phase 3 — Qualified simulation and baseline RL
 
+The simulation target changed, by explicit project direction, partway through this phase: `crates/robot-sim/SIMULATION_SPECS.md` now specifies GPU-bound batched execution, variable fidelity and MuJoCo-caliber fidelity as an authored, Rust-native engine, grounded in direct research against MuJoCo's own source/docs, MJX, Brax, CubeCL and `wgpu`. The work items below (particularly "introduce GPU simulation only through a separately qualified backend" and "cross-validate through MuJoCo bindings only if a separate foreign-dependency scope decision has been made") remain accurate — a GPU backend is still gated the same way, and nothing here grants a MuJoCo-binding exception — but the *default-path* assumption of "qualify Rapier first, author only demonstrated gaps" is superseded for the articulation/contact/GPU-batching subsystem specifically by that document's own Section 11 decision: build the authored, GPU-batched, Rust-native engine directly, informed by MuJoCo's design rather than waiting on Rapier's qualification. `docs/decisions/0005` records this change.
+
 ### Work
 
 - Implement simulator stepping, reset, batched environments and independently seeded randomization.

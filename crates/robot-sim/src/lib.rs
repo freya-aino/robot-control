@@ -1,6 +1,15 @@
 //! Simulation interface, authored articulated physics, batching and
 //! randomization, per SPECS.md Section 9.1.
 //!
+//! **See `SIMULATION_SPECS.md` at the root of this crate for the current
+//! target**: GPU-bound, batched execution across thousands of
+//! environments, variable fidelity as a first-class interface, a
+//! Rust-native GPU-compute path, and a backend-agnostic boundary so
+//! every other crate depends on [`env::Environment`] and never on a
+//! physics-backend-specific type. That document is grounded in direct
+//! research against MuJoCo's own source/docs, MJX, Brax, CubeCL and
+//! `wgpu`, not a restatement of this module's existing scope.
+//!
 //! This revision delivers the two smallest qualification benchmarks Section
 //! 9.1 and Appendix B.4 name first — "pendulum, actuator step response" and
 //! "foot slip, push recovery" — as [`pendulum`] and [`contact`], plus the
