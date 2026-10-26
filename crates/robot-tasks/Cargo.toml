@@ -1,0 +1,17 @@
+[package]
+name = "robot-tasks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Tracking, balance and reference tasks with a versioned reward registry (SPECS.md Section 9.2)"
+
+[dependencies]
+robot-types = { path = "../robot-types" }
+robot-model = { path = "../robot-model" }
+robot-sim = { path = "../robot-sim" }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"

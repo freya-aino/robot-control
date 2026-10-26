@@ -10,6 +10,7 @@ members = [
     "crates/motion-validate",
     "crates/robot-nn",
     "crates/robot-sim",
+    "crates/robot-tasks",
 ]
 
 [workspace.package]
