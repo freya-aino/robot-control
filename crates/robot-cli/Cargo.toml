@@ -1,0 +1,37 @@
+[package]
+name = "robot-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The `robot` command surface of PLAN.md Section 4"
+
+[[bin]]
+name = "robot"
+path = "src/main.rs"
+
+[dependencies]
+robot-types = { path = "../robot-types" }
+robot-artifacts = { path = "../robot-artifacts" }
+robot-model = { path = "../robot-model" }
+motion-io = { path = "../motion-io" }
+motion-process = { path = "../motion-process" }
+motion-retarget = { path = "../motion-retarget" }
+motion-validate = { path = "../motion-validate" }
+robot-nn = { path = "../robot-nn" }
+robot-sim = { path = "../robot-sim" }
+robot-tasks = { path = "../robot-tasks" }
+robot-learn = { path = "../robot-learn" }
+robot-skills = { path = "../robot-skills" }
+robot-adapt = { path = "../robot-adapt" }
+robot-perception = { path = "../robot-perception" }
+robot-supervisor = { path = "../robot-supervisor" }
+robot-hardware = { path = "../robot-hardware" }
+robot-control = { path = "../robot-control" }
+robot-eval = { path = "../robot-eval" }
+robot-persona = { path = "../robot-persona" }
+robot-viewer = { path = "../robot-viewer" }
+
+[lints.rust]
+unsafe_code = "forbid"
