@@ -6,27 +6,44 @@
 //! "foot slip, push recovery" — as [`pendulum`] and [`contact`], plus the
 //! [`env::Environment`] trait and a [`env::PendulumEnv`] that PLAN.md's
 //! first executable backlog item 8 ("Train, checkpoint and reload a tiny
-//! PPO policy in a Rust simulator task") can train against.
+//! PPO policy in a Rust simulator task") can train against. [`spatial`]
+//! and [`articulated`] add an authored multi-body dynamics solver (the
+//! Articulated-Body and Recursive Newton-Euler algorithms) over any
+//! `robot_model::RobotProfile`'s joint tree, including the vendored
+//! Unitree G1 fixture.
 //!
 //! # What this crate does not provide
 //!
-//! There is no multi-body articulated-dynamics engine here. SPECS.md
-//! Section 9.1 requires qualifying Rapier's existing multibody-joint and
-//! collision capabilities, or a verified alternative, before authoring one;
-//! Appendix B.6 admits no candidate until its gates pass
+//! [`articulated::ArticulatedBody`] is **fixed-base**: the profile's root
+//! link is rigidly welded to an inertial world frame, and there is no
+//! ground-contact force resolution. A humanoid cannot yet fall over,
+//! balance, or walk here — only its joints can move under gravity and
+//! applied torque while its base stays put. That is a deliberate,
+//! documented limitation (see [`articulated`]'s own doc comment for why
+//! it is also exactly what an imported `RobotProfile`'s root already
+//! represents, since the URDF importer rejects a `floating` root joint
+//! by name), not an oversight: letting the base itself move freely and
+//! resolving foot contact are the named next increments.
+//!
+//! SPECS.md Section 9.1 separately asks to qualify Rapier's multibody and
+//! collision capabilities, or a verified alternative, before authoring
+//! one; Appendix B.6 admits no candidate until its gates pass
 //! (`docs/decisions/0003-std-only-default-closure.md`), and that
-//! qualification work has not been performed in this revision. A humanoid
-//! with coupled multi-joint dynamics is therefore out of scope here — this
-//! is the honest statement PLAN.md's Phase 0 exit gate requires
-//! ("Simulator throughput and fidelity limitations are documented"), not an
-//! oversight. [`pendulum::Pendulum`] and [`contact::ContactBody`] are
-//! single-body benchmarks, each qualified against an analytic or
-//! energy-conservation reference, exactly as far as that honesty extends.
+//! qualification work has not been performed. [`articulated`] is this
+//! project's established answer to exactly that situation elsewhere —
+//! `robot_types::math`'s authored linear algebra, `motion-retarget`'s
+//! damped-least-squares IK baseline — an authored, independently
+//! validated interim, not a claim that qualification is unnecessary.
+//! [`pendulum::Pendulum`] and [`contact::ContactBody`] remain the
+//! simpler single-body benchmarks they always were, each qualified
+//! against its own analytic or energy-conservation reference.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod articulated;
 pub mod contact;
 pub mod env;
 pub mod pendulum;
+pub mod spatial;
