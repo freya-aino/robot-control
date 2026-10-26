@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "motion-io"
+version = "0.1.0"
+dependencies = [
+ "robot-artifacts",
+ "robot-types",
+]
+
+[[package]]
 name = "robot-artifacts"
 version = "0.1.0"
 dependencies = [
