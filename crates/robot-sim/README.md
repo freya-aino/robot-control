@@ -22,7 +22,7 @@ what it's becoming.
 | `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names |
 | `env` | `Environment` trait (reset/step/seeded randomization) and `PendulumEnv`, a trainable RL environment wrapping `pendulum` |
 | `spatial` | `Twist`/`Wrench` spatial-vector algebra and `SpatialInertia` — the 6D motion/force representation the multi-body solver is built on |
-| `articulated` | `ArticulatedBody`: fixed-base multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, plus `MultibodyState`, a semi-implicit-Euler stepper |
+| `articulated` | `ArticulatedBody`: multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, including a floating base, plus `MultibodyState`, a semi-implicit-Euler stepper |
 
 ## What this crate has and does not yet have
 
@@ -30,15 +30,25 @@ what it's becoming.
 (see their own doc comments and `SIMULATION_SPECS.md` §4 item 1: their
 RNE core was confirmed, by direct comparison against MuJoCo's own source,
 to be the same algorithm MuJoCo's engine runs, gravity-as-fictitious-
-base-acceleration trick and all). What they do not have, named precisely
-rather than left as a vague "no multibody support" claim: a **fixed**
-base only (no floating pelvis — `SIMULATION_SPECS.md` §3 item 1 is the
-tracked gap), **no contact or collision solver at all** beyond the
-separate single-point-mass `contact::ContactBody` benchmark
+base-acceleration trick and all), and it now handles a floating base:
+`robot_model::joint::JointKind::Free` gives a profile's root six
+unconstrained degrees of freedom against an explicit `world` link, and
+`robot_model::fixtures::unitree_g1_29dof_floating_base` is a real G1
+whose pelvis genuinely falls under gravity (`robot sim multibody
+--floating` in `robot-cli` demonstrates it, and
+`the_real_g1_with_a_floating_base_falls_under_gravity` is the test).
+`SIMULATION_SPECS.md` §3 item 1 named this as the single largest
+structural gap against MuJoCo; it is now closed.
+
+What remains missing, named precisely rather than left as a vague "no
+multibody support" claim: **no contact or collision solver at all**
+beyond the separate single-point-mass `contact::ContactBody` benchmark
 (`SIMULATION_SPECS.md` §5-§6), and **no GPU execution path**
-(`SIMULATION_SPECS.md` §11). A humanoid can swing its joints under
-gravity and applied torque here; it cannot fall over, balance, stand or
-walk, and it cannot run as a GPU-batched training environment yet.
+(`SIMULATION_SPECS.md` §11). A humanoid can fall, swing its joints
+under gravity and applied torque, and have external wrenches applied to
+its floating base here; it cannot stand, balance or walk, because
+nothing yet stops it passing through a floor, and it cannot run as a
+GPU-batched training environment yet.
 
 Everything here remains qualified the way SPECS.md §9.1 and Appendix B.4
 ask: against an analytic reference (the pendulum's small-angle period,
@@ -76,18 +86,53 @@ timestep on a system with small distal masses and large effective
 torque ratios — exactly what a wrist is. §4 item 4 requires an
 implicit-in-velocity integrator before any further stability claim.
 
+## The `Free` joint: one general implementation, not two
+
+`ArticulatedBody`'s ABA/RNE are written once, generically over a joint's
+degree-of-freedom count `k` (`Vec<Twist>` motion-subspace bases, `k x k`
+matrix solves via `robot_types::math::Matrix`), rather than a scalar
+fast path plus a separately-maintained multi-DOF path. Every existing
+single-DOF test (the point-mass-pendulum closed form, the double-
+pendulum round-trip, the real fixed-base G1) exercises that same general
+code at `k = 1`, which is why all of them kept passing, unchanged,
+through the `Free`-joint (`k = 6`) generalization — a strong regression
+signal that the generalization didn't silently change the `k = 1`
+behavior, not just a convenient implementation choice.
+
+The `Free` joint itself is validated the same layered way everything
+else in this crate is, starting from the smallest possible fixture (a
+single free-floating body, no children) before the real G1 is ever
+given a floating base: a body at rest with no forces stays at rest; a
+body with no forces translates at exactly constant velocity; a body
+falling under gravity alone matches the *exact discrete* projectile
+formula semi-implicit Euler implies (not the continuous one — see the
+test's own comment for why those differ and which one is the correct
+check); a spinning body with isotropic inertia conserves its angular
+velocity exactly, independent of this crate's own formulas for inertia;
+and RNE/ABA round-trip through each other on a free body at a genuinely
+rotated, non-identity orientation. Every one of these passed on the
+first implementation attempt — a different experience from this
+crate's attitude-filter and IK-solver history elsewhere in this project,
+recorded here because a suspiciously clean first pass is itself a fact
+worth stating, not quietly assumed to mean the tests were too weak
+(they aren't: each is an independent closed form or conservation law,
+not a tautology).
+
 ## Testing
 
-`cargo test -p robot-sim` — 26 tests: the pendulum (analytic period,
+`cargo test -p robot-sim` — 33 tests: the pendulum (analytic period,
 energy bound, monotonic dissipation under damping, gravity-compensated PD
 convergence), the contact body (steady-state penetration depth, energy loss
 on impact, non-reversing friction, push-and-recover), the environment
 wrapper (seeded reproducibility, divergence under different seeds, action
 clamping), the spatial-algebra module (power-invariant duality, a
 transform round-tripping through its own inverse, a hand-derived
-kinetic-energy closed form), and the articulated-dynamics module (ABA
+kinetic-energy closed form), and the articulated-dynamics module: ABA
 and RNE each matching a hand-derived point-mass-pendulum closed form,
-ABA/RNE round-tripping through each other on both a toy double pendulum
-and the real vendored G1, a two-link chain conserving energy over 50,000
-free-motion steps, and the real G1 running 2,000 steps bolted at the
-pelvis without diverging).
+ABA/RNE round-tripping through each other on a toy double pendulum, a
+free-floating body and the real G1 (both fixed- and floating-base), a
+two-link chain conserving energy over 50,000 free-motion steps, the
+`Free`-joint closed-form/conservation checks described above, the real
+G1 running 2,000 steps bolted at the pelvis without diverging, and the
+real G1 with a floating base actually falling — its pelvis height
+strictly decreasing under gravity alone.

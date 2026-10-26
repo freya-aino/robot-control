@@ -41,7 +41,7 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`motion-retarget`](crates/motion-retarget/README.md) | §8.3 | Damped-least-squares task-space IK |
 | [`motion-validate`](crates/motion-validate/README.md) | §8.3 | Retargeting validation reports and acceptance thresholds |
 | [`robot-nn`](crates/robot-nn/README.md) | gap-filling, §9/§10 | A small MLP with zero-allocation inference, kept isolated from training code |
-| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Single-DOF pendulum/point-mass contact benchmarks plus a fixed-base multi-body (ABA/RNE) solver; [`SIMULATION_SPECS.md`](crates/robot-sim/SIMULATION_SPECS.md) specifies the GPU-batched, MuJoCo-caliber target |
+| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Single-DOF pendulum/point-mass contact benchmarks plus a multi-body (ABA/RNE) solver with a floating base; [`SIMULATION_SPECS.md`](crates/robot-sim/SIMULATION_SPECS.md) specifies the GPU-batched, MuJoCo-caliber target |
 | [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Reward registry and a balance/stabilization task |
 | [`robot-learn`](crates/robot-learn/README.md) | §§7.6, 9.2, 9.5 | Backprop, Adam, GAE, a diagonal Gaussian policy, rollout buffers, PPO |
 | [`robot-skills`](crates/robot-skills/README.md) | §10.6 | The three retrieval tiers (R0 exact index, R1 working set, R2 in-loop router) |
@@ -65,18 +65,22 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
   not a known implementation bug. Recorded as an honest negative result per
   `robot-learn`'s README and SPECS.md Section 3's evidence discipline,
   rather than hidden behind a passing-looking assertion.
-- **`robot-sim`'s multi-body solver is fixed-base, CPU-only, with no
-  contact or collision resolver** — a real Articulated-Body/Recursive-
-  Newton-Euler dynamics engine now exists and runs the actual vendored
-  G1 (see `crates/robot-sim/README.md`), but the root link is rigidly
-  welded to world (no floating pelvis), there is no GPU execution path,
-  and ground contact is still only the separate single-point-mass
-  benchmark in `robot_sim::contact`. The target — GPU-bound, batched,
-  variable-fidelity, on par with MuJoCo — is specified in
+- **`robot-sim`'s multi-body solver has a floating base but still no
+  contact or collision resolver, and no GPU execution path** — a real
+  Articulated-Body/Recursive-Newton-Euler dynamics engine now exists,
+  generalized to a `JointKind::Free` floating base (`robot_model`), and
+  the vendored G1 (see `crates/robot-sim/README.md`) genuinely falls
+  under gravity with it (`robot sim multibody --floating`). What's still
+  missing: nothing stops that falling body from passing through a
+  floor — there is no collision geometry and no contact solver — and
+  there is no GPU execution path, so it cannot run as a batched training
+  environment yet. The target — GPU-bound, batched, variable-fidelity,
+  on par with MuJoCo — is specified in
   `crates/robot-sim/SIMULATION_SPECS.md`, grounded in direct research
-  against MuJoCo's own source, MJX, Brax, CubeCL and `wgpu`; none of it
-  is implemented yet. No physics-engine or GPU-compute dependency has
-  passed the qualification gate of Appendix B.6.
+  against MuJoCo's own source, MJX, Brax, CubeCL and `wgpu`; the
+  floating base is the first piece of it actually implemented. No
+  physics-engine or GPU-compute dependency has passed the qualification
+  gate of Appendix B.6.
 - **No GUI/rendering or constrained-QP-solver dependency is qualified**, so
   `robot-viewer` stops at a data layer and `motion-retarget`'s IK is a
   damped-least-squares baseline rather than the QP/whole-body solve SPECS.md

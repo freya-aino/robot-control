@@ -23,16 +23,19 @@
 //!
 //! # What this crate does not provide
 //!
-//! [`articulated::ArticulatedBody`] is **fixed-base**: the profile's root
-//! link is rigidly welded to an inertial world frame, and there is no
-//! ground-contact force resolution. A humanoid cannot yet fall over,
-//! balance, or walk here — only its joints can move under gravity and
-//! applied torque while its base stays put. That is a deliberate,
-//! documented limitation (see [`articulated`]'s own doc comment for why
-//! it is also exactly what an imported `RobotProfile`'s root already
-//! represents, since the URDF importer rejects a `floating` root joint
-//! by name), not an oversight: letting the base itself move freely and
-//! resolving foot contact are the named next increments.
+//! [`articulated::ArticulatedBody`] now handles a floating base too:
+//! `robot_model::joint::JointKind::Free` lets a profile's root attach to
+//! an explicit `world` link with six unconstrained degrees of freedom,
+//! and `robot_model::fixtures::unitree_g1_29dof_floating_base` is a real
+//! floating-base G1 that genuinely falls under gravity (`robot sim
+//! multibody --floating` in `robot-cli` demonstrates it). What is still
+//! missing is **any ground-contact force resolution at all** — nothing
+//! stops that falling body from passing through a floor, because there
+//! is no floor, no collision geometry, and no contact solver yet. A
+//! humanoid can fall here; it cannot stand, balance, or walk, because
+//! nothing yet resists it touching the ground. That is a deliberate,
+//! documented limitation (see [`articulated`]'s own doc comment), not an
+//! oversight — resolving ground contact is the named next increment.
 //!
 //! SPECS.md Section 9.1 separately asks to qualify Rapier's multibody and
 //! collision capabilities, or a verified alternative, before authoring

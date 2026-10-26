@@ -8,7 +8,7 @@ profile of SPECS.md Section 7.1. Depends only on `robot-types`.
 | Module | SPECS.md anchor | Contents |
 | --- | --- | --- |
 | `pose` | — | `RigidPose`: a local, un-named translation+rotation, deliberately distinct from `robot_types::frames::Transform` (see below) |
-| `joint` | §7.1 | `JointKind` (revolute/continuous/prismatic/fixed), `JointLimits`, `JointSpec` with explicit sign/zero-offset conversion |
+| `joint` | §7.1 | `JointKind` (revolute/continuous/prismatic/fixed/free), `JointLimits`, `JointSpec` with explicit sign/zero-offset conversion |
 | `link` | §7.1 | `MassProperties`, `InertiaTensor` with a physical-plausibility check, `CollisionGeometry` (sphere/box/cylinder/mesh-by-reference) |
 | `actuator` | §7.1 | `Transmission`, a two-corner `TorqueSpeedEnvelope`, `PdGains`, a single-pole `ThermalLimits` model |
 | `sensor` | §7.1 | `SensorKind`, `DiagonalCovariance`, `MissingDataBehavior` as an explicit per-sensor declaration |
@@ -75,12 +75,58 @@ No mesh geometry is vendored — the URDF's `.STL` references are kept as
 opaque strings, same as any other imported URDF, since this project has
 neither a renderer nor a mesh-consuming physics engine yet.
 
+`fixtures::unitree_g1_29dof_floating_base()` builds on the same import:
+it adds an explicit, massless `world` link and a `JointKind::Free` joint
+(see below) re-rooting the profile there instead of at `pelvis`, so the
+pelvis gains six unconstrained degrees of freedom against world rather
+than being implicitly fixed. It still only `.validate()`s, for the same
+reason — no cited firmware contract exists either way.
+
+## `JointKind::Free`: the floating base, as a simulation-time construct
+
+`JointKind` gained a fifth variant, `Free` (six degrees of freedom:
+translation plus rotation), specifically to let a profile's root attach
+to an explicit `world` link rather than being implicitly welded to
+whatever frame holds it. It is **never importable from URDF** — the
+importer's rejection of a `floating` joint type by name is unchanged —
+because `crates/robot-sim/SIMULATION_SPECS.md` Section 1.6 treats a
+floating base as a decision the simulation layer makes, not a fact a
+robot's own description file asserts about itself.
+
+A `Free` joint has no single axis and no single scalar value, unlike
+every other kind here, so two things had to change rather than just
+grow a new `match` arm: `JointSpec::validate`'s degenerate-axis check
+now only applies to the three single-axis kinds
+(`JointKind::has_single_axis`), and `JointSpec::transform_at` —
+which takes one `f64` — panics loudly on a `Free` joint rather than
+guessing, with a message pointing at `robot_sim::articulated`'s own,
+richer position representation. `robot_model::kinematics::
+forward_kinematics` is built on `transform_at` and therefore inherits
+that same loud panic rather than silently producing a wrong pose if
+ever called on a floating-base profile — it has not been generalized to
+support `Free` in this revision, and does not need to be: the dynamics
+solver that actually needs a floating base
+(`robot_sim::articulated::ArticulatedBody`) reads `Free`'s position
+directly, never through `transform_at`.
+
+`RobotProfile::dof()` also had a real, if currently invisible, bug this
+surfaced: it counted actuated *joints*, not their *degrees of freedom*,
+which was silently correct only because every joint kind before `Free`
+contributed exactly one. It now sums `JointKind::dof_count()`, which is
+numerically identical to the old behavior for every profile without a
+`Free` joint (i.e. every profile that existed before this change) and
+correct for the ones that do.
+
 ## Testing
 
-`cargo test -p robot-model` — 70 tests: joint/link/actuator/sensor validation
-boundaries, profile graph checks (dangling references, non-tree in-degrees, a
+`cargo test -p robot-model` — 76 tests: joint/link/actuator/sensor validation
+boundaries (including `Free`'s own degenerate-axis exemption, its rejection
+of position limits, and `transform_at`'s documented panic), profile graph
+checks (dangling references, non-tree in-degrees, a
 disconnected-but-locally-valid cycle), forward-kinematics composition checked
 against hand-computed rotations, URDF import including every explicit
-rejection case, and the vendored G1 fixture (profile validation, the
-29-DOF count, the expected joint names, the activation refusal above, and
-forward kinematics running over the full real tree at the zero posture).
+rejection case, and the vendored G1 fixture in both its fixed-base form
+(profile validation, the 29-DOF count, the expected joint names, the
+activation refusal above, forward kinematics at the zero posture) and its
+floating-base form (the added `world` link and `Free` joint, the 35-DOF
+count, the same activation refusal).
