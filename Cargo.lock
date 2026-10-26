@@ -97,6 +97,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "robot-supervisor"
+version = "0.1.0"
+dependencies = [
+ "robot-model",
+ "robot-types",
+]
+
+[[package]]
 name = "robot-tasks"
 version = "0.1.0"
 dependencies = [
