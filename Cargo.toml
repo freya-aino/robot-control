@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/robot-types",
     "crates/robot-artifacts",
+    "crates/robot-model",
 ]
 
 [workspace.package]
