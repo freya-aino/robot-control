@@ -74,6 +74,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "robot-perception"
+version = "0.1.0"
+dependencies = [
+ "robot-types",
+]
+
+[[package]]
 name = "robot-sim"
 version = "0.1.0"
 dependencies = [
