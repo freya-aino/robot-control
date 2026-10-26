@@ -1,0 +1,293 @@
+//! The foot/ground contact qualification benchmark: a point mass falling
+//! onto a compliant ground plane.
+//!
+//! Appendix B.4 item 3: "Test standing, slip, contact impulses, pushes and
+//! impacts. Report penetration, energy behavior, tracking error and
+//! sensitivity to timestep/solver settings." This module is the smallest
+//! instance of that: a point mass under gravity, with ground contact
+//! modeled as a penalty spring-damper along the normal and Coulomb friction
+//! along the tangent — the standard soft-contact formulation, chosen
+//! because it needs no constraint solver (Appendix B.2.8's QP candidates
+//! remain unqualified per `docs/decisions/0003-std-only-default-closure.md`)
+//! and because its penetration and energy behavior are exactly the
+//! quantities the benchmark is supposed to report.
+
+use core::fmt;
+use robot_types::frames::Vec3;
+use robot_types::time::Duration;
+
+/// Parameters of the compliant ground-contact model.
+#[derive(Clone, Copy, Debug)]
+pub struct ContactParams {
+    /// Mass of the point.
+    pub mass: f64,
+    /// Gravitational acceleration magnitude.
+    pub gravity: f64,
+    /// Normal spring stiffness (N/m of penetration).
+    pub stiffness: f64,
+    /// Normal damping (N per m/s of closing velocity), active only while
+    /// penetrating.
+    pub normal_damping: f64,
+    /// Coulomb friction coefficient applied to the tangential velocity
+    /// while in contact.
+    pub friction: f64,
+    /// Height of the ground plane (world Z).
+    pub ground_height: f64,
+}
+
+/// State of the point mass: position and velocity.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ContactState {
+    /// Position in world coordinates.
+    pub position: Vec3,
+    /// Velocity in world coordinates.
+    pub velocity: Vec3,
+}
+
+/// Why a contact step was rejected.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NonFiniteStep;
+
+impl fmt::Display for NonFiniteStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "contact step received a non-finite or non-positive dt")
+    }
+}
+
+impl core::error::Error for NonFiniteStep {}
+
+/// A point mass with compliant ground contact.
+#[derive(Clone, Copy, Debug)]
+pub struct ContactBody {
+    params: ContactParams,
+    state: ContactState,
+    /// Maximum penetration depth observed, for the qualification report.
+    max_penetration: f64,
+}
+
+impl ContactBody {
+    /// Builds a body at the given initial state.
+    #[must_use]
+    pub const fn new(params: ContactParams, initial: ContactState) -> Self {
+        Self {
+            params,
+            state: initial,
+            max_penetration: 0.0,
+        }
+    }
+
+    /// Current state.
+    #[must_use]
+    pub const fn state(&self) -> ContactState {
+        self.state
+    }
+
+    /// Penetration depth at the current state (positive when below the
+    /// ground plane, zero or negative otherwise).
+    #[must_use]
+    pub fn penetration(&self) -> f64 {
+        (self.params.ground_height - self.state.position.z).max(0.0)
+    }
+
+    /// Deepest penetration observed over the body's history.
+    #[must_use]
+    pub const fn max_penetration(&self) -> f64 {
+        self.max_penetration
+    }
+
+    /// Mechanical energy (kinetic + gravitational potential), for the
+    /// energy-behavior report Appendix B.4 item 3 asks for. The contact
+    /// spring's stored energy is not included, so this quantity is expected
+    /// to dip while penetrating and should not be mistaken for a
+    /// conservation law — a lossy contact model is physically expected to
+    /// remove energy on impact.
+    #[must_use]
+    pub fn energy(&self) -> f64 {
+        let kinetic = 0.5 * self.params.mass * self.state.velocity.norm_squared();
+        let potential = self.params.mass * self.params.gravity * self.state.position.z;
+        kinetic + potential
+    }
+
+    /// Advances the state by `dt`, applying gravity, ground contact and an
+    /// external force.
+    pub fn step(&mut self, external_force: Vec3, dt: Duration) -> Result<(), NonFiniteStep> {
+        let dt_s = dt.as_secs_f64();
+        if dt_s <= 0.0 || !dt_s.is_finite() {
+            return Err(NonFiniteStep);
+        }
+        let ContactParams {
+            mass,
+            gravity,
+            stiffness,
+            normal_damping,
+            friction,
+            ..
+        } = self.params;
+
+        let mut force = external_force + Vec3::new(0.0, 0.0, -mass * gravity);
+        let penetration = self.penetration();
+        if penetration > 0.0 {
+            self.max_penetration = self.max_penetration.max(penetration);
+            let closing_speed = -self.state.velocity.z; // positive while sinking
+            let normal_force = (stiffness * penetration + normal_damping * closing_speed).max(0.0);
+            force.z += normal_force;
+
+            // Coulomb friction opposing tangential velocity, capped by
+            // `friction * normal_force` so it cannot reverse the motion it
+            // is damping (which would be a non-physical oscillation).
+            let tangential = Vec3::new(self.state.velocity.x, self.state.velocity.y, 0.0);
+            if let Some(direction) = tangential.normalized(1e-9) {
+                let max_friction = friction * normal_force;
+                let needed = tangential.norm() * mass / dt_s;
+                let applied = max_friction.min(needed);
+                force = force - direction * applied;
+            }
+        }
+
+        if !force.is_finite() {
+            return Err(NonFiniteStep);
+        }
+
+        let acceleration = force * (1.0 / mass);
+        self.state.velocity = self.state.velocity + acceleration * dt_s;
+        self.state.position = self.state.position + self.state.velocity * dt_s;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> ContactParams {
+        ContactParams {
+            mass: 1.0,
+            gravity: 9.80665,
+            stiffness: 20_000.0,
+            normal_damping: 50.0,
+            friction: 0.6,
+            ground_height: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_resting_body_on_the_ground_has_bounded_penetration() {
+        let mut body = ContactBody::new(
+            params(),
+            ContactState {
+                position: Vec3::new(0.0, 0.0, 0.001),
+                velocity: Vec3::ZERO,
+            },
+        );
+        let dt = Duration::from_micros(200);
+        for _ in 0..5000 {
+            body.step(Vec3::ZERO, dt).unwrap();
+        }
+        // At steady state the spring force balances gravity: penetration ≈
+        // mass*gravity/stiffness.
+        let expected = params().mass * params().gravity / params().stiffness;
+        assert!(
+            (body.penetration() - expected).abs() < expected * 0.5 + 1e-4,
+            "expected penetration near {expected}, got {}",
+            body.penetration()
+        );
+        assert!(body.state().position.z.is_finite());
+    }
+
+    #[test]
+    fn a_falling_body_loses_energy_on_impact() {
+        let mut body = ContactBody::new(
+            params(),
+            ContactState {
+                position: Vec3::new(0.0, 0.0, 1.0),
+                velocity: Vec3::ZERO,
+            },
+        );
+        let e0 = body.energy();
+        let dt = Duration::from_micros(100);
+        // Fall, bounce, and settle; run long enough to pass through contact.
+        for _ in 0..20_000 {
+            body.step(Vec3::ZERO, dt).unwrap();
+        }
+        let e_final = body.energy();
+        assert!(
+            e_final < e0,
+            "a lossy contact model must remove energy: {e_final} vs {e0}"
+        );
+        assert!(
+            body.max_penetration() > 0.0,
+            "the body must have actually contacted the ground"
+        );
+    }
+
+    #[test]
+    fn friction_resists_but_does_not_reverse_sliding() {
+        let mut body = ContactBody::new(
+            params(),
+            ContactState {
+                position: Vec3::new(0.0, 0.0, 0.001),
+                velocity: Vec3::new(2.0, 0.0, 0.0),
+            },
+        );
+        let dt = Duration::from_micros(200);
+        let mut previous_vx = body.state().velocity.x;
+        for _ in 0..2000 {
+            body.step(Vec3::ZERO, dt).unwrap();
+            let vx = body.state().velocity.x;
+            assert!(
+                vx <= previous_vx + 1e-6,
+                "friction must not accelerate the slide"
+            );
+            assert!(
+                vx >= -1e-6,
+                "friction must not reverse the slide's direction"
+            );
+            previous_vx = vx;
+        }
+        assert!(
+            previous_vx.abs() < 1.0,
+            "sliding should have slowed substantially: {previous_vx}"
+        );
+    }
+
+    #[test]
+    fn a_push_recovers_after_the_force_is_removed() {
+        let mut body = ContactBody::new(
+            params(),
+            ContactState {
+                position: Vec3::new(0.0, 0.0, 0.001),
+                velocity: Vec3::ZERO,
+            },
+        );
+        let dt = Duration::from_micros(200);
+        // Push sideways briefly.
+        for _ in 0..50 {
+            body.step(Vec3::new(10.0, 0.0, 0.0), dt).unwrap();
+        }
+        let pushed_speed = body.state().velocity.x;
+        assert!(
+            pushed_speed > 0.0,
+            "the push should have imparted sideways velocity"
+        );
+        // Remove the push; friction should bring it back to rest.
+        for _ in 0..5000 {
+            body.step(Vec3::ZERO, dt).unwrap();
+        }
+        assert!(
+            body.state().velocity.norm() < 0.05,
+            "should settle after the push is removed"
+        );
+    }
+
+    #[test]
+    fn nonfinite_or_nonpositive_dt_is_rejected() {
+        let mut body = ContactBody::new(
+            params(),
+            ContactState {
+                position: Vec3::ZERO,
+                velocity: Vec3::ZERO,
+            },
+        );
+        assert!(body.step(Vec3::ZERO, Duration::ZERO).is_err());
+    }
+}

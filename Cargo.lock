@@ -55,5 +55,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "robot-sim"
+version = "0.1.0"
+dependencies = [
+ "robot-model",
+ "robot-types",
+]
+
+[[package]]
 name = "robot-types"
 version = "0.1.0"
