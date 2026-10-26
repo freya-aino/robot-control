@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "motion-process"
+version = "0.1.0"
+dependencies = [
+ "robot-types",
+]
+
+[[package]]
 name = "robot-artifacts"
 version = "0.1.0"
 dependencies = [
