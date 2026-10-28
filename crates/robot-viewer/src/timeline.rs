@@ -9,6 +9,18 @@
 use crate::frame::ViewerFrame;
 use robot_types::time::{ClockId, TimeError, Timestamp};
 
+/// Anything that carries one timestamp and can be sequenced on a [`Timeline`].
+pub trait Timed {
+    /// The instant this record describes.
+    fn timestamp(&self) -> Timestamp;
+}
+
+impl Timed for ViewerFrame {
+    fn timestamp(&self) -> Timestamp {
+        self.timestamp
+    }
+}
+
 /// Why a frame could not be appended to a [`Timeline`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TimelineError {
@@ -49,15 +61,23 @@ impl core::error::Error for TimelineError {}
 /// timeline that silently mixed them would be exactly that mistake with
 /// extra steps.
 #[derive(Clone, Debug)]
-pub struct Timeline {
+pub struct Timeline<F: Timed = ViewerFrame> {
     clock: ClockId,
-    frames: Vec<ViewerFrame>,
+    frames: Vec<F>,
 }
 
-impl Timeline {
-    /// An empty timeline on the given clock.
+impl Timeline<ViewerFrame> {
+    /// An empty timeline of [`ViewerFrame`]s on the given clock.
     #[must_use]
     pub const fn new(clock: ClockId) -> Self {
+        Self::with_clock(clock)
+    }
+}
+
+impl<F: Timed> Timeline<F> {
+    /// An empty timeline of any [`Timed`] record on the given clock.
+    #[must_use]
+    pub const fn with_clock(clock: ClockId) -> Self {
         Self {
             clock,
             frames: Vec::new(),
@@ -66,15 +86,16 @@ impl Timeline {
 
     /// Appends a frame. The frame's timestamp must be on this timeline's
     /// clock and strictly later than the last frame already present.
-    pub fn push(&mut self, frame: ViewerFrame) -> Result<(), TimelineError> {
-        if frame.timestamp.clock() != self.clock {
+    pub fn push(&mut self, frame: F) -> Result<(), TimelineError> {
+        let stamp = frame.timestamp();
+        if stamp.clock() != self.clock {
             return Err(TimelineError::ClockMismatch {
                 expected: self.clock,
-                found: frame.timestamp.clock(),
+                found: stamp.clock(),
             });
         }
         if let Some(last) = self.frames.last() {
-            if frame.timestamp.nanos() <= last.timestamp.nanos() {
+            if stamp.nanos() <= last.timestamp().nanos() {
                 return Err(TimelineError::OutOfOrder);
             }
         }
@@ -100,23 +121,23 @@ impl Timeline {
     /// `at` must be on this timeline's clock, enforced the same way a
     /// [`Timestamp::since`] comparison would be — a scrub position from the
     /// wrong clock is a bug to surface, not a value to silently coerce.
-    pub fn nearest(&self, at: Timestamp) -> Result<Option<&ViewerFrame>, TimeError> {
+    pub fn nearest(&self, at: Timestamp) -> Result<Option<&F>, TimeError> {
         let Some(first) = self.frames.first() else {
             return Ok(None);
         };
         // Any frame shares the timeline's clock already; use the first
         // frame purely to get a `since` clock-mismatch check against `at`.
-        first.timestamp.since(at)?;
+        first.timestamp().since(at)?;
 
         let index = self
             .frames
-            .partition_point(|f| f.timestamp.nanos() < at.nanos());
+            .partition_point(|f| f.timestamp().nanos() < at.nanos());
         let candidate = match (index.checked_sub(1), self.frames.get(index)) {
             (Some(prev_index), Some(_)) => {
                 let prev = &self.frames[prev_index];
                 let next = &self.frames[index];
-                let prev_distance = at.nanos() - prev.timestamp.nanos();
-                let next_distance = next.timestamp.nanos() - at.nanos();
+                let prev_distance = at.nanos() - prev.timestamp().nanos();
+                let next_distance = next.timestamp().nanos() - at.nanos();
                 if next_distance < prev_distance {
                     next
                 } else {

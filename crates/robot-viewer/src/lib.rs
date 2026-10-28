@@ -13,5 +13,9 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod csv;
 pub mod frame;
+pub mod jsonl;
+pub mod pose;
+pub mod svg;
 pub mod timeline;

@@ -10,6 +10,11 @@ SPECS.md §6 and PLAN.md's Phase 2. Depends on `robot-types` and
 | --- | --- |
 | `frame` | `ViewerFrame` (one inspection snapshot), `ContactSample` |
 | `timeline` | `Timeline`: ordered, single-clock frame sequence with `nearest()` for synchronized playback/scrubbing |
+| `pose` | `PoseFrame` (pelvis pose and joint angles per step), `FrameDump` (transactional `--out` writer), `load_committed` (strict read-back) |
+| `csv`, `jsonl` | Strict readers for the two frame formats written by `FrameDump` |
+| `svg` | Std-only SVG renderer for one `PoseFrame`, pinned by a golden file in `tests/golden/` |
+
+The frame dump format, bounds and commit protocol are fixed by `docs/decisions/0009-test-render-format.md`.
 
 ## Why there's no rendering here
 
@@ -46,19 +51,8 @@ missing comparison look like a perfect one.
 
 ## What's not implemented
 
-Any actual rendering, a `robot-cli` command that drives this crate, and
-reading frames back out of `robot-artifacts`' episode/run storage — this
-revision only has the in-memory data model and the playback-lookup logic
-over it.
+Rendering is limited to the std-only per-frame SVG in `svg`: no viewer, no skeleton (only the pelvis and joint bars are drawn), no interactive playback. Frame dumps are read back from their own directory layout (`pose::load_committed`), not from `robot-artifacts` episode/run storage. Runs are capped at 999 999 steps by the six-digit SVG names, and frame files are bounded by line length, joint count and JSON nesting depth (ADR 0009 §5).
 
 ## Testing
 
-`cargo test -p robot-viewer` — 8 tests: worst-tracking-error magnitude vs.
-sign and the missing-data case, contact filtering, out-of-order and
-wrong-clock frame rejection, nearest-frame lookup including the
-tie-break-toward-earlier rule, lookup on an empty timeline returning `None`
-rather than an error, and lookup with a mismatched clock returning an
-error. (`robot-model` also gained one small addition in this pass:
-`LinkPoses::from_poses`, letting a consumer build a `LinkPoses` from
-poses it already has — e.g. read back from a recording — without needing
-a `RobotProfile` and joint values to recompute them.)
+`cargo test -p robot-viewer` runs unit tests for the `Timeline` lookups and rejections, the CSV and JSONL strict readers (malformed, truncated and extra-record inputs), the streaming pair verifier (including `-0.0` vs `0.0`), the frame-line and nesting bounds, and the SVG renderer. Integration tests in `tests/pose_frames.rs` cover the golden SVG, the round trip and the commit protocol. Regenerate the golden with `ROBOT_VIEWER_UPDATE_GOLDEN=1 cargo test -p robot-viewer --test pose_frames`. (`robot-model` also gained one small addition in this pass: `LinkPoses::from_poses`, letting a consumer build a `LinkPoses` from poses it already has, e.g. read back from a recording, without needing a `RobotProfile` and joint values to recompute them.)
