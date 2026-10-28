@@ -155,6 +155,68 @@ impl ContactBody {
     }
 }
 
+/// Penalty ground plane for articulated bodies (see `robot_sim::articulated`).
+///
+/// A contact sphere of radius `r` centred at `c` touches the plane `z =
+/// ground_height` when `c.z = ground_height + r`. The normal force is the
+/// same spring-damper law [`ContactBody`] uses, `max(0, k * pen + d *
+/// closing_speed)`, and the tangential force is Coulomb friction
+/// `-mu * N * v_t / max(|v_t|, eps)`. That form is bounded by `mu * N`
+/// (the Coulomb cap) and reduces to a viscous stick of slope `mu * N / eps`
+/// below the regularization speed `eps`, which keeps the explicit integrator
+/// smooth at zero slip. Limits: this is a soft-contact penalty model, so it
+/// penetrates by `N / k` at rest and its stability depends on the timestep
+/// (roughly `omega * dt < 1` with `omega = sqrt(k / m_eff)`). It is not a
+/// constraint solver and does not reproduce hard impacts exactly.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GroundContact {
+    /// Normal spring stiffness (N/m of penetration).
+    pub stiffness: f64,
+    /// Normal damping (N per m/s of closing velocity).
+    pub normal_damping: f64,
+    /// Coulomb friction coefficient.
+    pub friction: f64,
+    /// Tangential speed (m/s) below which friction is regularized to a
+    /// viscous stick.
+    pub friction_regularization: f64,
+    /// Height of the ground plane (world Z).
+    pub ground_height: f64,
+}
+
+impl GroundContact {
+    /// Whether every parameter is finite, with positive stiffness and
+    /// regularization speed and non-negative damping and friction.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.stiffness.is_finite()
+            && self.stiffness > 0.0
+            && self.normal_damping.is_finite()
+            && self.normal_damping >= 0.0
+            && self.friction.is_finite()
+            && self.friction >= 0.0
+            && self.friction_regularization.is_finite()
+            && self.friction_regularization > 0.0
+            && self.ground_height.is_finite()
+    }
+
+    /// The world-frame force on a contact sphere centred at `center` with
+    /// radius `radius`, moving with world-frame point velocity `velocity`.
+    /// Zero whenever the sphere is not penetrating the plane.
+    #[must_use]
+    pub fn force(&self, center: Vec3, radius: f64, velocity: Vec3) -> Vec3 {
+        let penetration = self.ground_height + radius - center.z;
+        if penetration <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let closing_speed = -velocity.z;
+        let normal = (self.stiffness * penetration + self.normal_damping * closing_speed).max(0.0);
+        let tangential = Vec3::new(velocity.x, velocity.y, 0.0);
+        let speed = tangential.norm().max(self.friction_regularization);
+        let friction = tangential * (-(self.friction * normal) / speed);
+        Vec3::new(friction.x, friction.y, normal)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +351,91 @@ mod tests {
             },
         );
         assert!(body.step(Vec3::ZERO, Duration::ZERO).is_err());
+    }
+
+    fn ground() -> GroundContact {
+        GroundContact {
+            stiffness: 20_000.0,
+            normal_damping: 50.0,
+            friction: 0.6,
+            friction_regularization: 1e-3,
+            ground_height: 0.0,
+        }
+    }
+
+    #[test]
+    fn ground_force_is_zero_when_the_sphere_is_separated() {
+        let g = ground();
+        let f = g.force(Vec3::new(0.0, 0.0, 0.2), 0.1, Vec3::new(1.0, 0.0, -3.0));
+        assert_eq!(f, Vec3::ZERO);
+    }
+
+    #[test]
+    fn ground_normal_force_is_clamped_to_zero_during_fast_separation() {
+        let g = ground();
+        // Barely penetrating but moving up quickly: the damping term would
+        // be negative, and the clamp must keep the normal force at zero.
+        let f = g.force(
+            Vec3::new(0.0, 0.0, 0.1 - 1e-4),
+            0.1,
+            Vec3::new(0.0, 0.0, 5.0),
+        );
+        assert_eq!(f.z, 0.0);
+        assert_eq!(f.x, 0.0);
+    }
+
+    #[test]
+    fn ground_friction_never_exceeds_the_coulomb_bound() {
+        let g = ground();
+        let center = Vec3::new(0.0, 0.0, 0.1 - 1e-3);
+        for &vx in &[1e-6, 1e-3, 0.1, 1.0, 10.0] {
+            let f = g.force(center, 0.1, Vec3::new(vx, 0.0, 0.0));
+            let tangential = (f.x * f.x + f.y * f.y).sqrt();
+            assert!(f.z > 0.0);
+            assert!(
+                tangential <= g.friction * f.z * (1.0 + 1e-12),
+                "vx={vx}: |F_t|={tangential} exceeds mu*N={}",
+                g.friction * f.z
+            );
+            assert!(f.x < 0.0, "friction must oppose the sliding direction");
+        }
+    }
+
+    #[test]
+    fn ground_contact_validation_rejects_invalid_parameters() {
+        assert!(ground().is_valid());
+        let bad = [
+            GroundContact {
+                stiffness: 0.0,
+                ..ground()
+            },
+            GroundContact {
+                stiffness: f64::NAN,
+                ..ground()
+            },
+            GroundContact {
+                normal_damping: -1.0,
+                ..ground()
+            },
+            GroundContact {
+                friction: -0.1,
+                ..ground()
+            },
+            GroundContact {
+                friction_regularization: 0.0,
+                ..ground()
+            },
+            GroundContact {
+                friction_regularization: f64::INFINITY,
+                ..ground()
+            },
+            GroundContact {
+                ground_height: f64::NAN,
+                ..ground()
+            },
+        ];
+        for g in bad {
+            assert!(!g.is_valid(), "{g:?} should be invalid");
+        }
     }
 }

@@ -3,7 +3,7 @@
 //! Recursive Newton-Euler Algorithm (inverse) — Featherstone, *Rigid Body
 //! Dynamics Algorithms*, chapters 4 and 7.
 //!
-//! # Scope: no ground contact; the base may now be fixed or free
+//! # Scope: sphere ground contact; the base may now be fixed or free
 //!
 //! [`ArticulatedBody`] handles every joint `robot_model::joint::JointKind`
 //! can express: the single-DOF kinds (`Revolute`/`Continuous`/`Prismatic`),
@@ -13,8 +13,9 @@
 //! a humanoid's pelvis) fall and move under gravity and applied wrench;
 //! `crates/robot-sim/SIMULATION_SPECS.md` Section 3 is the design record
 //! for why this is a `robot-model`/`robot-sim` construct never importable
-//! from URDF. Ground-contact force resolution is still out of scope,
-//! named rather than silently assumed — see this crate's README.
+//! from URDF. Ground contact is a penalty model applied to sphere collision
+//! shapes only (see [`crate::contact::GroundContact`]); box, cylinder and
+//! mesh shapes are counted but not modelled.
 //!
 //! Every joint kind other than `Free` has at most one degree of freedom,
 //! so most of the algebra below is genuinely scalar; `Free`'s six degrees
@@ -51,12 +52,14 @@
 //! body's angular velocity is checked for conservation, before the real
 //! G1 is ever given a floating base.
 
+use crate::contact::GroundContact;
 use crate::spatial::{
     cross_motion_force, cross_motion_motion, transform_force, transform_motion, SpatialInertia,
     Twist, Wrench,
 };
 use robot_model::joint::JointKind;
 use robot_model::joint::JointSpec;
+use robot_model::link::CollisionGeometry;
 use robot_model::pose::RigidPose;
 use robot_model::profile::RobotProfile;
 use robot_types::frames::{Quat, Vec3};
@@ -83,6 +86,12 @@ pub enum DynamicsError {
         /// What the value was for.
         what: &'static str,
     },
+    /// A joint's inertia matrix could not be inverted. A valid profile never
+    /// does this; a state that has diverged to huge finite values can, once
+    /// the intermediate products overflow.
+    SingularJointInertia,
+    /// A ground-contact parameter set was not physically valid.
+    InvalidGroundContact,
 }
 
 impl core::fmt::Display for DynamicsError {
@@ -99,6 +108,12 @@ impl core::fmt::Display for DynamicsError {
                 )
             }
             Self::NotFinite { what } => write!(f, "{what} contains a non-finite value"),
+            Self::SingularJointInertia => {
+                write!(f, "a joint inertia matrix is singular or non-finite")
+            }
+            Self::InvalidGroundContact => {
+                write!(f, "ground contact parameters are not physically valid")
+            }
         }
     }
 }
@@ -135,6 +150,16 @@ pub struct ArticulatedBody {
     bodies: Vec<Body>,
     n_dof: usize,
     n_position: usize,
+    contact_spheres: Vec<ContactSphere>,
+    unmodelled_collision_shapes: usize,
+}
+
+/// A sphere collision shape on one body, centred in that body's own link
+/// frame, used as a ground-contact point.
+struct ContactSphere {
+    body: usize,
+    center: Vec3,
+    radius: f64,
 }
 
 /// The motion subspace of `kind`: the basis twists (expressed in the
@@ -238,6 +263,8 @@ impl ArticulatedBody {
         let order = profile.topological_link_order();
         let mut body_index: HashMap<LinkId, usize> = HashMap::new();
         let mut bodies = Vec::with_capacity(order.len().saturating_sub(1));
+        let mut contact_spheres = Vec::new();
+        let mut unmodelled_collision_shapes = 0usize;
 
         for link_id in order.into_iter().skip(1) {
             let joint = profile
@@ -260,6 +287,16 @@ impl ArticulatedBody {
                 position_width: pos_width,
                 inertia: SpatialInertia::from_mass_properties(&link.mass),
             });
+            for shape in &link.collision {
+                match shape.geometry {
+                    CollisionGeometry::Sphere { radius } => contact_spheres.push(ContactSphere {
+                        body: index,
+                        center: shape.pose.translation,
+                        radius,
+                    }),
+                    _ => unmodelled_collision_shapes += 1,
+                }
+            }
             body_index.insert(link_id, index);
         }
 
@@ -267,6 +304,8 @@ impl ArticulatedBody {
             bodies,
             n_dof: next_dof,
             n_position: next_position,
+            contact_spheres,
+            unmodelled_collision_shapes,
         }
     }
 
@@ -284,6 +323,134 @@ impl ArticulatedBody {
     #[must_use]
     pub fn position_width(&self) -> usize {
         self.n_position
+    }
+
+    /// Number of sphere collision shapes on non-root links, each a ground-
+    /// contact point under [`ArticulatedBody::forward_dynamics_with_ground`].
+    #[must_use]
+    pub fn contact_sphere_count(&self) -> usize {
+        self.contact_spheres.len()
+    }
+
+    /// World-frame height of the lowest contact sphere's bottom at
+    /// configuration `q`, or `None` if the body has no contact spheres.
+    /// Negative means that sphere is below the plane `z = 0` (penetration).
+    pub fn lowest_contact_height(&self, q: &[f64]) -> Result<Option<f64>, DynamicsError> {
+        self.check_width("q", q, self.n_position)?;
+        let mut world: Vec<RigidPose> = Vec::with_capacity(self.bodies.len());
+        let mut lowest: Option<f64> = None;
+        for (i, body) in self.bodies.iter().enumerate() {
+            let t = joint_transform(body, q);
+            let world_i = body.parent.map_or(t, |p| world[p].compose(&t));
+            for sphere in self.contact_spheres.iter().filter(|s| s.body == i) {
+                let bottom = world_i.apply(sphere.center).z - sphere.radius;
+                lowest = Some(lowest.map_or(bottom, |l| l.min(bottom)));
+            }
+            world.push(world_i);
+        }
+        Ok(lowest)
+    }
+
+    /// Number of non-root collision shapes (box, cylinder, mesh) this module
+    /// does not model in ground contact.
+    #[must_use]
+    pub fn unmodelled_collision_shape_count(&self) -> usize {
+        self.unmodelled_collision_shapes
+    }
+
+    /// Diagonal of the inverse joint-space mass matrix at configuration `q`,
+    /// `(M^-1)_jj`, one entry per DOF. It is the joint-space response to a unit
+    /// torque at `j` with zero velocity and zero gravity, and it is what an
+    /// explicit velocity update on joint `j` actually divides by. It is not a
+    /// dynamics output; stance damping uses it to bound the explicit step.
+    pub fn inverse_inertia_diagonal(&self, q: &[f64]) -> Result<Vec<f64>, DynamicsError> {
+        self.check_width("q", q, self.n_position)?;
+        let zeros = vec![0.0; self.n_dof];
+        let mut unit = vec![0.0; self.n_dof];
+        let mut diagonal = Vec::with_capacity(self.n_dof);
+        for j in 0..self.n_dof {
+            unit[j] = 1.0;
+            let column = self.forward_dynamics(q, &zeros, &unit, Vec3::ZERO)?;
+            diagonal.push(column[j]);
+            unit[j] = 0.0;
+        }
+        Ok(diagonal)
+    }
+
+    /// Per-DOF damping gains for an explicit hold at step `dt_seconds`: `kd_max`,
+    /// capped per DOF so that the velocity update factor `1 - kd*dt*(M^-1)_jj`
+    /// stays at or above one half. Without the cap, light joints (the G1 wrists)
+    /// give `kd*dt*(M^-1)_jj` far above 2 and the explicit update diverges.
+    pub fn stable_damping(
+        &self,
+        q: &[f64],
+        kd_max: f64,
+        dt_seconds: f64,
+    ) -> Result<Vec<f64>, DynamicsError> {
+        let inverse_inertia = self.inverse_inertia_diagonal(q)?;
+        Ok(inverse_inertia
+            .iter()
+            .map(|m_inv| kd_max.min(0.5 / (m_inv * dt_seconds)))
+            .collect())
+    }
+
+    /// Writes clamped PD hold torques toward zero posture into `tau`: for each
+    /// single-DOF joint `j`, `tau[j] = clamp(-kp*q - kd[j]*qd, ±effort)` with
+    /// `effort` the joint's own `JointLimits` effort. `kd` holds one damping
+    /// gain per DOF. Every `Fixed` and `Free` slot of `tau` is written as zero,
+    /// so the caller's buffer need not be pre-zeroed. This is a stance hold for
+    /// qualification runs, not a controller with any balance objective.
+    pub fn stance_torques(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+        kp: f64,
+        kd: &[f64],
+        tau: &mut [f64],
+    ) -> Result<(), DynamicsError> {
+        self.check_width("q", q, self.n_position)?;
+        self.check_width("qd", qd, self.n_dof)?;
+        self.check_width("kd", kd, self.n_dof)?;
+        self.check_width("tau", tau, self.n_dof)?;
+        for body in &self.bodies {
+            let slots = body.dof_offset..body.dof_offset + body.dof_width;
+            if body.dof_width != 1 || body.position_width != 1 {
+                tau[slots].fill(0.0);
+                continue;
+            }
+            let effort = body.joint.limits.effort.0;
+            let q_j = q[body.position_offset];
+            let qd_j = qd[body.dof_offset];
+            tau[body.dof_offset] = (-kp * q_j - kd[body.dof_offset] * qd_j).clamp(-effort, effort);
+        }
+        Ok(())
+    }
+
+    /// The world-frame contact wrench on body `body_index`, expressed in that
+    /// body's own frame at its origin. Each sphere contributes the ground's
+    /// force at its centre, and the torque that force produces about the
+    /// body origin.
+    fn contact_wrench(
+        &self,
+        body_index: usize,
+        body_world: &RigidPose,
+        v: Twist,
+        ground: &GroundContact,
+    ) -> Wrench {
+        let mut total = Wrench::ZERO;
+        for sphere in self.contact_spheres.iter().filter(|s| s.body == body_index) {
+            let point_world = body_world.apply(sphere.center);
+            let point_velocity_body = v.linear + v.angular.cross(sphere.center);
+            let velocity_world = body_world.rotation.rotate(point_velocity_body);
+            let force_world = ground.force(point_world, sphere.radius, velocity_world);
+            let force_body = body_world.rotation.conjugate().rotate(force_world);
+            total = total
+                + Wrench {
+                    angular: sphere.center.cross(force_body),
+                    linear: force_body,
+                };
+        }
+        total
     }
 
     fn check_width(
@@ -377,6 +544,36 @@ impl ArticulatedBody {
         tau: &[f64],
         gravity: Vec3,
     ) -> Result<Vec<f64>, DynamicsError> {
+        self.articulated_accelerations(q, qd, tau, gravity, None)
+    }
+
+    /// Forward dynamics with penalty ground contact on every sphere
+    /// collision shape (see [`crate::contact::GroundContact`]). Contact
+    /// forces enter the bias force of each body, so the same closed-form
+    /// ABA recursion produces the accelerations; with `ground` absent the
+    /// result is exactly [`ArticulatedBody::forward_dynamics`].
+    pub fn forward_dynamics_with_ground(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+        tau: &[f64],
+        gravity: Vec3,
+        ground: &GroundContact,
+    ) -> Result<Vec<f64>, DynamicsError> {
+        if !ground.is_valid() {
+            return Err(DynamicsError::InvalidGroundContact);
+        }
+        self.articulated_accelerations(q, qd, tau, gravity, Some(ground))
+    }
+
+    fn articulated_accelerations(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+        tau: &[f64],
+        gravity: Vec3,
+        ground: Option<&GroundContact>,
+    ) -> Result<Vec<f64>, DynamicsError> {
         self.check_width("q", q, self.n_position)?;
         self.check_width("qd", qd, self.n_dof)?;
         self.check_width("tau", tau, self.n_dof)?;
@@ -396,7 +593,8 @@ impl ArticulatedBody {
 
         // Pass 1 (root -> leaf): velocities, bias accelerations, and each
         // body's own (not-yet-reduced) articulated inertia/bias force.
-        for body in &self.bodies {
+        let mut world: Vec<RigidPose> = Vec::with_capacity(n);
+        for (i, body) in self.bodies.iter().enumerate() {
             let t = joint_transform(body, q);
             let s = motion_subspace_basis(body.joint.kind, body.joint.axis);
             let joint_v = combine(&s, &qd[body.dof_offset..body.dof_offset + body.dof_width]);
@@ -404,11 +602,15 @@ impl ArticulatedBody {
             let v_parent = body.parent.map_or(Twist::ZERO, |p| v[p]);
             let v_i = transform_motion(&t, v_parent) + joint_v;
             let c_i = cross_motion_motion(v_i, joint_v);
-            let pa_i = cross_motion_force(v_i, body.inertia.apply(v_i));
+            let world_i = body.parent.map_or(t, |p| world[p].compose(&t));
+            let external =
+                ground.map_or(Wrench::ZERO, |g| self.contact_wrench(i, &world_i, v_i, g));
+            let pa_i = cross_motion_force(v_i, body.inertia.apply(v_i)) - external;
 
             v.push(v_i);
             c.push(c_i);
             transforms.push(t);
+            world.push(world_i);
             ia.push(body.inertia.clone());
             pa.push(pa_i);
             bases.push(s);
@@ -453,7 +655,7 @@ impl ArticulatedBody {
 
                 let d_inv_ut = d_mat
                     .solve(&u_mat.transposed())
-                    .expect("joint inertia D is singular — a degenerate/zero inertia upstream of a real DOF");
+                    .map_err(|_| DynamicsError::SingularJointInertia)?;
                 let reduction = u_mat
                     .mul(&d_inv_ut)
                     .expect("6xk * kx6 is always well-formed");
@@ -461,7 +663,7 @@ impl ArticulatedBody {
 
                 let z = d_mat
                     .solve(&Matrix::column(&u_scalar))
-                    .expect("same D as above");
+                    .map_err(|_| DynamicsError::SingularJointInertia)?;
                 let u_dinv_u = u_mat.mul(&z).expect("6xk * kx1 is always well-formed");
                 let pa_eff = pa[i] + ia_eff.apply(c[i]) + Wrench::from_column(&u_dinv_u);
 
@@ -497,7 +699,7 @@ impl ArticulatedBody {
                     .collect();
                 let qdd_col = d_mats[i]
                     .solve(&Matrix::column(&rhs))
-                    .expect("same D already solved in pass 2");
+                    .map_err(|_| DynamicsError::SingularJointInertia)?;
                 let mut a_i = a_prime;
                 for a_idx in 0..k {
                     let qdd_val = qdd_col[(a_idx, 0)];
@@ -592,7 +794,35 @@ impl MultibodyState {
         gravity: Vec3,
         dt: robot_types::time::Duration,
     ) -> Result<(), DynamicsError> {
-        let qdd = body.forward_dynamics(&self.q, &self.qd, tau, gravity)?;
+        self.step_inner(body, tau, gravity, None, dt)
+    }
+
+    /// As [`MultibodyState::step`], but with penalty ground contact on every
+    /// sphere collision shape of `body` (see
+    /// [`ArticulatedBody::forward_dynamics_with_ground`]).
+    pub fn step_with_ground(
+        &mut self,
+        body: &ArticulatedBody,
+        tau: &[f64],
+        gravity: Vec3,
+        ground: &GroundContact,
+        dt: robot_types::time::Duration,
+    ) -> Result<(), DynamicsError> {
+        self.step_inner(body, tau, gravity, Some(ground), dt)
+    }
+
+    fn step_inner(
+        &mut self,
+        body: &ArticulatedBody,
+        tau: &[f64],
+        gravity: Vec3,
+        ground: Option<&GroundContact>,
+        dt: robot_types::time::Duration,
+    ) -> Result<(), DynamicsError> {
+        let qdd = match ground {
+            Some(g) => body.forward_dynamics_with_ground(&self.q, &self.qd, tau, gravity, g)?,
+            None => body.forward_dynamics(&self.q, &self.qd, tau, gravity)?,
+        };
         let dt_s = dt.as_secs_f64();
         for (v, a) in self.qd.iter_mut().zip(&qdd) {
             *v += a * dt_s;
@@ -821,6 +1051,22 @@ pub(crate) mod tests {
         wrap_profile(vec![joint], vec![world, body_link])
     }
 
+    /// As [`free_body`], but with one sphere collision shape of `radius`
+    /// centred at the body origin: the minimal fixture for ground contact.
+    fn free_sphere_body(mass: f64, radius: f64) -> RobotProfile {
+        let mut profile = free_body(mass, InertiaTensor::diagonal(0.1, 0.1, 0.1));
+        let body_link = profile
+            .links
+            .iter_mut()
+            .find(|l| l.id == LinkId::new(1))
+            .expect("free_body has a body link");
+        body_link.collision.push(robot_model::link::CollisionShape {
+            geometry: robot_model::link::CollisionGeometry::Sphere { radius },
+            pose: RigidPose::IDENTITY,
+        });
+        profile
+    }
+
     /// `[tx, ty, tz, qw, qx, qy, qz]` at the origin with identity
     /// orientation — the canonical "at rest" `Free`-joint position.
     const FREE_IDENTITY: [f64; 7] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
@@ -1032,6 +1278,281 @@ pub(crate) mod tests {
             "pelvis height did not decrease: initial={initial_height} final={}",
             state.q[2]
         );
+    }
+
+    /// Qualification stance for the floating G1, as run by
+    /// `robot sim multibody --floating`: the pelvis starts so the lowest
+    /// contact sphere clears the plane by 5 mm, then a clamped PD hold runs
+    /// for 2 s. Returns the pelvis-height minimum and the state after the run.
+    struct StanceRun {
+        start_pelvis: f64,
+        min_pelvis: f64,
+        final_energy: f64,
+    }
+
+    fn run_g1_stance(steps: usize, hold: bool) -> StanceRun {
+        let profile = robot_model::fixtures::unitree_g1_29dof_floating_base().unwrap();
+        let body = ArticulatedBody::from_profile(&profile);
+        let ground = test_ground(0.8);
+        let mut q = vec![0.0; body.position_width()];
+        q[3] = 1.0;
+        let lowest = body.lowest_contact_height(&q).unwrap().unwrap();
+        q[2] = 0.005 - lowest;
+        let start_pelvis = q[2];
+        let mut state = MultibodyState {
+            q,
+            qd: vec![0.0; body.dof()],
+        };
+        let mut tau = vec![0.0; body.dof()];
+        let dt = Duration::from_micros(100);
+        let kd = body
+            .stable_damping(&state.q, 30.0, dt.as_secs_f64())
+            .unwrap();
+        let mut min_pelvis = f64::INFINITY;
+        for step in 0..steps {
+            if hold {
+                body.stance_torques(&state.q, &state.qd, 300.0, &kd, &mut tau)
+                    .unwrap();
+            }
+            state
+                .step_with_ground(&body, &tau, GRAVITY, &ground, dt)
+                .unwrap();
+            assert!(
+                state.q.iter().chain(&state.qd).all(|v| v.is_finite()),
+                "step {step} diverged"
+            );
+            min_pelvis = min_pelvis.min(state.q[2]);
+        }
+        let final_energy = body.kinetic_energy(&state.q, &state.qd).unwrap();
+        StanceRun {
+            start_pelvis,
+            min_pelvis,
+            final_energy,
+        }
+    }
+
+    #[test]
+    fn the_g1_stance_hold_keeps_the_pelvis_above_the_plane_for_two_seconds() {
+        // Qualification, not balance: a clamped PD hold toward the zero
+        // posture. The pelvis minimum over 2 s must stay within 2 cm of its
+        // start height, and the final kinetic energy must be bounded.
+        let run = run_g1_stance(20_000, true);
+        assert!(
+            run.min_pelvis >= run.start_pelvis - 0.02,
+            "pelvis fell to {:.4} m from start {:.4} m under the stance hold",
+            run.min_pelvis,
+            run.start_pelvis
+        );
+        assert!(
+            run.final_energy <= 0.5,
+            "stance kinetic energy {:.4} J not bounded",
+            run.final_energy
+        );
+    }
+
+    /// Known-limitation characterization, not a physical claim. The G1 has
+    /// only 8 sphere shapes (ankle rolls), and the pelvis and torso have no
+    /// collision geometry at all. With zero torque the legs fold and the trunk
+    /// reaches the plane through those unmodelled shapes. Adding contact
+    /// proxies (see ADR 0010) is expected to change this result; update the
+    /// assertion then rather than treating it as a fixed fact.
+    #[test]
+    fn zero_torque_g1_collapse_is_a_known_limitation_of_the_sphere_only_model() {
+        let run = run_g1_stance(10_000, false);
+        assert!(
+            run.min_pelvis < run.start_pelvis - 0.02,
+            "zero torque did not collapse: min pelvis {:.4} m",
+            run.min_pelvis
+        );
+    }
+
+    fn test_ground(friction: f64) -> GroundContact {
+        GroundContact {
+            stiffness: 20_000.0,
+            normal_damping: 200.0,
+            friction,
+            friction_regularization: 1e-3,
+            ground_height: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_dropped_sphere_settles_at_the_penalty_rest_height() {
+        // Static balance of the penalty spring: the sphere sits where
+        // k * penetration = m * g, so its centre rests at
+        // radius - m*g/k above the plane. Damping only removes the bounce.
+        let (mass, radius) = (2.0, 0.1);
+        let profile = free_sphere_body(mass, radius);
+        let body = ArticulatedBody::from_profile(&profile);
+        assert_eq!(body.contact_sphere_count(), 1);
+        assert_eq!(body.unmodelled_collision_shape_count(), 0);
+
+        let ground = test_ground(0.0);
+        let mut q = FREE_IDENTITY.to_vec();
+        q[2] = 0.2;
+        let mut state = MultibodyState::at_rest(q, 6);
+        let tau = vec![0.0; 6];
+        let dt = Duration::from_millis(1);
+        for _ in 0..6_000 {
+            state
+                .step_with_ground(&body, &tau, GRAVITY, &ground, dt)
+                .unwrap();
+        }
+
+        let expected = radius - mass * G / ground.stiffness;
+        assert!(
+            (state.q[2] - expected).abs() < 1e-6,
+            "rest height {} want {expected}",
+            state.q[2]
+        );
+        assert!(
+            state.qd[2].abs() < 1e-6,
+            "still moving vertically: {}",
+            state.qd[2]
+        );
+    }
+
+    #[test]
+    fn frictionless_sliding_at_penalty_equilibrium_conserves_total_energy() {
+        // Start at the static penalty equilibrium (k * penetration = m * g)
+        // with zero vertical velocity, then slide with mu = 0. The only
+        // forces are gravity and the normal spring, so total energy
+        // (kinetic + m*g*z + k*pen^2/2) must not drift.
+        let (mass, radius) = (1.0, 0.1);
+        let profile = free_sphere_body(mass, radius);
+        let body = ArticulatedBody::from_profile(&profile);
+        let ground = test_ground(0.0);
+        let penetration = mass * G / ground.stiffness;
+
+        let mut q = FREE_IDENTITY.to_vec();
+        q[2] = radius - penetration;
+        let mut state = MultibodyState {
+            q,
+            qd: vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+        };
+        let tau = vec![0.0; 6];
+        let dt = Duration::from_micros(100);
+        let total_energy = |s: &MultibodyState| {
+            let v = &s.qd[3..6];
+            let kinetic = 0.5 * mass * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            let pen = (radius - s.q[2]).max(0.0);
+            kinetic + mass * G * s.q[2] + 0.5 * ground.stiffness * pen * pen
+        };
+        let e0 = total_energy(&state);
+        for _ in 0..5_000 {
+            state
+                .step_with_ground(&body, &tau, GRAVITY, &ground, dt)
+                .unwrap();
+        }
+        assert!(
+            (state.qd[3] - 2.0).abs() < 1e-9,
+            "frictionless contact changed sliding speed: {}",
+            state.qd[3]
+        );
+        let e1 = total_energy(&state);
+        assert!(
+            (e1 - e0).abs() < 1e-9 * e0,
+            "total energy drifted: {e0} -> {e1}"
+        );
+    }
+
+    /// A rigid box as one free body with four bottom-corner sphere shapes at
+    /// `(±half_x, ±half_y, -half_z)`. Unlike the single-sphere fixture, its
+    /// corners are offset from the body origin, so the contact torque path
+    /// (`r x F` about the origin, and `omega x r` in the velocity) is used.
+    fn free_corner_box(mass: f64, half_extents: (f64, f64, f64), radius: f64) -> RobotProfile {
+        let (half_x, half_y, half_z) = half_extents;
+        let mut profile = free_body(mass, InertiaTensor::diagonal(0.1, 0.1, 0.1));
+        let body_link = profile
+            .links
+            .iter_mut()
+            .find(|l| l.id == LinkId::new(1))
+            .expect("free_body has a body link");
+        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            body_link.collision.push(robot_model::link::CollisionShape {
+                geometry: robot_model::link::CollisionGeometry::Sphere { radius },
+                pose: RigidPose::from_translation(Vec3::new(sx * half_x, sy * half_y, -half_z)),
+            });
+        }
+        profile
+    }
+
+    #[test]
+    fn a_tilted_corner_box_settles_flat_at_the_analytic_rest_height() {
+        // Four identical corner springs share the load equally once flat, so
+        // each corner penetrates m*g/(4k) and the centre rests at
+        // r + half_z - m*g/(4k). A start tilt about x makes the offset corner
+        // torques do the work, so the box must come back flat with no residual
+        // angular velocity.
+        let (mass, radius, half_z) = (2.0, 0.02, 0.05);
+        let profile = free_corner_box(mass, (0.1, 0.05, half_z), radius);
+        let body = ArticulatedBody::from_profile(&profile);
+        assert_eq!(body.contact_sphere_count(), 4);
+
+        let ground = test_ground(0.5);
+        let tilt = 0.05_f64;
+        let mut q = FREE_IDENTITY.to_vec();
+        q[2] = 0.2;
+        q[3] = (tilt / 2.0).cos();
+        q[4] = (tilt / 2.0).sin();
+        let mut state = MultibodyState::at_rest(q, 6);
+        let tau = vec![0.0; 6];
+        let dt = Duration::from_micros(100);
+        for _ in 0..30_000 {
+            state
+                .step_with_ground(&body, &tau, GRAVITY, &ground, dt)
+                .unwrap();
+        }
+
+        let expected = radius + half_z - mass * G / (4.0 * ground.stiffness);
+        assert!(
+            (state.q[2] - expected).abs() < 1e-5,
+            "rest height {} want {expected}",
+            state.q[2]
+        );
+        assert!(
+            state.q[4].abs() < 1e-5 && state.q[5].abs() < 1e-5,
+            "box did not return flat: qx={} qy={}",
+            state.q[4],
+            state.q[5]
+        );
+        assert!(
+            state.qd.iter().all(|v| v.abs() < 1e-4),
+            "residual motion: {:?}",
+            state.qd
+        );
+    }
+
+    #[test]
+    fn friction_dissipates_sliding_energy_and_never_reverses_it() {
+        // Coulomb friction with a resting, penetrating sphere must slow the
+        // slide monotonically and stop it, without pushing it backwards.
+        let (mass, radius) = (1.0, 0.1);
+        let profile = free_sphere_body(mass, radius);
+        let body = ArticulatedBody::from_profile(&profile);
+        let ground = test_ground(0.5);
+
+        let mut q = FREE_IDENTITY.to_vec();
+        q[2] = radius - 1e-3;
+        let mut state = MultibodyState {
+            q,
+            qd: vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+        };
+        let tau = vec![0.0; 6];
+        let dt = Duration::from_micros(100);
+        let mut previous = state.qd[3];
+        for step in 0..20_000 {
+            state
+                .step_with_ground(&body, &tau, GRAVITY, &ground, dt)
+                .unwrap();
+            assert!(
+                state.qd[3] <= previous + 1e-12 && state.qd[3] >= -1e-6,
+                "step {step}: sliding speed went {previous} -> {}",
+                state.qd[3]
+            );
+            previous = state.qd[3];
+        }
+        assert!(state.qd[3].abs() < 1e-3, "friction did not stop the slide");
     }
 
     #[test]

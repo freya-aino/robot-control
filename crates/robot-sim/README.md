@@ -19,10 +19,10 @@ what it's becoming.
 | Module | Contents |
 | --- | --- |
 | `pendulum` | `Pendulum`: a damped, actuated pendulum integrated by semi-implicit Euler — the first qualification benchmark Appendix B.4 names |
-| `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names |
+| `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names. `GroundContact`: the per-sphere penalty law (regularised Coulomb friction, separation clamp) used by articulated bodies; see ADR 0010 |
 | `env` | `Environment` trait (reset/step/seeded randomization) and `PendulumEnv`, a trainable RL environment wrapping `pendulum` |
 | `spatial` | `Twist`/`Wrench` spatial-vector algebra and `SpatialInertia` — the 6D motion/force representation the multi-body solver is built on |
-| `articulated` | `ArticulatedBody`: multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, including a floating base, plus `MultibodyState`, a semi-implicit-Euler stepper |
+| `articulated` | `ArticulatedBody`: multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, including a floating base. Sphere ground contact (`forward_dynamics_with_ground`, `step_with_ground`, `lowest_contact_height`), a clamped PD `stance_torques` hold, plus `MultibodyState`, a semi-implicit-Euler stepper. Box, cylinder and mesh shapes are counted, not modelled (ADR 0010) |
 
 ## What this crate has and does not yet have
 
@@ -34,20 +34,20 @@ base-acceleration trick and all), and it now handles a floating base:
 `robot_model::joint::JointKind::Free` gives a profile's root six
 unconstrained degrees of freedom against an explicit `world` link, and
 `robot_model::fixtures::unitree_g1_29dof_floating_base` is a real G1
-whose pelvis genuinely falls under gravity (`robot sim multibody
---floating` in `robot-cli` demonstrates it, and
-`the_real_g1_with_a_floating_base_falls_under_gravity` is the test).
-`SIMULATION_SPECS.md` §3 item 1 named this as the single largest
-structural gap against MuJoCo; it is now closed.
+whose pelvis is a `Free` joint. Without contact the pelvis falls under
+gravity, which the `the_real_g1_with_a_floating_base_falls_under_gravity`
+test checks on the no-contact `step` path. With sphere ground contact
+(`step_with_ground`) the same robot is held above the plane by a clamped PD
+stance (`robot sim multibody --floating`, ADR 0010), which is a supported-stance
+qualification and not a balance result. `SIMULATION_SPECS.md` §3 item 1 named
+the floating-base gap; it is closed for the solver.
 
-What remains missing, named precisely rather than left as a vague "no
-multibody support" claim: **no contact or collision solver at all**
-beyond the separate single-point-mass `contact::ContactBody` benchmark
-(`SIMULATION_SPECS.md` §5-§6), and **no GPU execution path**
-(`SIMULATION_SPECS.md` §11). A humanoid can fall, swing its joints
-under gravity and applied torque, and have external wrenches applied to
-its floating base here; it cannot stand, balance or walk, because
-nothing yet stops it passing through a floor, and it cannot run as a
+What remains missing, named precisely: **contact is sphere-only**. Box,
+cylinder and mesh collision shapes are counted but not modelled, so the
+G1's pelvis and torso have no collision geometry and zero torque collapses
+through the plane. There is no joint-limit or actuator model, no balance
+controller, and **no GPU execution path** (`SIMULATION_SPECS.md` §11). The
+robot cannot stand, balance or walk on its own, and it cannot run as a
 GPU-batched training environment yet.
 
 Everything here remains qualified the way SPECS.md §9.1 and Appendix B.4

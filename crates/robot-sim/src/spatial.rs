@@ -20,7 +20,7 @@
 //! it, so the general representation is not an added complication, it is
 //! required.
 
-use core::ops::Add;
+use core::ops::{Add, Sub};
 use robot_model::link::{InertiaTensor, MassProperties};
 use robot_model::pose::RigidPose;
 use robot_types::frames::Vec3;
@@ -149,6 +149,16 @@ impl Add for Wrench {
         Self {
             angular: self.angular + rhs.angular,
             linear: self.linear + rhs.linear,
+        }
+    }
+}
+
+impl Sub for Wrench {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self {
+            angular: self.angular - rhs.angular,
+            linear: self.linear - rhs.linear,
         }
     }
 }
