@@ -15,6 +15,7 @@ profile of SPECS.md Section 7.1. Depends only on `robot-types`.
 | `profile` | §7.1 | `RobotProfile`: identity uniqueness, dangling-reference checks, joint-graph-is-a-tree validation, and the stricter `activate()` gate (extension strictness + independent e-stop) required before a control path |
 | `kinematics` | §6 | `forward_kinematics`: one unambiguous computation over the validated tree |
 | `urdf` | §7.1 | A minimal authored XML reader plus the URDF kinematic/mass subset this project supports |
+| `importer` | — | `ModelImporter` trait (associated `Error`) as the plug-in seam for description formats; `UrdfImporter` wraps `urdf::import_from_str` without changing it |
 | `fixtures` | §3 | Vendored real-robot descriptions built into validated `RobotProfile`s — currently Unitree's G1 humanoid, 29-DOF rev 1.0 |
 
 ## Why `RigidPose` instead of `robot_types::frames::Transform`
@@ -119,7 +120,7 @@ correct for the ones that do.
 
 ## Testing
 
-`cargo test -p robot-model` — 76 tests: joint/link/actuator/sensor validation
+`cargo test -p robot-model` — 79 tests: joint/link/actuator/sensor validation
 boundaries (including `Free`'s own degenerate-axis exemption, its rejection
 of position limits, and `transform_at`'s documented panic), profile graph
 checks (dangling references, non-tree in-degrees, a
@@ -129,4 +130,4 @@ rejection case, and the vendored G1 fixture in both its fixed-base form
 (profile validation, the 29-DOF count, the expected joint names, the
 activation refusal above, forward kinematics at the zero posture) and its
 floating-base form (the added `world` link and `Free` joint, the 35-DOF
-count, the same activation refusal).
+count, the same activation refusal); and the URDF importer trait wrapper.
