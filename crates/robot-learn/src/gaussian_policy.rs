@@ -51,6 +51,14 @@ impl GaussianPolicy {
         }
     }
 
+    /// Rebuilds a policy from its mean network and a per-dimension log-std
+    /// vector, as stored in a checkpoint. Returns `None` when the vector's
+    /// length does not match the network's output width.
+    #[must_use]
+    pub fn from_parts(mean_net: Mlp, log_std: Vec<f64>) -> Option<Self> {
+        (log_std.len() == mean_net.output_width()).then_some(Self { mean_net, log_std })
+    }
+
     /// Samples an action at `observation`, using `rng` for the Gaussian
     /// noise.
     #[must_use]

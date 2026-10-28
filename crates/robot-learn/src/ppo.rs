@@ -98,18 +98,18 @@ pub struct PpoAgent {
     pub policy: GaussianPolicy,
     /// The value function.
     pub value_net: Mlp,
-    policy_adam: AdamState,
-    value_adam: AdamState,
+    pub(crate) policy_adam: AdamState,
+    pub(crate) value_adam: AdamState,
     /// Observation normalizer. SPECS.md Section 9.2 requires "observation
     /// normalization"; this is the one instance both collection and update
     /// use, and it is the same type `robot_control` would load for deployed
     /// inference (SPECS.md Section 6: training and deployment share
     /// normalization logic).
     pub normalizer: Normalizer,
-    config: PpoConfig,
-    generation: Generation,
-    policy_groups: Vec<ParamGroup>,
-    value_groups: Vec<ParamGroup>,
+    pub(crate) config: PpoConfig,
+    pub(crate) generation: Generation,
+    pub(crate) policy_groups: Vec<ParamGroup>,
+    pub(crate) value_groups: Vec<ParamGroup>,
 }
 
 impl PpoAgent {

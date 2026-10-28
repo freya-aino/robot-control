@@ -106,6 +106,8 @@ pub enum VectorError {
         /// The offending field.
         field: String,
     },
+    /// A normalizer parameter or serialized state was invalid.
+    InvalidParameter,
 }
 
 impl fmt::Display for VectorError {
@@ -122,6 +124,7 @@ impl fmt::Display for VectorError {
             ),
             Self::DuplicateField { field } => write!(f, "duplicate field name {field:?}"),
             Self::ZeroWidthField { field } => write!(f, "field {field:?} has zero width"),
+            Self::InvalidParameter => write!(f, "normalizer state is invalid"),
         }
     }
 }
@@ -539,6 +542,60 @@ impl Normalizer {
         self.m2.iter().map(|m| m / denom).collect()
     }
 
+    /// The per-component sum of squared deviations: the exact accumulator
+    /// behind [`Normalizer::variance`]. Checkpoints store this, because
+    /// `variance * count` does not round-trip bit-exactly.
+    #[must_use]
+    pub fn m2(&self) -> &[f64] {
+        &self.m2
+    }
+
+    /// The bound on normalized magnitude.
+    #[must_use]
+    pub const fn clip(&self) -> f64 {
+        self.clip
+    }
+
+    /// The variance stabilizer added before the square root.
+    #[must_use]
+    pub const fn epsilon(&self) -> f64 {
+        self.epsilon
+    }
+
+    /// Rebuilds a normalizer from its complete state, including whether it is
+    /// frozen. Non-finite entries, a negative `m2`, a non-positive `clip` or a
+    /// negative `epsilon` are rejected with [`VectorError::InvalidParameter`], so
+    /// no invalid state can be loaded.
+    pub fn from_state(
+        mean: Vec<f64>,
+        m2: Vec<f64>,
+        count: u64,
+        clip: f64,
+        epsilon: f64,
+        frozen: bool,
+    ) -> Result<Self, VectorError> {
+        if m2.len() != mean.len() {
+            return Err(VectorError::WidthMismatch {
+                expected: mean.len(),
+                found: m2.len(),
+            });
+        }
+        if mean.iter().chain(&m2).any(|v| !v.is_finite()) || m2.iter().any(|v| *v < 0.0) {
+            return Err(VectorError::InvalidParameter);
+        }
+        if !clip.is_finite() || clip <= 0.0 || !epsilon.is_finite() || epsilon < 0.0 {
+            return Err(VectorError::InvalidParameter);
+        }
+        Ok(Self {
+            mean,
+            m2,
+            count,
+            clip,
+            epsilon,
+            frozen,
+        })
+    }
+
     /// Incorporates one sample. A frozen normalizer ignores it, which is the
     /// deployment behaviour: statistics come from training and do not drift on
     /// the robot.
@@ -673,6 +730,14 @@ mod tests {
                 found: 3
             })
         );
+    }
+
+    #[test]
+    fn normalizer_restore_rejects_negative_m2_with_a_state_error() {
+        let error =
+            Normalizer::from_state(vec![0.0], vec![-0.25], 1, 10.0, 1e-8, false).unwrap_err();
+        assert_eq!(error, VectorError::InvalidParameter);
+        assert_eq!(error.to_string(), "normalizer state is invalid");
     }
 
     #[test]

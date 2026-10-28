@@ -362,6 +362,36 @@ impl Chunk {
         })
     }
 
+    /// Number of rows.
+    #[must_use]
+    pub const fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    /// Number of columns.
+    #[must_use]
+    pub const fn cols(&self) -> u32 {
+        self.cols
+    }
+
+    /// The element type.
+    #[must_use]
+    pub const fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    /// The schema digest the chunk was written with.
+    #[must_use]
+    pub const fn schema_digest(&self) -> Digest {
+        self.schema_digest
+    }
+
+    /// The payload values, in layout order.
+    #[must_use]
+    pub fn values(&self) -> &[f64] {
+        &self.values
+    }
+
     /// The value at `(row, col)`, honouring the layout.
     #[must_use]
     pub fn get(&self, row: u32, col: u32) -> Option<f64> {

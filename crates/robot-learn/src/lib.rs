@@ -15,6 +15,7 @@
 #![warn(clippy::all)]
 
 pub mod backprop;
+pub mod checkpoint;
 pub mod gae;
 pub mod gaussian_policy;
 pub mod optimizer;

@@ -74,6 +74,34 @@ impl AdamState {
         &self.v
     }
 
+    /// Rebuilds the state from saved moments and step count. The moments must
+    /// have the same shape as `mlp`; a mismatch is rejected, so a checkpoint
+    /// can never attach moments to the wrong network.
+    pub fn from_parts(
+        mlp: &Mlp,
+        m: Gradients,
+        v: Gradients,
+        step: u64,
+    ) -> Result<Self, &'static str> {
+        let shape = Gradients::zeros_like(mlp);
+        let same = |a: &Gradients| {
+            a.weight.len() == shape.weight.len()
+                && a.bias.len() == shape.bias.len()
+                && a.weight
+                    .iter()
+                    .zip(&shape.weight)
+                    .all(|(x, y)| x.len() == y.len())
+                && a.bias
+                    .iter()
+                    .zip(&shape.bias)
+                    .all(|(x, y)| x.len() == y.len())
+        };
+        if !same(&m) || !same(&v) {
+            return Err("Adam moment shape does not match the network");
+        }
+        Ok(Self { m, v, step })
+    }
+
     /// Applies one Adam step to `mlp` using `grads`, updating both the
     /// optimizer state and the network's parameters in place.
     pub fn step_with(&mut self, mlp: &mut Mlp, grads: &Gradients, config: &AdamConfig) {
