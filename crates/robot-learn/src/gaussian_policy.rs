@@ -8,7 +8,8 @@
 //! the gradient derivation below a few closed-form lines rather than a
 //! second backward pass.
 
-use robot_nn::mlp::{ForwardTrace, Mlp};
+use robot_nn::mlp::{ForwardTrace, Mlp, MlpError, Scratch};
+use robot_nn::policy::{Policy, StochasticPolicy};
 use robot_types::rng::Rng;
 
 const LOG_STD_MIN: f64 = -5.0;
@@ -121,6 +122,53 @@ impl GaussianPolicy {
     }
 }
 
+impl Policy for GaussianPolicy {
+    fn input_width(&self) -> usize {
+        self.mean_net.input_width()
+    }
+
+    fn output_width(&self) -> usize {
+        self.mean_net.output_width()
+    }
+
+    fn scratch_len(&self) -> usize {
+        self.mean_net.scratch_len()
+    }
+
+    /// The deterministic (mean) action.
+    fn act(
+        &self,
+        observation: &[f64],
+        action: &mut [f64],
+        scratch: &mut Scratch,
+    ) -> Result<(), MlpError> {
+        self.mean_net.forward(observation, action, scratch)
+    }
+}
+
+impl StochasticPolicy for GaussianPolicy {
+    /// Allocation-free counterpart of [`GaussianPolicy::sample`]: it draws
+    /// the same noise in the same order, so the two agree on any RNG stream.
+    fn sample_action(
+        &self,
+        observation: &[f64],
+        rng: &mut Rng,
+        action: &mut [f64],
+        scratch: &mut Scratch,
+    ) -> Result<f64, MlpError> {
+        self.mean_net.forward(observation, action, scratch)?;
+        let mut log_prob = 0.0;
+        for (a, log_s) in action.iter_mut().zip(&self.log_std) {
+            let mean = *a;
+            let std = log_s.exp();
+            *a = mean + std * rng.standard_normal();
+            let z = (*a - mean) / std;
+            log_prob += -0.5 * z * z - log_s - 0.5 * (core::f64::consts::TAU).ln();
+        }
+        Ok(log_prob)
+    }
+}
+
 fn gaussian_log_prob(x: &[f64], mean: &[f64], log_std: &[f64]) -> f64 {
     let mut total = 0.0;
     for ((xi, mi), log_si) in x.iter().zip(mean).zip(log_std) {
@@ -158,6 +206,35 @@ mod tests {
             (avg - mean).abs() < 0.05,
             "sample mean {avg} should track the policy mean {mean}"
         );
+    }
+
+    #[test]
+    fn sample_action_matches_sample_on_the_same_stream() {
+        let p = policy();
+        let obs = [1.0, 0.0];
+        let mut rng_a = Rng::new(SeedStream::new(9, 2));
+        let mut rng_b = Rng::new(SeedStream::new(9, 2));
+        let mut scratch = Scratch::new(Policy::scratch_len(&p));
+        let mut action = [0.0; 1];
+        for _ in 0..50 {
+            let reference = p.sample(&obs, &mut rng_a);
+            let lp = p
+                .sample_action(&obs, &mut rng_b, &mut action, &mut scratch)
+                .unwrap();
+            assert_eq!(action[0], reference.action[0]);
+            assert_eq!(lp, reference.log_prob);
+        }
+    }
+
+    #[test]
+    fn act_is_the_mean_action() {
+        let p = policy();
+        let obs = [1.0, 0.0];
+        let mut scratch = Scratch::new(Policy::scratch_len(&p));
+        let mut action = [0.0; 1];
+        Policy::act(&p, &obs, &mut action, &mut scratch).unwrap();
+        let mean = p.mean_net.forward_with_trace(&obs).output()[0];
+        assert_eq!(action[0], mean);
     }
 
     #[test]

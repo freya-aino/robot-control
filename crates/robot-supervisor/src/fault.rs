@@ -26,6 +26,12 @@ pub enum Fault {
         /// The limit it exceeded.
         limit: Duration,
     },
+    /// A component of the observation was NaN or infinite, so no action
+    /// could be computed from it.
+    NonFiniteObservation {
+        /// Index of the first non-finite component.
+        index: usize,
+    },
     /// A commanded value was NaN or infinite.
     NonFiniteCommand {
         /// The joint.
@@ -93,6 +99,8 @@ pub enum Fault {
 pub enum FaultCategory {
     /// See [`Fault::StaleObservation`].
     StaleObservation,
+    /// See [`Fault::NonFiniteObservation`].
+    NonFiniteObservation,
     /// See [`Fault::NonFiniteCommand`].
     NonFiniteCommand,
     /// See [`Fault::PositionLimitExceeded`].
@@ -117,6 +125,7 @@ impl Fault {
     pub const fn category(&self) -> FaultCategory {
         match self {
             Self::StaleObservation { .. } => FaultCategory::StaleObservation,
+            Self::NonFiniteObservation { .. } => FaultCategory::NonFiniteObservation,
             Self::NonFiniteCommand { .. } => FaultCategory::NonFiniteCommand,
             Self::PositionLimitExceeded { .. } => FaultCategory::PositionLimitExceeded,
             Self::VelocityLimitExceeded { .. } => FaultCategory::VelocityLimitExceeded,
@@ -151,7 +160,8 @@ pub fn excess_magnitude(fault: &Fault) -> Option<f64> {
         Fault::OverTemperature {
             measured, limit, ..
         } => Some((measured.value() - limit.value()).max(0.0)),
-        Fault::NonFiniteCommand { .. }
+        Fault::NonFiniteObservation { .. }
+        | Fault::NonFiniteCommand { .. }
         | Fault::UnauthorizedContact { .. }
         | Fault::ActuationNotPermitted { .. } => None,
     }

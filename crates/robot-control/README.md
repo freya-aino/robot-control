@@ -9,7 +9,8 @@ workspace's already-qualified pieces. Depends on `robot-types`,
 
 | Module | Contents |
 | --- | --- |
-| `control_loop` | `ControlLoop<A, C, N>`: poll → infer → supervise → transmit, built once, ticked repeatedly |
+| `control_loop` | `ControlLoop<A, C, N, P = Mlp, O = NoOp>`: poll → infer → supervise → transmit, built once, ticked repeatedly; generic over a `Policy` and a `LoopOperation`, with construction-time width validation (`ConfigError`) |
+| `operation` | `LoopOperation<P>` hooks (`check_widths`, `before_tick`, `select_action`, `after_tick`), `NoOp`, `SamplingToggle` (deterministic or sampled action), `ExperienceRecorder` (fixed-capacity ordered transition buffer), and tuple composition |
 | `timing` | `TickTiming` (the four distinct quantities of §5) and `TimingHistory<N>`, a fixed-capacity ring for a percentile report |
 
 ## Allocation discipline
@@ -17,9 +18,11 @@ workspace's already-qualified pieces. Depends on `robot-types`,
 Every `Vec` `ControlLoop` owns (`feedback`, `normalized`, `raw_action`,
 `command`) is sized once in `ControlLoop::new`, from the policy network's
 own input/output widths. `ControlLoop::tick` writes into these buffers —
-via `robot_nn::mlp::Mlp::forward` and `robot_supervisor::supervisor::
-Supervisor::check_tick`, both already zero-allocation by their own
-crates' design — and allocates nothing of its own. `ControlLoop::new`
+taking the `Policy::act` path (or the installed
+`LoopOperation::select_action` path) and then calling
+`robot_supervisor::supervisor::Supervisor::check_tick`; the loop itself
+allocates nothing on the tick path. Custom policies and operations must
+also honor the allocation-free contract. `ControlLoop::new`
 takes one `ControlLoopConfig` struct rather than eight positional
 parameters; that refactor was clippy's `too_many_arguments` lint, not
 hand-wringing about style, but the result is also just a better call site.
@@ -54,8 +57,7 @@ stale prior command.
 
 ## Testing
 
-`cargo test -p robot-control` — 7 tests: a tick with no feedback yet still
-produces a command without panicking, feedback through a loopback device is
-consumed on the following tick, the deadline margin matches the configured
-budget under a stepped (deterministic) clock, and `TimingHistory`'s ring
-wrap, percentile and missed-deadline-count behavior.
+`cargo test -p robot-control` — 34 tests: loopback feedback and deterministic
+timing, policy/operation plug-in and composition behavior, buffer reuse,
+construction-time width validation, safe supervisor escalation for
+non-finite observations and policy errors, and adapter-error precedence.

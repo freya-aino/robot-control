@@ -188,23 +188,7 @@ impl<const N: usize> Supervisor<N> {
         }
 
         self.log.clear();
-
-        if input.observation_age > self.freshness.observation {
-            self.log.push(Fault::StaleObservation {
-                age: input.observation_age,
-                limit: self.freshness.observation,
-            });
-        }
-        if input.comms_age > self.freshness.comms {
-            self.log.push(Fault::CommunicationsLost {
-                age: input.comms_age,
-                limit: self.freshness.comms,
-            });
-        }
-        if input.mode.authority() == ActuationAuthority::None {
-            self.log
-                .push(Fault::ActuationNotPermitted { mode: input.mode });
-        }
+        self.record_input_faults(input);
 
         for (i, &value) in raw.iter().enumerate() {
             if !value.is_finite() {
@@ -249,6 +233,74 @@ impl<const N: usize> Supervisor<N> {
             }
         }
 
+        self.record_context_faults(input);
+
+        let response = self.most_severe_response();
+        self.apply(response, raw, out);
+        Ok(response)
+    }
+
+    /// Handles a tick whose observation had a non-finite component at
+    /// `index`, so no action could be computed from it.
+    ///
+    /// Records [`Fault::NonFiniteObservation`] together with every other
+    /// fault this tick's inputs show, then writes the declared safe command
+    /// into `out`: the last safe command or zeros, never a value derived from
+    /// the bad observation. The policy forbids clamping this category, so the
+    /// response is always hold, reject or emergency stop; if a caller-built
+    /// policy ever produced a clamp it is treated as a hold, because there is
+    /// no raw command to clamp.
+    ///
+    /// Allocates nothing. `out` must have length [`Supervisor::width`].
+    pub fn reject_observation(
+        &mut self,
+        input: &TickInput<'_>,
+        index: usize,
+        out: &mut [f64],
+    ) -> Result<Response, SupervisorError> {
+        if out.len() != self.width() {
+            return Err(SupervisorError::WidthMismatch {
+                expected: self.width(),
+                found: out.len(),
+            });
+        }
+
+        self.log.clear();
+        self.log.push(Fault::NonFiniteObservation { index });
+        self.record_input_faults(input);
+        self.record_context_faults(input);
+
+        let response = match self.most_severe_response() {
+            Response::ClampAndContinue => Response::HoldLastSafeCommand,
+            other => other,
+        };
+        self.apply(response, &[], out);
+        Ok(response)
+    }
+
+    /// Records the faults that come from the tick's timing and mode, which
+    /// do not depend on the command's values.
+    fn record_input_faults(&mut self, input: &TickInput<'_>) {
+        if input.observation_age > self.freshness.observation {
+            self.log.push(Fault::StaleObservation {
+                age: input.observation_age,
+                limit: self.freshness.observation,
+            });
+        }
+        if input.comms_age > self.freshness.comms {
+            self.log.push(Fault::CommunicationsLost {
+                age: input.comms_age,
+                limit: self.freshness.comms,
+            });
+        }
+        if input.mode.authority() == ActuationAuthority::None {
+            self.log
+                .push(Fault::ActuationNotPermitted { mode: input.mode });
+        }
+    }
+
+    /// Records the temperature and contact faults.
+    fn record_context_faults(&mut self, input: &TickInput<'_>) {
         for (i, &temp) in input.temperatures.iter().enumerate() {
             if i < self.thermal_limits.len() && temp.value() >= self.thermal_limits[i].value() {
                 self.log.push(Fault::OverTemperature {
@@ -264,10 +316,6 @@ impl<const N: usize> Supervisor<N> {
                 self.log.push(Fault::UnauthorizedContact { site });
             }
         }
-
-        let response = self.most_severe_response();
-        self.apply(response, raw, out);
-        Ok(response)
     }
 
     /// The most severe declared response among this tick's recorded faults,
@@ -336,6 +384,7 @@ impl<const N: usize> Supervisor<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fault::FaultCategory;
     use robot_model::actuator::{
         ActuatorSpec, PdGains, ThermalLimits, TorqueSpeedEnvelope, Transmission,
     };
@@ -452,6 +501,72 @@ mod tests {
         assert_eq!(response, Response::ClampAndContinue);
         assert!((out[0] - 0.5).abs() < 1e-12);
         assert!(sup.log().is_empty());
+    }
+
+    #[test]
+    fn a_non_finite_observation_is_logged_and_escalates_to_a_safe_command() {
+        let mut sup = supervisor();
+        let mut out = [0.0];
+        sup.check_tick(&nominal_input(), &[0.5], &mut out).unwrap();
+        assert!((sup.last_safe_command()[0] - 0.5).abs() < 1e-12);
+
+        let response = sup
+            .reject_observation(&nominal_input(), 3, &mut out)
+            .unwrap();
+        assert_eq!(response, Response::EmergencyStop);
+        assert_eq!(out, [0.0]);
+        assert_eq!(
+            sup.log().entries(),
+            &[Some(Fault::NonFiniteObservation { index: 3 })]
+        );
+    }
+
+    #[test]
+    fn a_hold_policy_for_a_non_finite_observation_replays_the_last_safe_command() {
+        let policy = FaultPolicy::new(|category| match category {
+            FaultCategory::NonFiniteObservation => Response::HoldLastSafeCommand,
+            _ => Response::EmergencyStop,
+        })
+        .unwrap();
+        let mut sup: Supervisor<16> = Supervisor::new(
+            &profile(),
+            policy,
+            FreshnessLimits {
+                observation: Duration::from_millis(100),
+                comms: Duration::from_millis(200),
+            },
+            CommandKind::Position,
+        );
+        let mut out = [0.0];
+        sup.check_tick(&nominal_input(), &[0.5], &mut out).unwrap();
+        assert!((sup.last_safe_command()[0] - 0.5).abs() < 1e-12);
+
+        let mut held = [9.0];
+        let r = sup
+            .reject_observation(&nominal_input(), 0, &mut held)
+            .unwrap();
+        assert_eq!(r, Response::HoldLastSafeCommand);
+        assert!((held[0] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_non_finite_observation_keeps_the_other_faults_of_the_tick() {
+        let mut sup = supervisor();
+        let mut out = [1.0];
+        let mut input = nominal_input();
+        input.comms_age = Duration::from_secs(5);
+        sup.reject_observation(&input, 0, &mut out).unwrap();
+        assert_eq!(sup.log().len(), 2);
+    }
+
+    #[test]
+    fn rejecting_an_observation_checks_the_output_width() {
+        let mut sup = supervisor();
+        let mut out = [0.0, 0.0];
+        assert!(matches!(
+            sup.reject_observation(&nominal_input(), 0, &mut out),
+            Err(SupervisorError::WidthMismatch { .. })
+        ));
     }
 
     #[test]

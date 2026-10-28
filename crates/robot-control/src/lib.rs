@@ -21,4 +21,5 @@
 #![warn(clippy::all)]
 
 pub mod control_loop;
+pub mod operation;
 pub mod timing;

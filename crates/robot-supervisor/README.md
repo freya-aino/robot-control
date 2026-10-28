@@ -16,7 +16,7 @@ check.
 
 | Module | Contents |
 | --- | --- |
-| `fault` | `Fault` (nine categories, each carrying its measurement and limit), `FaultLog<N>`: a fixed-capacity, allocation-free record with an overflow counter |
+| `fault` | `Fault` (ten categories, each carrying its measurement and limit), `FaultLog<N>`: a fixed-capacity, allocation-free record with an overflow counter |
 | `policy` | `Response` (clamp / hold / reject / e-stop), `FaultPolicy`: a validated, total category→response mapping |
 | `supervisor` | `Supervisor<N>`: construction-time setup from a `RobotProfile`, then a per-tick `check_tick` that allocates nothing |
 
@@ -27,7 +27,7 @@ names which faults need more: "Uncommanded motion" (stale command / mode
 confusion) is controlled by "watchdog outside the policy process," and "Loss
 of transport" by "firmware-side command expiry" — neither is a clamp.
 `FaultPolicy::new` enforces this as a constructor-time check: it refuses to
-build a policy that assigns `Response::ClampAndContinue` to
+build a policy that assigns `Response::ClampAndContinue` to `NonFiniteObservation`,
 `StaleObservation`, `CommunicationsLost`, `NonFiniteCommand` or
 `ActuationNotPermitted`. A caller that tries gets a `PolicyError` back, not a
 policy that silently does the wrong thing on a robot.
@@ -48,7 +48,7 @@ overflow past that bound increments a counter rather than growing, matching
 
 ## What it does not do
 
-It does not decide *why* a command was wrong beyond the nine fault
+It does not decide *why* a command was wrong beyond the ten fault
 categories it checks, and it does not interpret a latent or
 position-residual action semantically (`CommandKind::Unbounded` skips the
 physical-limit checks for those, checking only finiteness) — a controller
@@ -58,7 +58,7 @@ supervisor deliberately has no access to.
 
 ## Testing
 
-`cargo test -p robot-supervisor` — 17 tests: the escalation rule's
+`cargo test -p robot-supervisor` — 21 tests: the escalation rule's
 construction-time refusal (including the "custom policy may still choose any
 non-clamp response freely" positive case), clamping arithmetic, every
 escalation path (stale observation, non-finite command, unauthorized

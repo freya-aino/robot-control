@@ -85,17 +85,21 @@ impl core::error::Error for PolicyError {}
 /// other than clamping: "Uncommanded motion" (stale command / watchdog) and
 /// "Loss of transport" (firmware-side command expiry) are both escalation
 /// hazards, and a non-finite command is a computation failure a clamp cannot
-/// make sense of (there is no direction to clamp toward).
-const MUST_ESCALATE: [FaultCategory; 4] = [
+/// make sense of (there is no direction to clamp toward). A non-finite
+/// observation is the sensing-side twin of a stale one: the policy has nothing
+/// trustworthy to act on, so a clamp has nothing to clamp.
+const MUST_ESCALATE: [FaultCategory; 5] = [
     FaultCategory::StaleObservation,
     FaultCategory::CommunicationsLost,
     FaultCategory::NonFiniteCommand,
+    FaultCategory::NonFiniteObservation,
     FaultCategory::ActuationNotPermitted,
 ];
 
 /// All fault categories, used to check a policy is total.
-const ALL_CATEGORIES: [FaultCategory; 9] = [
+const ALL_CATEGORIES: [FaultCategory; 10] = [
     FaultCategory::StaleObservation,
+    FaultCategory::NonFiniteObservation,
     FaultCategory::NonFiniteCommand,
     FaultCategory::PositionLimitExceeded,
     FaultCategory::VelocityLimitExceeded,
@@ -115,7 +119,7 @@ const ALL_CATEGORIES: [FaultCategory; 9] = [
 /// `ClampAndContinue` for a category in [`MUST_ESCALATE`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct FaultPolicy {
-    responses: [Response; 9],
+    responses: [Response; 10],
 }
 
 impl FaultPolicy {
@@ -132,6 +136,7 @@ impl FaultPolicy {
                 Response::HoldLastSafeCommand
             }
             FaultCategory::StaleObservation
+            | FaultCategory::NonFiniteObservation
             | FaultCategory::NonFiniteCommand
             | FaultCategory::CommunicationsLost
             | FaultCategory::ActuationNotPermitted => Response::EmergencyStop,
@@ -142,7 +147,7 @@ impl FaultPolicy {
     /// Builds a policy from a total function, rejecting an assignment that
     /// violates the escalation rule.
     pub fn new(mut assign: impl FnMut(FaultCategory) -> Response) -> Result<Self, PolicyError> {
-        let mut responses = [Response::EmergencyStop; 9];
+        let mut responses = [Response::EmergencyStop; 10];
         for (slot, category) in responses.iter_mut().zip(ALL_CATEGORIES) {
             let response = assign(category);
             if response == Response::ClampAndContinue && MUST_ESCALATE.contains(&category) {
@@ -204,6 +209,7 @@ mod tests {
         for bad in [
             FaultCategory::CommunicationsLost,
             FaultCategory::NonFiniteCommand,
+            FaultCategory::NonFiniteObservation,
         ] {
             let built = FaultPolicy::new(move |category| {
                 if category == bad {

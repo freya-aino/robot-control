@@ -16,6 +16,7 @@ isolation" to warrant existing.
 | `layer` | `Activation` (identity/tanh/ReLU/sigmoid) and `Linear`, a dense `y = Wx + b` layer |
 | `mlp` | `Mlp`: a validated sequence of `Linear` + `Activation` pairs; `Scratch`: preallocated ping-pong buffers; `forward_with_trace` for backpropagation |
 | `init` | Fan-in-scaled normal initialization driven by a `robot_types::rng::Rng`, so network init is part of one reproducible seed stream |
+| `policy` | `Policy` (deterministic observation→action seam, implemented for `Mlp`) and `StochasticPolicy: Policy` (allocation-free sampling with log-probability), the plug-in contract `ControlLoop` is generic over |
 
 ## Why the operator set needs no "unsupported operator" check
 
@@ -50,8 +51,9 @@ second implementation to drift out of sync with the first. The test
 
 ## Testing
 
-`cargo test -p robot-nn` — 18 tests: activation derivatives checked against
+`cargo test -p robot-nn` — 20 tests: activation derivatives checked against
 central-difference numerics, forward passes checked against hand-traced
 arithmetic, determinism across repeated calls, and rejection of every
 malformed shape (mismatched adjacent widths, wrong activation count,
-undersized scratch).
+undersized scratch); the `Policy` implementation also matches `Mlp::forward`
+and reports the network's widths through the trait.
