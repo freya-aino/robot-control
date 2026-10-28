@@ -63,6 +63,32 @@ impl Gradients {
             *v *= factor;
         }
     }
+
+    /// Zeroes every gradient whose flat parameter index is `true` in `frozen`.
+    ///
+    /// `frozen` uses the flat order of `robot_nn::mlp::Mlp::frozen_mask`:
+    /// each layer's weights, then its biases, layer by layer. Its length must
+    /// equal the number of gradient entries.
+    pub fn zero_frozen(&mut self, frozen: &[bool]) -> Result<(), &'static str> {
+        let count: usize = self
+            .weight
+            .iter()
+            .zip(&self.bias)
+            .map(|(w, b)| w.len() + b.len())
+            .sum();
+        if frozen.len() != count {
+            return Err("frozen mask length does not match the gradients");
+        }
+        let mut flat = frozen.iter();
+        for (weight, bias) in self.weight.iter_mut().zip(self.bias.iter_mut()) {
+            for g in weight.iter_mut().chain(bias.iter_mut()) {
+                if let Some(true) = flat.next() {
+                    *g = 0.0;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Backpropagates a loss gradient `d_output` (dL/d(network output)) through

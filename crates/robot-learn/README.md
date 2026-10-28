@@ -64,6 +64,19 @@ as plain owned data for exactly this reason; wiring that into
 `robot-artifacts`' chunk/blob format for an actual save/load round trip is
 the next piece of this crate's own backlog, not yet implemented here.
 
+## Parameter groups
+
+`robot_nn::mlp::ParamGroup { name, range, frozen }` names a flat slice of a
+network's parameters (layer weights, then biases, layer by layer). `PpoAgent`
+keeps one table per network (`set_policy_groups`, `set_value_groups`). The
+policy table indexes the mean network's parameters followed by the log-std
+vector, so `log_std` can be frozen like any other slice. Each table is checked
+against its network before it is stored: names must be non-empty and unique,
+ranges non-empty, inside the parameter count, and non-overlapping. A frozen
+group keeps its weights, first moment and second moment unchanged on every
+update, so momentum cannot move it; frozen `log_std` entries are skipped bit
+for bit.
+
 ## Testing
 
 `cargo test -p robot-learn` — 24 tests: every gradient (backprop through

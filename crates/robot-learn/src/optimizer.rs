@@ -62,35 +62,84 @@ impl AdamState {
         self.step
     }
 
+    /// First-moment estimates, for checkpointing.
+    #[must_use]
+    pub const fn first_moment(&self) -> &Gradients {
+        &self.m
+    }
+
+    /// Second-moment estimates, for checkpointing.
+    #[must_use]
+    pub const fn second_moment(&self) -> &Gradients {
+        &self.v
+    }
+
     /// Applies one Adam step to `mlp` using `grads`, updating both the
     /// optimizer state and the network's parameters in place.
     pub fn step_with(&mut self, mlp: &mut Mlp, grads: &Gradients, config: &AdamConfig) {
+        self.apply_step(mlp, grads, config, &[]);
+    }
+
+    /// Like [`AdamState::step_with`], but parameters flagged in `frozen` are
+    /// left exactly as they are: their value, first moment and second moment
+    /// do not change, so no momentum from earlier steps can move them.
+    ///
+    /// `frozen` uses the flat order of `robot_nn::mlp::Mlp::frozen_mask` and
+    /// must have one entry per parameter.
+    pub fn step_masked(
+        &mut self,
+        mlp: &mut Mlp,
+        grads: &Gradients,
+        config: &AdamConfig,
+        frozen: &[bool],
+    ) -> Result<(), &'static str> {
+        if frozen.len() != mlp.param_count() {
+            return Err("frozen mask length does not match the network");
+        }
+        self.apply_step(mlp, grads, config, frozen);
+        Ok(())
+    }
+
+    /// `frozen` is either empty (nothing frozen) or one flag per parameter.
+    fn apply_step(
+        &mut self,
+        mlp: &mut Mlp,
+        grads: &Gradients,
+        config: &AdamConfig,
+        frozen: &[bool],
+    ) {
         self.step += 1;
         let t = self.step as i32;
         let bias_correction1 = 1.0 - config.beta1.powi(t);
         let bias_correction2 = 1.0 - config.beta2.powi(t);
 
+        let mut offset = 0;
         for layer in 0..mlp.layers().len() {
+            let len = self.m.weight[layer].len();
             update_param_slice(
                 mlp.layers_mut()[layer].weight_mut(),
                 &grads.weight[layer],
                 &mut self.m.weight[layer],
                 &mut self.v.weight[layer],
+                frozen.get(offset..offset + len).unwrap_or(&[]),
                 config,
                 bias_correction1,
                 bias_correction2,
             );
-        }
-        for layer in 0..mlp.layers().len() {
+            offset += len;
+
+            let len = self.m.bias[layer].len();
             update_param_slice(
                 mlp.layers_mut()[layer].bias_mut(),
                 &grads.bias[layer],
                 &mut self.m.bias[layer],
                 &mut self.v.bias[layer],
+                frozen.get(offset..offset + len).unwrap_or(&[]),
                 config,
                 bias_correction1,
                 bias_correction2,
             );
+            offset += len;
         }
     }
 }
@@ -101,16 +150,21 @@ fn update_param_slice(
     grad: &[f64],
     m: &mut [f64],
     v: &mut [f64],
+    frozen: &[bool],
     config: &AdamConfig,
     bias_correction1: f64,
     bias_correction2: f64,
 ) {
-    for (((p, g), m), v) in params
+    for (i, (((p, g), m), v)) in params
         .iter_mut()
         .zip(grad)
         .zip(m.iter_mut())
         .zip(v.iter_mut())
+        .enumerate()
     {
+        if frozen.get(i).copied().unwrap_or(false) {
+            continue;
+        }
         *m = config.beta1 * *m + (1.0 - config.beta1) * g;
         *v = config.beta2 * *v + (1.0 - config.beta2) * g * g;
         let m_hat = *m / bias_correction1;
@@ -183,5 +237,111 @@ mod tests {
             mlp, original,
             "zero gradient must never move the parameters"
         );
+    }
+
+    fn unit_grads(mlp: &Mlp, weight: f64, bias: f64) -> Gradients {
+        let mut grads = Gradients::zeros_like(mlp);
+        grads.weight[0][0] = weight;
+        grads.bias[0][0] = bias;
+        grads
+    }
+
+    #[test]
+    fn frozen_weight_stays_bit_identical_after_momentum_has_built_up() {
+        let mut mlp = quadratic_net();
+        let mut state = AdamState::new(&mlp);
+        let config = AdamConfig {
+            learning_rate: 0.05,
+            ..AdamConfig::default()
+        };
+        for _ in 0..5 {
+            let grads = unit_grads(&mlp, 1.0, 1.0);
+            state.step_with(&mut mlp, &grads, &config);
+        }
+        let weight_before = mlp.layers()[0].weight()[0];
+        let m_before = state.first_moment().weight[0][0];
+        let v_before = state.second_moment().weight[0][0];
+        let bias_before = mlp.layers()[0].bias()[0];
+        assert!(
+            m_before != 0.0 && v_before != 0.0,
+            "moments must be nonzero"
+        );
+
+        let frozen = [true, false];
+        let grads = unit_grads(&mlp, 5.0, 5.0);
+        state
+            .step_masked(&mut mlp, &grads, &config, &frozen)
+            .unwrap();
+
+        assert_eq!(
+            mlp.layers()[0].weight()[0].to_bits(),
+            weight_before.to_bits()
+        );
+        assert_eq!(
+            state.first_moment().weight[0][0].to_bits(),
+            m_before.to_bits()
+        );
+        assert_eq!(
+            state.second_moment().weight[0][0].to_bits(),
+            v_before.to_bits()
+        );
+        assert_ne!(mlp.layers()[0].bias()[0], bias_before);
+    }
+
+    #[test]
+    fn frozen_bias_stays_bit_identical_while_weight_moves() {
+        let mut mlp = quadratic_net();
+        let mut state = AdamState::new(&mlp);
+        let config = AdamConfig {
+            learning_rate: 0.05,
+            ..AdamConfig::default()
+        };
+        for _ in 0..5 {
+            let grads = unit_grads(&mlp, 1.0, 1.0);
+            state.step_with(&mut mlp, &grads, &config);
+        }
+        let weight_before = mlp.layers()[0].weight()[0];
+        let bias_before = mlp.layers()[0].bias()[0];
+        let bias_m_before = state.first_moment().bias[0][0];
+
+        let grads = unit_grads(&mlp, 5.0, 5.0);
+        state
+            .step_masked(&mut mlp, &grads, &config, &[false, true])
+            .unwrap();
+
+        assert_eq!(mlp.layers()[0].bias()[0].to_bits(), bias_before.to_bits());
+        assert_eq!(
+            state.first_moment().bias[0][0].to_bits(),
+            bias_m_before.to_bits()
+        );
+        assert_ne!(mlp.layers()[0].weight()[0], weight_before);
+    }
+
+    #[test]
+    fn mask_length_mismatch_is_rejected_without_touching_state() {
+        let mut mlp = quadratic_net();
+        let original = mlp.clone();
+        let mut state = AdamState::new(&mlp);
+        let config = AdamConfig::default();
+        let grads = unit_grads(&mlp, 1.0, 1.0);
+
+        assert!(state
+            .step_masked(&mut mlp, &grads, &config, &[true])
+            .is_err());
+        assert!(state
+            .step_masked(&mut mlp, &grads, &config, &[false, false, false])
+            .is_err());
+        assert_eq!(state.step(), 0);
+        assert_eq!(mlp, original);
+    }
+
+    #[test]
+    fn gradient_mask_length_mismatch_is_rejected() {
+        let mlp = quadratic_net();
+        let mut grads = unit_grads(&mlp, 1.0, 1.0);
+        assert!(grads.zero_frozen(&[true]).is_err());
+        assert!(grads.zero_frozen(&[true, false, false]).is_err());
+        assert_eq!(grads.weight[0][0], 1.0);
+        assert_eq!(grads.bias[0][0], 1.0);
     }
 }

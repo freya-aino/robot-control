@@ -8,7 +8,9 @@
 //! the gradient derivation below a few closed-form lines rather than a
 //! second backward pass.
 
-use robot_nn::mlp::{ForwardTrace, Mlp, MlpError, Scratch};
+use robot_nn::mlp::{
+    frozen_mask_for_count, ForwardTrace, Mlp, MlpError, ParamGroup, ParamGroupError, Scratch,
+};
 use robot_nn::policy::{Policy, StochasticPolicy};
 use robot_types::rng::Rng;
 
@@ -111,6 +113,20 @@ impl GaussianPolicy {
         (d_mean, d_log_std)
     }
 
+    /// Total number of trainable policy parameters in the flat order used by
+    /// [`GaussianPolicy::frozen_mask`]: the mean network's parameters first,
+    /// then one log-std entry per action dimension.
+    #[must_use]
+    pub fn param_count(&self) -> usize {
+        self.mean_net.param_count() + self.log_std.len()
+    }
+
+    /// Checks `groups` against the full policy parameter space (mean network
+    /// then log-std) and returns one frozen flag per entry.
+    pub fn frozen_mask(&self, groups: &[ParamGroup]) -> Result<Vec<bool>, ParamGroupError> {
+        frozen_mask_for_count(self.param_count(), groups)
+    }
+
     /// Applies a gradient step to the log-std vector directly (a plain
     /// gradient descent step; `robot-learn`'s Adam machinery is reserved for
     /// the network parameters, and a single small vector does not need the
@@ -119,6 +135,27 @@ impl GaussianPolicy {
         for (s, g) in self.log_std.iter_mut().zip(grad) {
             *s = (*s - learning_rate * g).clamp(LOG_STD_MIN, LOG_STD_MAX);
         }
+    }
+
+    /// Like [`GaussianPolicy::apply_log_std_gradient`], but entries whose
+    /// `frozen` flag is set are left untouched, bit for bit. `grad` and
+    /// `frozen` must each have one entry per log-std value; otherwise nothing
+    /// changes and an error is returned.
+    pub fn apply_log_std_gradient_masked(
+        &mut self,
+        grad: &[f64],
+        learning_rate: f64,
+        frozen: &[bool],
+    ) -> Result<(), &'static str> {
+        if grad.len() != self.log_std.len() || frozen.len() != self.log_std.len() {
+            return Err("log-std gradient or mask length does not match log-std");
+        }
+        for ((s, g), skip) in self.log_std.iter_mut().zip(grad).zip(frozen) {
+            if !*skip {
+                *s = (*s - learning_rate * g).clamp(LOG_STD_MIN, LOG_STD_MAX);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -292,5 +329,16 @@ mod tests {
         p.log_std[0] = 0.0;
         p.apply_log_std_gradient(&[-1e6], 1.0);
         assert!(p.log_std[0] <= LOG_STD_MAX + 1e-9);
+    }
+
+    #[test]
+    fn legacy_log_std_gradient_truncates_mismatched_lengths() {
+        let mut p = policy();
+        p.log_std[0] = 0.0;
+        p.apply_log_std_gradient(&[0.25, 1e6], 0.5);
+        assert_eq!(p.log_std[0], -0.125);
+
+        p.apply_log_std_gradient(&[], 0.5);
+        assert_eq!(p.log_std[0], -0.125);
     }
 }

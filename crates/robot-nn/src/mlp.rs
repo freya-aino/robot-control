@@ -9,6 +9,7 @@
 
 use crate::layer::{Activation, LayerError, Linear};
 use core::fmt;
+use core::ops::Range;
 
 /// Why an MLP could not be built or evaluated.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +80,73 @@ impl From<LayerError> for MlpError {
         Self::Layer(e)
     }
 }
+
+/// A named slice of an [`Mlp`]'s parameters that training may freeze.
+///
+/// `range` indexes the flat parameter order used by [`Mlp::frozen_mask`]:
+/// each layer's weights in row-major order, then its biases, layer by layer.
+/// Parameters covered by no group stay trainable.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ParamGroup {
+    /// Identifies the group in errors and in checkpoints. Must be non-empty
+    /// and unique within a table.
+    pub name: String,
+    /// Flat parameter indices the group covers.
+    pub range: Range<usize>,
+    /// When set, training leaves every parameter in `range` unchanged.
+    pub frozen: bool,
+}
+
+/// Why a parameter group table does not fit a network.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ParamGroupError {
+    /// A group has an empty name.
+    EmptyName,
+    /// Two groups share a name.
+    DuplicateName(String),
+    /// A group's range is empty or reversed.
+    EmptyRange {
+        /// The offending group.
+        name: String,
+    },
+    /// A group's range reaches past the network's parameters.
+    OutOfBounds {
+        /// The offending group.
+        name: String,
+        /// One past the last index the group names.
+        end: usize,
+        /// Parameters the network has.
+        count: usize,
+    },
+    /// Two groups cover the same parameter.
+    Overlap {
+        /// The earlier group.
+        first: String,
+        /// The group that collides with it.
+        second: String,
+    },
+}
+
+impl fmt::Display for ParamGroupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyName => write!(f, "parameter group has an empty name"),
+            Self::DuplicateName(name) => write!(f, "parameter group {name:?} is defined twice"),
+            Self::EmptyRange { name } => {
+                write!(f, "parameter group {name:?} has an empty or reversed range")
+            }
+            Self::OutOfBounds { name, end, count } => write!(
+                f,
+                "parameter group {name:?} ends at {end}, but the network has {count} parameters"
+            ),
+            Self::Overlap { first, second } => {
+                write!(f, "parameter groups {first:?} and {second:?} overlap")
+            }
+        }
+    }
+}
+
+impl core::error::Error for ParamGroupError {}
 
 /// Preallocated working memory for [`Mlp::forward`].
 ///
@@ -178,6 +246,72 @@ impl Mlp {
         &self.activations
     }
 
+    /// Total number of parameters: every layer's weights plus its biases.
+    #[must_use]
+    pub fn param_count(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|l| l.weight().len() + l.bias().len())
+            .sum()
+    }
+
+    /// Checks `groups` against this network and returns one flag per flat
+    /// parameter, `true` where a frozen group covers it.
+    ///
+    /// Groups must have distinct non-empty names, non-empty ranges inside
+    /// [`Mlp::param_count`], and no shared parameters. Any violation is an
+    /// error and no mask is produced.
+    pub fn frozen_mask(&self, groups: &[ParamGroup]) -> Result<Vec<bool>, ParamGroupError> {
+        frozen_mask_for_count(self.param_count(), groups)
+    }
+}
+
+/// Checks `groups` against a flat parameter space of `count` entries and
+/// returns one flag per entry, `true` where a frozen group covers it.
+///
+/// [`Mlp::frozen_mask`] uses this with the network's own parameter count. An
+/// owner that appends parameters to that flat order (for example a policy's
+/// log-std vector) uses it with the extended count.
+pub fn frozen_mask_for_count(
+    count: usize,
+    groups: &[ParamGroup],
+) -> Result<Vec<bool>, ParamGroupError> {
+    let mut mask = vec![false; count];
+    for (i, group) in groups.iter().enumerate() {
+        if group.name.is_empty() {
+            return Err(ParamGroupError::EmptyName);
+        }
+        if groups[..i].iter().any(|earlier| earlier.name == group.name) {
+            return Err(ParamGroupError::DuplicateName(group.name.clone()));
+        }
+        if group.range.start >= group.range.end {
+            return Err(ParamGroupError::EmptyRange {
+                name: group.name.clone(),
+            });
+        }
+        if group.range.end > count {
+            return Err(ParamGroupError::OutOfBounds {
+                name: group.name.clone(),
+                end: group.range.end,
+                count,
+            });
+        }
+        for earlier in &groups[..i] {
+            if group.range.start < earlier.range.end && earlier.range.start < group.range.end {
+                return Err(ParamGroupError::Overlap {
+                    first: earlier.name.clone(),
+                    second: group.name.clone(),
+                });
+            }
+        }
+        if group.frozen {
+            mask[group.range.clone()].fill(true);
+        }
+    }
+    Ok(mask)
+}
+
+impl Mlp {
     /// The scratch capacity [`Scratch::new`] must be built with to evaluate
     /// this network.
     #[must_use]
@@ -403,6 +537,62 @@ mod tests {
             net.forward(&[0.0, 0.0], &mut out, &mut tiny),
             Err(MlpError::ScratchMismatch { .. })
         ));
+    }
+
+    fn group(name: &str, range: Range<usize>, frozen: bool) -> ParamGroup {
+        ParamGroup {
+            name: name.to_owned(),
+            range,
+            frozen,
+        }
+    }
+
+    #[test]
+    fn frozen_mask_marks_exactly_the_frozen_flat_indices() {
+        let net = two_layer_net();
+        assert_eq!(net.param_count(), 13);
+        let mask = net
+            .frozen_mask(&[
+                group("l0-weights", 0..6, true),
+                group("l1-bias", 12..13, false),
+            ])
+            .unwrap();
+        let expected: Vec<bool> = (0..13).map(|i| i < 6).collect();
+        assert_eq!(mask, expected);
+    }
+
+    #[test]
+    fn parameter_group_tables_that_do_not_fit_are_rejected() {
+        let net = two_layer_net();
+        assert_eq!(
+            net.frozen_mask(&[group("", 0..1, true)]),
+            Err(ParamGroupError::EmptyName)
+        );
+        assert_eq!(
+            net.frozen_mask(&[group("a", 0..1, true), group("a", 2..3, true)]),
+            Err(ParamGroupError::DuplicateName("a".to_owned()))
+        );
+        assert_eq!(
+            net.frozen_mask(&[group("empty", 4..4, true)]),
+            Err(ParamGroupError::EmptyRange {
+                name: "empty".to_owned()
+            })
+        );
+        assert_eq!(
+            net.frozen_mask(&[group("far", 10..14, true)]),
+            Err(ParamGroupError::OutOfBounds {
+                name: "far".to_owned(),
+                end: 14,
+                count: 13
+            })
+        );
+        assert_eq!(
+            net.frozen_mask(&[group("a", 0..6, true), group("b", 5..9, false)]),
+            Err(ParamGroupError::Overlap {
+                first: "a".to_owned(),
+                second: "b".to_owned()
+            })
+        );
     }
 
     #[test]

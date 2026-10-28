@@ -15,7 +15,7 @@ use crate::gae::compute_gae;
 use crate::gaussian_policy::GaussianPolicy;
 use crate::optimizer::{AdamConfig, AdamState};
 use crate::rollout::RolloutBuffer;
-use robot_nn::mlp::Mlp;
+use robot_nn::mlp::{Mlp, ParamGroup, ParamGroupError};
 use robot_sim::env::Environment;
 use robot_types::ids::EnvId;
 use robot_types::obs::Normalizer;
@@ -108,6 +108,8 @@ pub struct PpoAgent {
     pub normalizer: Normalizer,
     config: PpoConfig,
     generation: Generation,
+    policy_groups: Vec<ParamGroup>,
+    value_groups: Vec<ParamGroup>,
 }
 
 impl PpoAgent {
@@ -129,7 +131,39 @@ impl PpoAgent {
             normalizer: Normalizer::new(obs_width, 10.0),
             config,
             generation: Generation::FIRST,
+            policy_groups: Vec::new(),
+            value_groups: Vec::new(),
         }
+    }
+
+    /// Replaces the policy's parameter groups. The flat space is the mean
+    /// network's parameters followed by the log-std entries (see
+    /// [`GaussianPolicy::frozen_mask`]). The table is checked against the
+    /// current policy first; on error nothing changes.
+    pub fn set_policy_groups(&mut self, groups: Vec<ParamGroup>) -> Result<(), ParamGroupError> {
+        self.policy.frozen_mask(&groups)?;
+        self.policy_groups = groups;
+        Ok(())
+    }
+
+    /// Replaces the value network's parameter groups, checked against the
+    /// current value network. On error nothing changes.
+    pub fn set_value_groups(&mut self, groups: Vec<ParamGroup>) -> Result<(), ParamGroupError> {
+        self.value_net.frozen_mask(&groups)?;
+        self.value_groups = groups;
+        Ok(())
+    }
+
+    /// The policy network's parameter groups.
+    #[must_use]
+    pub fn policy_groups(&self) -> &[ParamGroup] {
+        &self.policy_groups
+    }
+
+    /// The value network's parameter groups.
+    #[must_use]
+    pub fn value_groups(&self) -> &[ParamGroup] {
+        &self.value_groups
     }
 
     /// Collects one rollout of `steps` environment transitions, resetting
@@ -287,6 +321,21 @@ impl PpoAgent {
             .map(|t| t.behavior_log_prob.expect("collected with a log-prob"))
             .collect();
 
+        let policy_mask = self
+            .policy
+            .frozen_mask(&self.policy_groups)
+            .unwrap_or_else(|e| {
+                panic!("policy parameter groups no longer fit the policy network: {e}")
+            });
+        let (policy_frozen, log_std_frozen) =
+            policy_mask.split_at(self.policy.mean_net.param_count());
+        let value_frozen = self
+            .value_net
+            .frozen_mask(&self.value_groups)
+            .unwrap_or_else(|e| {
+                panic!("value parameter groups no longer fit the value network: {e}")
+            });
+
         for _epoch in 0..self.config.epochs {
             let mut policy_grads = crate::backprop::Gradients::zeros_like(&self.policy.mean_net);
             let mut log_std_grad = vec![0.0; self.policy.log_std.len()];
@@ -336,15 +385,35 @@ impl PpoAgent {
                 value_grads.add_assign(&vg);
             }
 
-            self.policy_adam.step_with(
-                &mut self.policy.mean_net,
-                &policy_grads,
-                &self.config.policy_adam,
-            );
+            policy_grads
+                .zero_frozen(policy_frozen)
+                .expect("mask matches the policy gradients");
+            value_grads
+                .zero_frozen(&value_frozen)
+                .expect("mask matches the value gradients");
+            self.policy_adam
+                .step_masked(
+                    &mut self.policy.mean_net,
+                    &policy_grads,
+                    &self.config.policy_adam,
+                    policy_frozen,
+                )
+                .expect("mask matches the policy network");
             self.policy
-                .apply_log_std_gradient(&log_std_grad, self.config.log_std_learning_rate);
+                .apply_log_std_gradient_masked(
+                    &log_std_grad,
+                    self.config.log_std_learning_rate,
+                    log_std_frozen,
+                )
+                .expect("mask matches the log-std vector");
             self.value_adam
-                .step_with(&mut self.value_net, &value_grads, &self.config.value_adam);
+                .step_masked(
+                    &mut self.value_net,
+                    &value_grads,
+                    &self.config.value_adam,
+                    &value_frozen,
+                )
+                .expect("mask matches the value network");
         }
 
         self.generation = self.generation.next();
