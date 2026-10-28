@@ -20,6 +20,19 @@ U1 and U3 are tooling and operations discipline and do not wait on the C-15 adop
 
 The Python prior art is gone. `training/`, `unitree/` and `test.ipynb` were removed from the working tree on 2026-10-26, closing C-01, and `SPECS.md` Section 1.1 now describes their disposition as historical references reachable only through version control. Three consequences for this plan: nothing in any phase below reads those paths, the Unitree protocol work of Phase 5 is Rust authorship against a cited commit rather than a port, and reintroducing any of that code is a Section 2.1 exception request. The working tree currently holds documentation only, so the Phase 0 bootstrap below starts from an empty workspace — which is the honest starting condition and was already assumed.
 
+### Status snapshot, 2026-10-27
+
+Recorded from a review of the current working tree. Anything marked not implemented has no code behind it yet.
+
+- Repository: 22 crates with a standard-library-only default dependency closure (ADR 0003). `AGENT.md` is committed as `881d39a`.
+- Simulation: `robot sim multibody --floating` runs the vendored Unitree G1 (35 DOF, floating base) with sphere ground contact (ADR 0010). A clamped PD stance hold keeps the pelvis above the plane for 2 s (min 0.787 m). Zero torque reports a FAIL (pelvis falls to −0.77 m). This is a supported-stance check, not a balance claim. Ground contact covers only the 8 ankle-roll sphere shapes; box, cylinder and mesh shapes are not modelled.
+- Visualization: not implemented. `robot-viewer` holds data types only (`ViewerFrame`, `ContactSample`, `Timeline`), and no command writes frames. Rerun and egui are still `unverified` candidates.
+- Plug-in seams: `Environment` (`robot_sim::env`) and `HardwareAdapter` (`robot_hardware::device`) are complemented by `Policy`/`LoopOperation` in `robot-nn`/`robot-control`, `Backend` in `robot-sim`, and `ModelImporter` in `robot-model`.
+- Learning: feed-forward MLP policies only; recurrent policies are not implemented. Checkpoint/resume saves weights, observation normalizer, optimizer and RNG state; named parameter groups support per-group freezing.
+- Fidelity testing: shared analytic harness (ADR 0008 v5), reference/coarse tiers, TOML report (analytic subset). G1 contact is `not_measured` at reference and `not_applicable` at coarse; GPU checks are not applicable.
+
+Sequencing: the plug-in seams (Phase 1) and the fidelity, checkpoint and parameter-group work (Phase 3) close before rendering goes beyond test-purpose file output. The frame-dump and SVG steps in Phase 2 may proceed earlier only because they add no dependency.
+
 ## 1. Delivery strategy
 
 Build one complete vertical slice before expanding the research surface:
@@ -51,6 +64,9 @@ Create architecture decision records for:
 11. The tier assignment, rate and compute budget of every learned component that is deployed, per C-22 and `SPECS.md` Section 5.1. This decision is taken per deployed stack, not once for the project, and it is the record that states whether the strategy layer survives being slowed from its experiment rate to its intended tier.
 12. Which prior corpora are admissible for retrieval-augmented learning, with the retrieval unit, the similarity source and whether an embedding model is involved at all, per C-23. One record per corpus, after the license audit of C-07.
 13. Which limited-data adaptation methods beyond identification and history conditioning are actually scheduled, and under which operating mode any of them may update parameters on hardware, per C-24. One record per method, and no record is written before the methods above it in the Section 11.3 ordering have been measured and found insufficient.
+14. Plug-in trait boundaries for the policy (`Policy`), the simulator backend (`Backend`, per `SIMULATION_SPECS.md` Section 13.2) and robot model import. The change must be behavior-preserving, with the existing tests passing unchanged.
+15. Fidelity tier definitions and the fidelity report schema: the `Check` and `Tier` types, the shared battery, and the JSON or TOML format written through `robot-artifacts`.
+16. Test-render output format: a CSV or JSON Lines frame dump first, std-only SVG second, and Rerun `.rrd` only after Appendix B.6 qualification and an ADR.
 
 C-01 is closed: the Python prior art was removed rather than migrated, and the decision record states that its remaining role is citation from version control.
 
@@ -109,6 +125,7 @@ Create explicit Rust implementation tasks for missing articulated dynamics, GPU 
 - Keep any foreign runtime out of the default devenv environment, and keep the exclusion gate standing now that the Python prior art of `SPECS.md` Section 1.1 is removed: deletion is not enforcement, and a reintroduced PyTorch or MJX dependency must still fail the build. Manual comparison runs against a historical commit use a separately named non-default environment.
 - Expose development-only services such as the viewer, a local telemetry collector and the replay device through devenv `processes`; nothing declared there may become a deployment dependency.
 - Define simulator, hardware, learner and inference interfaces without promising stable dynamic-plugin ABI.
+- Make the remaining concrete pieces replaceable, behavior-preserving: a `Policy` trait (`act`, input and output width) implemented by the MLP and Gaussian policies, with `ControlLoop` generic over it; a `Backend` trait in `robot-sim` as `SIMULATION_SPECS.md` Section 13.2 describes; and a model importer trait in `robot-model`. `Environment` and `HardwareAdapter` are the reference pattern. The existing tests must pass unchanged.
 - Evaluate `urdf-rs` with our semantic validation layer; inventory unsupported model features explicitly.
 - Create per-dependency records covering enabled features, transitive native linkage, build scripts, license, maintenance and replacement cost under Appendix B.6.
 - Define versioned message envelopes and compare bincode/postcard/rkyv/Cap'n Proto/prost only where their full build/runtime toolchains satisfy policy. Separate IPC encoding, transport and durable storage decisions.
@@ -158,6 +175,7 @@ Fixtures round-trip without losing units, frames or timestamps; invalid or incom
 - Preserve original-session splits through augmentation and windowing.
 - Audit `bvh_anim` / `bvh_anim_parser` and `c3dio` before adopting them; test source-format edge cases and do not assume optional FFI features satisfy the default dependency policy.
 - Compare Rerun/egui and `urdf-viz` for inspection tools. Preserve canonical data independently of Rerun RRD files; qualify MCAP separately if needed.
+- Test-purpose rendering comes before the viewer above. First, a `robot sim multibody --out <dir>` option writes pelvis pose and joint angles per step as CSV or JSON Lines, read back through `robot-viewer`'s `Timeline`. Then an std-only SVG per frame, with golden-file tests. Neither step adds a dependency. Rerun `.rrd` and egui/wgpu wait for Appendix B.6 qualification and an ADR.
 - Investigate Rust SMPL-family implementations before scheduling authorship. Scope parsing, licensed model evaluation and fitting separately; keep BVH delivery independent of this investigation.
 - Resolve the constrained solver before implementing differential-QP IK: benchmark representative full-body matrices, setup/update/solve costs, cold/warm behavior, residuals, memory and infeasible cases. Retain a feasible non-QP baseline where appropriate.
 
@@ -180,7 +198,13 @@ The simulation target changed, by explicit project direction, partway through th
 - Qualify pendulum, contact/friction, static balance and perturbation benchmarks.
 - Implement PPO, advantage estimation, action distributions, value loss, entropy regularization and normalization.
 - Distinguish truncation from terminal failure in return calculation.
-- Implement checkpoint/resume including optimizer, RNG and normalizer state.
+- Implement checkpoint/resume including optimizer, RNG and normalizer state. Store all of them through the `robot-artifacts` chunk format, and save the normalizer with the weights.
+  - Status: implemented in `robot-learn::checkpoint`; checkpoints save and restore weights, normalizer, Adam and RNG state.
+- Add parameter groups (named weight slices) with a per-group `frozen` flag, so part of a policy can be trained or fine-tuned while the rest stays fixed.
+  - Status: implemented in `robot-nn`; frozen parameter groups are excluded from learning updates and covered by tests.
+- Build a fidelity harness in `robot-sim`: a `Check` trait (name, tolerance, measured value, pass or fail), a `Tier` struct that bundles timestep, integrator and solver settings, and a runner that writes a report through `robot-artifacts`. The first battery reuses the existing analytic tests (pendulum period, PD equilibrium, ABA/RNE closed form, energy drift, free-fall), and every declared tier must pass it. The CPU-vs-GPU agreement test (`SIMULATION_SPECS.md` Section 14.2) and the contact-budget exhaustion counter (Section 14.4) wait for a GPU backend.
+  - Status (ADR 0008, schema v5): the harness is implemented in `crates/robot-sim/src/fidelity.rs`. `FidelityCheck` is the plug-in trait; `Check` is the result row; the archival battery runs six analytic checks at the `reference` (100 µs) and `coarse` (1 ms) tiers, and writes `fidelity.toml` through `robot-artifacts`. The report scope is the analytic subset (`scope = "analytic-subset"`). It does not qualify G1 ground contact: each tier carries a `[[contact]]` row, `not_applicable` at 1 ms (outside the ADR 0010 range `[5e-5, 4e-4]` s) and `not_measured` at 100 µs. The sphere-contact check is deferred. The CPU-vs-GPU agreement and contact-budget rows stay `not_applicable` until a GPU backend exists.
+- Add ground-contact handling to the multibody path. Done for sphere shapes: the floating-base G1 is held above the plane by a clamped PD stance under a qualified dt range (ADR 0010). It is not a balance result. The 28 box, cylinder and mesh shapes are unmodelled, so zero torque still collapses. Balance tests remain blocked until contact proxies and a controller exist. Run `robot sim qualify` as a gate.
 - Train small reference tasks and compare learning against deterministic baselines.
 - Train standing, balance and basic stepping on the selected reference robot.
 - Measure environment throughput and project the cost of the next experiment; introduce GPU simulation only through a separately qualified backend.
@@ -191,7 +215,7 @@ The simulation target changed, by explicit project direction, partway through th
 
 ### Exit gate
 
-Baseline RL succeeds on agreed small tasks across at least three seeds, resumes correctly and exports a CPU-executable actor. Contact behavior and numerical sensitivity are documented. A basic simulated humanoid controller maintains balance within its acceptance profile.
+Baseline RL succeeds on agreed small tasks across at least three seeds, resumes correctly and exports a CPU-executable actor. Contact behavior and numerical sensitivity are documented. A basic simulated humanoid controller maintains balance within its acceptance profile. A fidelity report exists for every declared tier, and a parameter group frozen during fine-tuning is verified unchanged.
 
 ## 7. Phase 4 — Motion tracker and R0 vertical slice
 
@@ -367,6 +391,7 @@ The ordering of the `SPECS.md` Section 11.3 table is binding and runs by increas
 - Compare adaptation methods at equal real-interaction budgets and report learning curves.
 - Verify deployment inputs contain no unavailable paired simulator state.
 - Constrain residual authority and test fallback to the frozen controller.
+- Partial fine-tuning (a residual head or a single parameter group) depends on the parameter-group support of Phase 3. Until that exists, only whole-network updates are available.
 - Use shadow evaluation, simulation regression and staged hardware validation for every candidate.
 - Treat every adaptation method as an extension under Sections 9.3 and 9.6: its own manifest, its own feature flag and its own conformance run. Any component that runs on the robot — adaptation module, context encoder, residual head — is a tier under Section 5.1 with a declared rate, a measured budget and a defined behavior when its input is stale.
 - Enforce adaptation authority outside the adapted component: the supervisor clamps a learned correction like any other command, and widening a bound is a change to the safety case, not a hyperparameter.
@@ -483,6 +508,9 @@ Maintain a versioned benchmark manifest containing hardware, workloads, seed lis
 | Encoding / parallelism | Message validation/migration, latency/allocations, sequential vs. parallel rollouts | Encoding/pool/schema changes |
 | Numerical | FK/IK known solutions, gradients, return calculation, action transforms | Math/training changes |
 | Physics | Pendulum, friction, contact impulses, standing and pushes | Physics or robot model changes |
+| Fidelity tiers | Each declared tier passes the shared `Check` battery; a report is written per run; CPU-vs-GPU agreement and contact-budget counter once a GPU backend exists | Physics, solver, integrator or tier-setting changes |
+| Checkpoint and parameter groups | Save/load restores weights, optimizer, RNG and normalizer; frozen groups stay bit-identical during fine-tuning | Learner or checkpoint-format changes |
+| Visualization output | Golden-file CSV/SVG output for fixed fixtures; one frame per simulation step | Frame-dump or viewer changes |
 | Learning | Small-task PPO curves, resume equivalence within tolerance | Learner/backend changes |
 | Motion | Held-out tracking, foot slip, saturation, transitions | References or tracker changes |
 | Runtime | Allocation checks, tails under load, stale input and watchdog faults | Runtime/inference/hardware changes |
@@ -526,6 +554,8 @@ Keep deterministic correctness checks separate from expensive stochastic trainin
 | The retriever reaches held-out data | Implausible few-shot results; an evaluation episode found in the corpus | Exclude by construction and test the exclusion; treat any breach as invalidating every affected run |
 | Adaptation is scheduled ahead of its ordering | A residual or on-hardware update proposed before identification and history conditioning were measured on the same robot | The Section 11.3 ordering is binding; each step needs its own C-24 record and a measured insufficiency above it |
 | The retired Python prior art is reintroduced by convenience | A PyTorch, MJX or CycloneDDS dependency reappearing in the closure; a restored `training/` directory | The exclusion gate fails the build; reintroduction is a Section 2.1 exception request, not a revert |
+| Rendering starts before the seams and harness are stable | Test renders depend on types that change in Phase 1 or Phase 3 | Keep rendering to frame dumps and golden files until the Phase 1 traits and Phase 3 harness are closed |
+| Policy code stays hard-wired to MLPs | A new policy type needs edits in `PpoAgent`, `ControlLoop` and the checkpoint path | Introduce the `Policy` trait before a second policy type is added; a recurrent policy is its first test |
 
 ## 18. First executable backlog
 
@@ -574,6 +604,10 @@ The addendum introduces concrete outputs without requiring all candidates to ent
 | Retrieval-augmented learning report | 8 | Corpus manifest with licenses and provenance labels, tested held-out exclusion, target-only and whole-corpus comparisons at equal budget, retrieval and rejection statistics; closes row A-34 and `SPECS.md` C-23 |
 | Retrieval tier separation report | 7 | Separate R0/R1/R2 configuration and measurement, an R2 path proven free of file, network, embedding and allocation work, policy-path tails with decision age, and per-tier empty-result behavior; closes row A-35 |
 | Limited-data adaptation ordering record | 9 | One record per scheduled method with the measured insufficiency of the methods above it, declared deployment observation sets, bounded authority enforced externally, and sample efficiency stated in real minutes, episodes and interventions; closes `SPECS.md` C-24 |
+| Plug-in seam traits | 1 | `Policy`, `Backend` and model-importer traits in place, with existing tests passing unchanged; closes the seam gap in the status snapshot |
+| Fidelity harness report | 3, then each tier | `Check`/`Tier` runner, a shared battery and a JSON or TOML report per declared tier |
+| Checkpoint and parameter-group support | 3, prerequisite for 9 | Round-trip checkpoint including the normalizer, and a frozen-group test; prerequisite for partial fine-tuning in Phase 9 |
+| Test-render artifacts | 2 | Frame dump and SVG golden files for a fixed simulation fixture, with no new dependency |
 
 Do not schedule a complete articulated-dynamics rewrite, full SMPL fitting system or hybrid physics engine solely because the supplied survey reports a gap. Resolve the evidence first, then estimate the smallest necessary Rust implementation. Dependency promotion follows Appendix B.6; unqualified candidates remain references.
 
