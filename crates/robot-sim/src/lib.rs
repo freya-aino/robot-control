@@ -58,6 +58,7 @@ pub mod articulated;
 pub mod backend;
 pub mod contact;
 pub mod env;
+pub mod fidelity;
 pub mod multibody_env;
 pub mod pendulum;
 pub mod spatial;
