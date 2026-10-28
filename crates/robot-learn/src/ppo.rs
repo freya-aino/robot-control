@@ -444,6 +444,7 @@ mod tests {
     use super::*;
     use robot_nn::init::initialize;
     use robot_nn::layer::Activation;
+    use robot_nn::mlp::ParamGroupError;
     use robot_sim::env::{Environment, PendulumEnv, PhysicsStep};
     use robot_sim::pendulum::PendulumParams;
     use robot_tasks::balance::{BalanceTask, BalanceTaskConfig};
@@ -551,6 +552,241 @@ mod tests {
             (mean_after - TARGET).abs() < 0.1,
             "expected convergence near {TARGET}, got {mean_after}"
         );
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|v| v.to_bits()).collect()
+    }
+
+    fn run_effort_updates(agent: &mut PpoAgent, updates: usize) {
+        let mut env = PendulumEnv::with_reset_range(
+            PendulumParams {
+                length: 1.0,
+                mass: 1.0,
+                gravity: 9.80665,
+                damping: 0.05,
+            },
+            4.0,
+            THETA_RANGE,
+            OMEGA_RANGE,
+            SeedStream::new(5, 0),
+        );
+        let task_fn = |_obs: &[f64], action: &[f64], _next: &[f64], _step: u32, _fail: bool| {
+            let mut terms = RewardTerms::new();
+            terms
+                .push(robot_types::transition::RewardTerm {
+                    name: "effort".to_owned(),
+                    value: -action[0] * action[0],
+                    weight: 1.0,
+                    is_style_term: false,
+                })
+                .unwrap();
+            (terms, Termination::Terminal)
+        };
+        let mut buffer = RolloutBuffer::new(agent.transition_schema("pendulum-fixture/1.0"), 64);
+        let mut rollout_rng = Rng::new(SeedStream::new(5, 2));
+        for _ in 0..updates {
+            buffer.clear();
+            agent.collect_rollout(
+                &mut env,
+                &task_fn,
+                &mut buffer,
+                64,
+                RolloutContext {
+                    env_id: EnvId::new(0),
+                    robot_profile: "pendulum-fixture/1.0",
+                    episode_seed_base: 1,
+                },
+                &mut rollout_rng,
+            );
+            agent.update(&buffer);
+        }
+    }
+
+    #[test]
+    fn frozen_groups_stay_bit_identical_after_training_builds_momentum() {
+        let mut agent = new_agent(5);
+        run_effort_updates(&mut agent, 2);
+
+        let policy_count = agent.policy.param_count();
+        let log_std_range = agent.policy.mean_net.param_count()..policy_count;
+        agent
+            .set_policy_groups(vec![
+                ParamGroup {
+                    name: "policy-hidden-weights".to_owned(),
+                    range: 0..32,
+                    frozen: true,
+                },
+                ParamGroup {
+                    name: "policy-log-std".to_owned(),
+                    range: log_std_range,
+                    frozen: true,
+                },
+            ])
+            .unwrap();
+        let hidden_weights_before = bits(agent.policy.mean_net.layers()[0].weight());
+        let log_std_before = bits(&agent.policy.log_std);
+        let hidden_bias_before = bits(agent.policy.mean_net.layers()[0].bias());
+        let output_weight_before = bits(agent.policy.mean_net.layers()[1].weight());
+
+        run_effort_updates(&mut agent, 3);
+
+        assert_eq!(
+            bits(agent.policy.mean_net.layers()[0].weight()),
+            hidden_weights_before
+        );
+        assert_eq!(bits(&agent.policy.log_std), log_std_before);
+        assert_ne!(
+            bits(agent.policy.mean_net.layers()[0].bias()),
+            hidden_bias_before
+        );
+        assert_ne!(
+            bits(agent.policy.mean_net.layers()[1].weight()),
+            output_weight_before
+        );
+    }
+
+    #[test]
+    fn frozen_log_std_is_not_moved_when_only_log_std_is_frozen() {
+        let mut agent = new_agent(5);
+        run_effort_updates(&mut agent, 2);
+        let policy_count = agent.policy.param_count();
+        agent
+            .set_policy_groups(vec![ParamGroup {
+                name: "policy-log-std".to_owned(),
+                range: agent.policy.mean_net.param_count()..policy_count,
+                frozen: true,
+            }])
+            .unwrap();
+        let log_std_before = bits(&agent.policy.log_std);
+        let mean_before = bits(agent.policy.mean_net.layers()[1].weight());
+
+        run_effort_updates(&mut agent, 3);
+
+        assert_eq!(bits(&agent.policy.log_std), log_std_before);
+        assert_ne!(
+            bits(agent.policy.mean_net.layers()[1].weight()),
+            mean_before
+        );
+    }
+
+    #[test]
+    fn frozen_groups_stay_bit_identical_while_unfrozen_parameters_change() {
+        let mut agent = new_agent(5);
+        let value_params = agent.value_net.param_count();
+        // Flat order: layer 0 weights 0..32, layer 0 biases 32..48,
+        // layer 1 weights 48..64, layer 1 bias 64.
+        agent
+            .set_policy_groups(vec![ParamGroup {
+                name: "policy-hidden-weights".to_owned(),
+                range: 0..32,
+                frozen: true,
+            }])
+            .unwrap();
+        agent
+            .set_value_groups(vec![ParamGroup {
+                name: "value-all".to_owned(),
+                range: 0..value_params,
+                frozen: true,
+            }])
+            .unwrap();
+
+        let frozen_before = bits(agent.policy.mean_net.layers()[0].weight());
+        let hidden_bias_before = bits(agent.policy.mean_net.layers()[0].bias());
+        let output_weight_before = bits(agent.policy.mean_net.layers()[1].weight());
+        let value_before: Vec<Vec<u64>> = agent
+            .value_net
+            .layers()
+            .iter()
+            .flat_map(|l| [bits(l.weight()), bits(l.bias())])
+            .collect();
+
+        let mut env = PendulumEnv::with_reset_range(
+            PendulumParams {
+                length: 1.0,
+                mass: 1.0,
+                gravity: 9.80665,
+                damping: 0.05,
+            },
+            4.0,
+            THETA_RANGE,
+            OMEGA_RANGE,
+            SeedStream::new(5, 0),
+        );
+        let task_fn = |_obs: &[f64], action: &[f64], _next: &[f64], _step: u32, _fail: bool| {
+            let mut terms = RewardTerms::new();
+            terms
+                .push(robot_types::transition::RewardTerm {
+                    name: "effort".to_owned(),
+                    value: -action[0] * action[0],
+                    weight: 1.0,
+                    is_style_term: false,
+                })
+                .unwrap();
+            (terms, Termination::Terminal)
+        };
+        let mut buffer = RolloutBuffer::new(agent.transition_schema("pendulum-fixture/1.0"), 64);
+        let mut rollout_rng = Rng::new(SeedStream::new(5, 2));
+        for _ in 0..3 {
+            buffer.clear();
+            agent.collect_rollout(
+                &mut env,
+                &task_fn,
+                &mut buffer,
+                64,
+                RolloutContext {
+                    env_id: EnvId::new(0),
+                    robot_profile: "pendulum-fixture/1.0",
+                    episode_seed_base: 1,
+                },
+                &mut rollout_rng,
+            );
+            agent.update(&buffer);
+        }
+
+        assert_eq!(
+            bits(agent.policy.mean_net.layers()[0].weight()),
+            frozen_before
+        );
+        let value_after: Vec<Vec<u64>> = agent
+            .value_net
+            .layers()
+            .iter()
+            .flat_map(|l| [bits(l.weight()), bits(l.bias())])
+            .collect();
+        assert_eq!(value_after, value_before);
+        assert_ne!(
+            bits(agent.policy.mean_net.layers()[0].bias()),
+            hidden_bias_before
+        );
+        assert_ne!(
+            bits(agent.policy.mean_net.layers()[1].weight()),
+            output_weight_before
+        );
+    }
+
+    #[test]
+    fn invalid_parameter_groups_leave_the_agent_unchanged() {
+        let mut agent = new_agent(5);
+        let out_of_bounds = ParamGroup {
+            name: "too-far".to_owned(),
+            range: 0..1000,
+            frozen: true,
+        };
+        assert!(matches!(
+            agent.set_policy_groups(vec![out_of_bounds]),
+            Err(ParamGroupError::OutOfBounds { .. })
+        ));
+        assert!(agent.policy_groups().is_empty());
+        assert!(matches!(
+            agent.set_value_groups(vec![ParamGroup {
+                name: "reversed".to_owned(),
+                range: 5..5,
+                frozen: true,
+            }]),
+            Err(ParamGroupError::EmptyRange { .. })
+        ));
+        assert!(agent.value_groups().is_empty());
     }
 
     fn new_agent(seed: u64) -> PpoAgent {
