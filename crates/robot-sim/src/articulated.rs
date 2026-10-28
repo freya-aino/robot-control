@@ -664,7 +664,7 @@ impl MultibodyState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use robot_model::joint::{JointLimits, JointSpec};
     use robot_model::kinematics::forward_kinematics;
@@ -759,7 +759,7 @@ mod tests {
     /// link1 (mass m1, point mass at local +X offset l1); joint2 (axis
     /// +Y), at link1's local (l1, 0, 0), carries link2 (mass m2, point
     /// mass at local +X offset l2).
-    fn double_pendulum(m1: f64, l1: f64, m2: f64, l2: f64) -> RobotProfile {
+    pub(crate) fn double_pendulum(m1: f64, l1: f64, m2: f64, l2: f64) -> RobotProfile {
         let root = empty_link(0, "anchor", MassProperties::MASSLESS);
         let joint1 = revolute(0, "joint1", 0, 1, RigidPose::IDENTITY, Vec3::unit_y());
         let link1 = empty_link(

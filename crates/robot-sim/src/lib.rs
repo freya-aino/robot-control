@@ -55,7 +55,9 @@
 #![warn(clippy::all)]
 
 pub mod articulated;
+pub mod backend;
 pub mod contact;
 pub mod env;
+pub mod multibody_env;
 pub mod pendulum;
 pub mod spatial;
