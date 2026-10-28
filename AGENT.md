@@ -116,9 +116,22 @@ SPECS.md Section 3 governs claims. Treat research and performance claims as
 
 ## Workflow rules
 
-- Do not commit unless the user explicitly asks. The working tree is
-  currently uncommitted pending review. If you commit, use a descriptive
-  message and follow the project's existing commit style (see `git log`).
+- Commit only when the user explicitly asks. When you commit, follow the
+  commit format below.
+- Commit subject: `type(scope): imperative summary`. The type is lowercase
+  and one of `feat`, `fix`, `docs`, `refactor`, `test`, `build`, `chore`.
+  The scope is a crate name (for example `robot-nn`) or an area (for example
+  `docs`, `agent`). The subject is at most 72 characters and has no trailing
+  period.
+- Commit body: wrap at 72 columns and explain why the change exists. End it
+  with the trailer `Co-authored-by: Junie <junie@jetbrains.com>`.
+- One logical change per commit. Stage files by explicit path or hunk, never
+  with `git add -A` or `git add .`. Check `git diff --cached --name-only`
+  before each commit.
+- Never stage or commit `.junie/` (session plans), `.envrc` (machine-local),
+  or `target/`.
+- Do not rewrite existing commits (no amend, rebase, or squash) unless the
+  user asks.
 - Do not modify `.envrc`, `.devenv*`, `.direnv/`, `target/`, or the
   `.pre-commit-config.yaml` symlink. They are machine-local.
 - Keep changes scoped to the task. Avoid unrelated refactors across crates.
