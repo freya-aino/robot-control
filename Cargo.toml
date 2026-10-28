@@ -45,3 +45,8 @@ debug = 1
 
 [profile.bench]
 debug = 1
+
+# The G1 contact tests run 10k-20k explicit steps; an optimised test build keeps
+# `cargo test -p robot-sim` well inside the per-command budget. No test is weakened.
+[profile.test.package.robot-sim]
+opt-level = 2
