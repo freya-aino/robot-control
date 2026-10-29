@@ -217,6 +217,91 @@ impl GroundContact {
     }
 }
 
+/// Why a plane-sphere contact query was rejected.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlaneSphereError {
+    /// An input is NaN or infinite.
+    NonFinite,
+    /// The sphere radius is negative.
+    NegativeRadius,
+}
+
+impl fmt::Display for PlaneSphereError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFinite => write!(f, "plane-sphere contact input is non-finite"),
+            Self::NegativeRadius => write!(f, "plane-sphere contact radius is negative"),
+        }
+    }
+}
+
+impl core::error::Error for PlaneSphereError {}
+
+/// A plane-sphere contact in MuJoCo's convention: `dist` is the signed
+/// separation (negative when penetrating), `normal` points from the plane
+/// toward the sphere, and `pos` is the contact point midway between the
+/// plane and the sphere surface.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PlaneSphereContact {
+    /// Signed distance between the surfaces (`con->dist`).
+    pub dist: f64,
+    /// Contact normal, unit length (`con->normal`).
+    pub normal: [f64; 3],
+    /// Contact position (`con->pos`).
+    pub pos: [f64; 3],
+}
+
+/// Plane-sphere contact for a horizontal plane `z = plane_height` with normal
+/// `+z`. Source: `mjraw_PlaneSphere` (static) and its public wrapper
+/// `mjc_PlaneSphere`, MuJoCo 3.17.0 (commit `800a109a`),
+/// `src/engine/engine_collision_primitive.c`, lines 28-49 and 53-62.
+///
+/// The source takes `normal` from the plane's rotation matrix column `mat1[2,5,8]`,
+/// computes `cdist = dot(pos2 - pos1, normal)`, rejects the pair when
+/// `cdist > margin + radius`, and otherwise sets `dist = cdist - radius` and
+/// `pos = pos2 - normal * (dist / 2 + radius)`, where `pos2` is the sphere
+/// centre. This port fixes `normal = +z` (the identity-frame plane) and
+/// returns `pos` without the `tangent` field the source also zeroes, because
+/// the contact struct here has no tangent.
+///
+/// For a plane at `plane_height` the contact point sits at height
+/// `center.z - radius - dist / 2`, midway between the plane and the sphere's
+/// lowest point when the sphere touches or penetrates.
+///
+/// Returns `Ok(None)` when the sphere is farther than `margin` from the plane.
+/// Only the plane-sphere geometry is ported. The penalty force stays in
+/// [`GroundContact::force`], which is the baseline this function does not change.
+pub fn plane_sphere_contact(
+    center: [f64; 3],
+    radius: f64,
+    plane_height: f64,
+    margin: f64,
+) -> Result<Option<PlaneSphereContact>, PlaneSphereError> {
+    if !center.iter().all(|x| x.is_finite())
+        || !radius.is_finite()
+        || !plane_height.is_finite()
+        || !margin.is_finite()
+    {
+        return Err(PlaneSphereError::NonFinite);
+    }
+    if radius < 0.0 {
+        return Err(PlaneSphereError::NegativeRadius);
+    }
+    let normal = [0.0, 0.0, 1.0];
+    let cdist = center[2] - plane_height;
+    if cdist > margin + radius {
+        return Ok(None);
+    }
+    let dist = cdist - radius;
+    let offset = -dist / 2.0 - radius;
+    let pos = [
+        center[0] + normal[0] * offset,
+        center[1] + normal[1] * offset,
+        center[2] + normal[2] * offset,
+    ];
+    Ok(Some(PlaneSphereContact { dist, normal, pos }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,5 +522,54 @@ mod tests {
         for g in bad {
             assert!(!g.is_valid(), "{g:?} should be invalid");
         }
+    }
+
+    #[test]
+    fn plane_sphere_penetration_matches_the_hand_derived_values() {
+        // Hand derivation: plane z = 0, sphere centre (0.3, -0.2, 0.08), radius 0.1,
+        // margin 0. cdist = 0.08, so dist = 0.08 - 0.1 = -0.02. The position offset
+        // is -dist/2 - radius = 0.01 - 0.1 = -0.09, so pos.z = 0.08 - 0.09 = -0.01,
+        // which is the midpoint of the plane (0) and the sphere's lowest point (-0.02).
+        // x and y are unchanged because the normal is +z.
+        let c = plane_sphere_contact([0.3, -0.2, 0.08], 0.1, 0.0, 0.0)
+            .unwrap()
+            .unwrap();
+        assert!((c.dist + 0.02).abs() < 1e-15, "dist = {}", c.dist);
+        assert_eq!(c.normal, [0.0, 0.0, 1.0]);
+        assert!((c.pos[0] - 0.3).abs() < 1e-15 && (c.pos[1] + 0.2).abs() < 1e-15);
+        assert!((c.pos[2] + 0.01).abs() < 1e-15, "pos.z = {}", c.pos[2]);
+    }
+
+    #[test]
+    fn plane_sphere_margin_admits_a_separated_sphere() {
+        // Hand derivation: centre height 0.15, radius 0.1, margin 0.1. cdist = 0.15 is
+        // not greater than margin + radius = 0.2, so the pair is reported with
+        // dist = 0.15 - 0.1 = 0.05 > 0 (separated, inside the margin).
+        let c = plane_sphere_contact([0.0, 0.0, 0.15], 0.1, 0.0, 0.1)
+            .unwrap()
+            .unwrap();
+        assert!((c.dist - 0.05).abs() < 1e-15, "dist = {}", c.dist);
+    }
+
+    #[test]
+    fn plane_sphere_beyond_the_margin_is_no_contact() {
+        // Hand derivation: centre height 0.25, radius 0.1, margin 0. cdist = 0.25
+        // exceeds margin + radius = 0.1, so no contact is returned.
+        assert_eq!(
+            plane_sphere_contact([0.0, 0.0, 0.25], 0.1, 0.0, 0.0),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn plane_sphere_refuses_invalid_inputs() {
+        assert_eq!(
+            plane_sphere_contact([0.0, 0.0, f64::NAN], 0.1, 0.0, 0.0),
+            Err(PlaneSphereError::NonFinite)
+        );
+        assert_eq!(
+            plane_sphere_contact([0.0, 0.0, 0.0], -0.1, 0.0, 0.0),
+            Err(PlaneSphereError::NegativeRadius)
+        );
     }
 }
