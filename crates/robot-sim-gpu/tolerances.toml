@@ -1,0 +1,109 @@
+# GPU-vs-CPU agreement records for robot-sim-gpu.
+#
+# Each [[scenario]] names one kernel comparison, its tier, the tolerance the
+# test asserts, and the measured maxima on each device.
+#
+# Two bound kinds:
+# - Absolute records (no `tolerance_rel` key): `measured_max_*` is the maximum
+#   absolute |gpu - cpu| and must be <= `tolerance_abs`.
+# - Combined records (with `tolerance_rel`): the test bound is
+#   `tolerance_abs + tolerance_rel * |cpu|`. `measured_worst_ratio_*` is the
+#   worst |gpu - cpu| / bound and must be <= 1. `measured_max_*` is the largest
+#   absolute error seen, which can exceed `tolerance_abs` by design.
+#
+# `measured_*` values come from the named tests run with `--nocapture` on Intel
+# iGPU (Vulkan) and Mesa Lavapipe, and from `cargo run -p robot-sim-gpu
+# --features cubecl --example gpu_latency` for the RK4 and impedance rows. They
+# are agreement facts against the CPU f64 reference, not MuJoCo parity. The
+# feature-off test `tolerance_records_are_complete_and_hold` parses this file
+# and checks every measured value against its bound.
+
+[[scenario]]
+name = "rk4_pendulum_theta_1000_steps"
+kernel = "rk4_pendulum_kernel"
+tier = "trajectory"
+envs = 4097
+steps = 1000
+dt = 0.001
+tolerance_abs = 1e-4
+measured_max_intel = 1.122e-5
+measured_max_lavapipe = 1.131e-5
+measured_index_intel = 4091
+measured_index_lavapipe = 4091
+test = "rk4_pendulum_4097_envs_1000_steps_match_cpu_within_recorded_tolerance (asserted); gpu_latency example; rk4_pendulum_matches_cpu_closure_reference (50 steps, 4 envs)"
+
+[[scenario]]
+name = "rk4_pendulum_omega_1000_steps"
+kernel = "rk4_pendulum_kernel"
+tier = "trajectory"
+envs = 4097
+steps = 1000
+dt = 0.001
+tolerance_abs = 1e-4
+measured_max_intel = 2.419e-5
+measured_max_lavapipe = 1.132e-5
+measured_index_intel = 3404
+measured_index_lavapipe = 4009
+test = "rk4_pendulum_4097_envs_1000_steps_match_cpu_within_recorded_tolerance (asserted); gpu_latency example; rk4_pendulum_matches_cpu_closure_reference (50 steps, 4 envs)"
+
+[[scenario]]
+name = "constraint_impedance_d_4097_rows"
+kernel = "constraint_impedance_kernel"
+tier = "single_launch"
+envs = 4097
+steps = 1
+dt = 0.0
+tolerance_abs = 1e-5
+measured_max_intel = 2.995e-8
+measured_max_lavapipe = 3.069e-8
+measured_index_intel = 1923
+measured_index_lavapipe = 1972
+test = "constraint_impedance_4097_rows_match_cpu_within_recorded_tolerance (asserted); constraint_impedance_branches_match_cpu_including_impp_sign (8 branch rows)"
+
+[[scenario]]
+name = "constraint_impedance_impp_4097_rows"
+kernel = "constraint_impedance_kernel"
+tier = "single_launch"
+envs = 4097
+steps = 1
+dt = 0.0
+tolerance_abs = 1e-4
+measured_max_intel = 3.133e-6
+measured_max_lavapipe = 4.530e-6
+measured_index_intel = 2009
+measured_index_lavapipe = 1982
+test = "constraint_impedance_4097_rows_match_cpu_within_recorded_tolerance (asserted); constraint_impedance_above_mid_impp_matches_cpu (x > mid, p = 2 and 3, asserted); constraint_impedance_branches_match_cpu_including_impp_sign (8 branch rows)"
+
+[[scenario]]
+name = "implicit_random_spd_q_qd"
+kernel = "gpu_implicit_damping_euler_step"
+tier = "batch"
+envs = 4097
+steps = 1
+dt = 0.01
+tolerance_abs = 2e-6
+tolerance_rel = 2e-6
+measured_max_intel = 7.782e-8
+measured_max_lavapipe = 7.574e-8
+measured_index_intel = 16304
+measured_index_lavapipe = 2933
+measured_worst_ratio_intel = 0.0255
+measured_worst_ratio_lavapipe = 0.0255
+test = "random_spd_batches_of_4097_envs_match_the_cpu_reference (asserted, nv = 1, 2, 3, 6)"
+
+[[scenario]]
+name = "equality_random_spd_force_qacc"
+kernel = "gpu_solve_equality"
+tier = "batch"
+envs = 4097
+steps = 1
+dt = 0.001
+tolerance_abs = 1e-4
+tolerance_rel = 5e-6
+measured_max_intel = 1.477e-3
+measured_max_lavapipe = 1.396e-3
+measured_index_intel = 703
+measured_index_lavapipe = 1492
+measured_worst_ratio_intel = 0.2325
+measured_worst_ratio_lavapipe = 0.2467
+test = "random_cpu_agreement_across_partial_tail_and_impedance_branches (asserted, (nv, nr) in (1,1) (1,2) (2,2) (2,4) (2,5) (3,2) (6,6))"

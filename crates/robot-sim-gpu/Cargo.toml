@@ -1,0 +1,28 @@
+[package]
+name = "robot-sim-gpu"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "NOASSERTION"
+publish = false
+description = "CubeCL GPU backend for robot-sim algorithms"
+
+[features]
+default = []
+cubecl = ["dep:cubecl", "dep:cubecl-runtime"]
+
+[dependencies]
+robot-sim = { path = "../robot-sim" }
+cubecl = { version = "=0.11.3", default-features = false, features = ["wgpu"], optional = true }
+cubecl-runtime = { version = "=0.11.3", optional = true }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[[example]]
+name = "gpu_latency"
+required-features = ["cubecl"]
+
+[[example]]
+name = "gpu_resource_repeatability"
+required-features = ["cubecl"]

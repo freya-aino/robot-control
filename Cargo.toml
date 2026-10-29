@@ -10,6 +10,7 @@ members = [
     "crates/motion-validate",
     "crates/robot-nn",
     "crates/robot-sim",
+    "crates/robot-sim-gpu",
     "crates/robot-tasks",
     "crates/robot-learn",
     "crates/robot-skills",
