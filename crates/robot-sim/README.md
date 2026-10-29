@@ -19,21 +19,36 @@ what it's becoming.
 | Module | Contents |
 | --- | --- |
 | `pendulum` | `Pendulum`: a damped, actuated pendulum integrated by semi-implicit Euler — the first qualification benchmark Appendix B.4 names |
-| `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names. `GroundContact`: the per-sphere penalty law (regularised Coulomb friction, separation clamp) used by articulated bodies; see ADR 0010 |
+| `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names. `GroundContact`: the per-sphere penalty law (regularised Coulomb friction, separation clamp) used by articulated bodies; see ADR 0010. `plane_sphere_contact`: pure `+z` plane-sphere geometry from MuJoCo 3.17.0 `mjraw_PlaneSphere` (signed distance, normal, contact point, margin); the penalty force stays in `GroundContact` |
 | `env` | `Environment` trait (reset/step/seeded randomization) and `PendulumEnv`, a trainable RL environment wrapping `pendulum` |
 | `backend` | `Backend: Environment` adds `backend_name()`; implemented for `PendulumEnv` (`cpu-pendulum`) |
 | `multibody_env` | `MultibodyEnv`: `Environment` and `Backend` over `ArticulatedBody`. Without `with_ground` it steps `MultibodyState::step` (`cpu-multibody`, a floating base falls). With a `GroundContact` attached it steps `step_with_ground` (`cpu-multibody-ground`). Rejects a wrong-length `q_home` with `WidthMismatch` |
-| `spatial` | `Twist`/`Wrench` spatial-vector algebra and `SpatialInertia` — the 6D motion/force representation the multi-body solver is built on |
-| `fidelity` | Fidelity harness (ADR 0008, schema v5): `FidelityCheck` plug-in trait, `run_checks`, the archival six-check analytic battery at the `reference` (100 µs) and `coarse` (1 ms) tiers, per-check `system` attribution, `[[contact]]` G1 applicability per tier, GPU checks recorded as not applicable, and a strict TOML report reader/writer through `robot-artifacts`. Scope is the analytic subset only; it does not qualify G1 ground contact |
+| `spatial` | Spatial-vector algebra on plain arrays (`[f64; 3]` vectors, row-major `[f64; 9]` rotations, `[f64; 6]` motion/force vectors, `[f64; 36]` spatial inertia) — the 6D motion/force representation the multi-body solver is built on. Uses `std` only; no `robot_types` or `robot_model` types |
+| `fidelity` | Fidelity harness (ADR 0008, schema v7): `FidelityCheck` plug-in trait, `run_checks`, the archival seven-check analytic battery (the v6 seventh check `pendulum_trajectory` compares the 1 rad angle series with `oracle::pendulum_closed_form` through `oracle::compare_series`, abs-only, with a per-check `sample` index) at the `reference` (100 µs) and `coarse` (1 ms) tiers, per-check `system` attribution, `[[contact]]` G1 applicability per tier, GPU checks recorded as not applicable, the measured G1 zero-torque `[[probe]]` row (v7, scenario runner `g1_zero_torque_probe`), and a strict TOML report reader/writer through `robot-artifacts`. Scope is the analytic subset plus one measured probe; it does not qualify G1 ground contact |
+| `oracle` | Pure `std` oracle module, no `robot_types`, `robot-model` or `HashMap` types: `pendulum_closed_form` (exact pendulum angle for any release angle, Landen/AGM `sn`, domain `\|theta0\| < pi`, complementary modulus from `cos`), `pendulum_period`, `energy_drift` (zero and non-finite `E(0)` guarded only), `compare_series` (explicit `LengthMismatch`, `EmptySeries`, `InvalidTolerance` errors; pass per sample `\|r - c\| <= abs + rel*\|r\|`) returning `OracleReport` |
+| `integrators` | Pure `std` integrators ported from MuJoCo 3.17.0 `engine_forward.c`: `semi_implicit_euler_step` (`mj_advance` order), `implicit_damping_euler_step` (`mj_EulerSkip` damping branch, Cholesky solve, `None` and unchanged state on a non-SPD system or non-finite inputs), `rk4_step` (`mj_RungeKutta`, N=4). Scalar joints only; not wired into `MultibodyState::step` |
+| `passive` | Pure `std` passive and actuator forces from MuJoCo 3.17.0: `joint_spring_force` and `joint_damper_force` (`mj_springdamper`, linear case), `affine_actuator_force` (`mj_fwdActuation`, `GAIN_AFFINE`/`BIAS_AFFINE`). Polynomial, muscle, tendon, flex and gravity-compensation terms are not ported |
+| `constraint` | Pure `std` equality-constraint subset from MuJoCo 3.17.0 `engine_core_constraint.c`: `joint_equality_row` (`mjEQ_JOINT`, one or two scalar joints with the quartic coupling), `impedance`, `stiffness_damping`, `effective_timeconst` (`2*dt` clamp, mixed-format refusal), and `solve_equality`, a closed-form solve of an equality-only problem returning forces, `qacc` and clamped rows. Not wired into `MultibodyState::step`. Not ported: connect, weld and tendon rows, friction, limit and contact rows, the iterative solvers |
 | `articulated` | `ArticulatedBody`: multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, including a floating base. Sphere ground contact (`forward_dynamics_with_ground`, `step_with_ground`, `lowest_contact_height`), a clamped PD `stance_torques` hold, plus `MultibodyState`, a semi-implicit-Euler stepper. Box, cylinder and mesh shapes are counted, not modelled (ADR 0010) |
 
 ## What this crate has and does not yet have
 
+Steps 5 and 6 (MuJoCo 3.17.0 source-faithful ports, pure `std`: `integrators`,
+`passive`, `constraint`, and the plane-sphere geometry in `contact`) are
+implemented as standalone functions with hand-derived tests. Not yet
+implemented: wiring them into `MultibodyState::step`; free and ball
+joint integration (`mj_integratePos` quaternion path); sparse-`M`
+`implicit`/`implicitfast`; polynomial, muscle, DC-motor, PID, tendon, flex,
+gravity-compensation, fluid and contact passive terms; connect, weld and
+tendon equality rows; friction, limit and contact rows, the shared
+contact-plus-equality solver and its iterative solvers; and the non-plane
+collision pairs.
+
 `spatial`/`articulated` are a real, validated multi-body dynamics solver
 (see their own doc comments and `SIMULATION_SPECS.md` §4 item 1: their
-RNE core was confirmed, by direct comparison against MuJoCo's own source,
-to be the same algorithm MuJoCo's engine runs, gravity-as-fictitious-
-base-acceleration trick and all), and it now handles a floating base:
+RNE core is a research-pass implementation, informed by direct comparison
+against MuJoCo's own source, not a re-derived parity proof), and it now handles
+a floating base:
 `robot_model::joint::JointKind::Free` gives a profile's root six
 unconstrained degrees of freedom against an explicit `world` link, and
 `robot_model::fixtures::unitree_g1_29dof_floating_base` is a real G1
@@ -49,7 +64,8 @@ What remains missing, named precisely: **contact is sphere-only**. Box,
 cylinder and mesh collision shapes are counted but not modelled, so the
 G1's pelvis and torso have no collision geometry and zero torque collapses
 through the plane. There is no joint-limit or actuator model, no balance
-controller, and **no GPU execution path** (`SIMULATION_SPECS.md` §11). The
+controller, **no constraint solver wired into stepping; equality-only solver available as standalone** (penalty sphere contact forces used otherwise), and
+**no GPU batched execution path in this crate**. The separate unpublished crate `crates/robot-sim-gpu` (feature `cubecl`, ADR 0012) has CubeCL kernels for semi-implicit Euler, implicit-damping Euler and equality-only `solve_equality` (per-environment dense Cholesky, `nv,nrow ≤ 6`), spring/damper/actuator forces, equality residual, `solimp` impedance with its derivative `impP` (asserted for both sides of the midpoint), and plane-sphere contact. It also has a named pendulum RK4 kernel (`gpu_rk4_pendulum_step`, asserted over 4097 environments and 1000 steps). The general closure-based `rk4_step` is not ported and has no CPU fallback on the GPU, and there is no contact/friction/limit solver or batched G1/ABA on the GPU (`SIMULATION_SPECS.md` §11). Its gate 3 timing (dev build, RK4 and equality only) and gate 4 in-process repeatability are on one device per run, with no throughput claim. Tolerance records are in `crates/robot-sim-gpu/tolerances.toml`. Run its tests with `cargo test -p robot-sim-gpu --features cubecl` under a Vulkan ICD (see ADR 0012). The
 robot cannot stand, balance or walk on its own, and it cannot run as a
 GPU-batched training environment yet.
 
@@ -77,10 +93,10 @@ would have passed unnoticed.
 ## A real limit found by actually running it, not by theory
 
 Running the vendored G1 fixture (`robot sim multibody` in `robot-cli`)
-through `MultibodyState::step` surfaced a genuine, now-documented
-instability: the semi-implicit Euler integrator diverges to NaN within
-about 1.3 simulated seconds at `dt = 5e-4`, but runs stably at
-`dt = 1e-4`. `SIMULATION_SPECS.md` §4 item 3 ties this directly to a
+through the stepper surfaced a genuine, now-documented instability. With zero
+applied torque on the floating G1 and sphere ground contact, semi-implicit Euler
+at `dt = 5e-4` s hits a singular joint inertia matrix at step 2236 (about 1.12
+simulated seconds), recorded as a measured `[[probe]]` row (`status = "fail"`, `error = "SingularJointInertia"`, owned by `fidelity.rs`); the row does not change `all_pass`. The failure is also a model-coverage limit: the pelvis and torso carry no collision geometry, so the trunk reaches the plane through unmodelled shapes once the legs fold, and the row does not isolate the integrator's share. The clamped PD stance hold stays finite over 2 s at the same `dt`. `SIMULATION_SPECS.md` §4 item 3 ties this directly to a
 textbook cause confirmed by reading MuJoCo's own integrator
 documentation: even MuJoCo's "simple" default integrator already folds
 joint-damping derivatives into an implicit solve, specifically because
@@ -92,8 +108,8 @@ implicit-in-velocity integrator before any further stability claim.
 ## The `Free` joint: one general implementation, not two
 
 `ArticulatedBody`'s ABA/RNE are written once, generically over a joint's
-degree-of-freedom count `k` (`Vec<Twist>` motion-subspace bases, `k x k`
-matrix solves via `robot_types::math::Matrix`), rather than a scalar
+degree-of-freedom count `k` (`[f64; 6]` motion-subspace bases, `k x k`
+matrix solves by an explicit partial-pivot LU on plain arrays), rather than a scalar
 fast path plus a separately-maintained multi-DOF path. Every existing
 single-DOF test (the point-mass-pendulum closed form, the double-
 pendulum round-trip, the real fixed-base G1) exercises that same general
@@ -123,7 +139,7 @@ not a tautology).
 
 ## Testing
 
-`cargo test -p robot-sim` — 107 unit tests and 6 integration tests (`tests/fidelity_extension.rs`, the external `FidelityCheck` API). Fidelity tests (`cargo test -p robot-sim fidelity`) cover the pass rule, every declared tier, the report round trip, strict reader rejection (tampered pass/all_pass, relabelled system, wrong scope, contact rows that disagree with the timestep rule), duplicate names, the step budget, and failure injection at a 200 ms tier. Earlier coverage: the pendulum (analytic period,
+`cargo test -p robot-sim` — 191 unit tests and 9 integration tests (`tests/fidelity_extension.rs`, the external `FidelityCheck` API, including the v6 series-tolerance rejections for `rel > 0` and `abs = NaN`). The `oracle` tests cover the separatrix period asymptote, a 3.0 rad RK4 cross-check, the largest admissible `theta0` below `pi`, and the energy zero policy. The articulated-body and spatial-algebra modules have dedicated regression coverage for the dense solver and array adapters. Fidelity tests (`cargo test -p robot-sim fidelity`) cover the pass rule, every declared tier, the report round trip, strict reader rejection (tampered pass/all_pass, relabelled system, wrong scope, contact rows that disagree with the timestep rule), duplicate names, the step budget, and failure injection at a 200 ms tier. Earlier coverage: the pendulum (analytic period,
 energy bound, monotonic dissipation under damping, gravity-compensated PD
 convergence), the contact body (steady-state penetration depth, energy loss
 on impact, non-reversing friction, push-and-recover), the environment
