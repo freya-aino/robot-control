@@ -54,19 +54,15 @@
 
 use crate::contact::GroundContact;
 use crate::spatial::{
-    cross_motion_force, cross_motion_motion, transform_force, transform_motion, SpatialInertia,
-    Twist, Wrench,
+    add3, add6, compose_pose, cross3, cross_motion_force, cross_motion_motion, dot3, dot6,
+    inertia_apply, inertia_from_mass, inertia_transform_to_parent, join6, mat3_mul_vec,
+    mat3_transpose_mul_vec, matrix6_add, matrix6_sub, rotation_from_quat, scale3, scale6, split6,
+    sub6, transform_force, transform_motion,
 };
 use robot_model::joint::JointKind;
-use robot_model::joint::JointSpec;
 use robot_model::link::CollisionGeometry;
-use robot_model::pose::RigidPose;
 use robot_model::profile::RobotProfile;
-use robot_types::frames::{Quat, Vec3};
-use robot_types::ids::LinkId;
-use robot_types::math::Matrix;
-use std::collections::HashMap;
-use std::ops::Mul;
+use robot_types::frames::Vec3;
 
 /// Why a dynamics computation could not run.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -120,14 +116,33 @@ impl core::fmt::Display for DynamicsError {
 
 impl core::error::Error for DynamicsError {}
 
+/// A rigid pose as (row-major rotation, translation): the algorithm-side
+/// representation of what `robot_model::pose::RigidPose` holds at the crate
+/// boundary.
+type Pose = ([f64; 9], [f64; 3]);
+
+const IDENTITY_ROTATION: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+const IDENTITY_POSE: Pose = (IDENTITY_ROTATION, [0.0; 3]);
+const ZERO6: [f64; 6] = [0.0; 6];
+
 /// One body in the articulated tree: a link together with the single
 /// joint that attaches it to its parent (the profile's root link is not
 /// itself a body here — it is the fixed base every body's chain of
 /// parents eventually reaches, unless that root attaches to an explicit
 /// `world` link via a `Free` joint, in which case the *former* root is
 /// simply the first body in the tree like any other).
+///
+/// Every field is a plain scalar or array: the boundary adapter in
+/// [`ArticulatedBody::from_profile`] converts the `robot-model` joint and
+/// link once, so the recursions below never see a model type.
 struct Body {
-    joint: JointSpec,
+    kind: JointKind,
+    /// Joint axis in the joint's local frame (unnormalized, as declared).
+    axis: [f64; 3],
+    /// The joint origin in the parent link's frame.
+    origin: Pose,
+    /// The joint's effort limit, used only by the stance hold.
+    effort: f64,
     /// Index into `bodies` of this body's parent, or `None` when the
     /// parent is the fixed base (the profile's root link).
     parent: Option<usize>,
@@ -141,7 +156,8 @@ struct Body {
     /// Width in the `q` vector: 0 (`Fixed`), 1 (every single-axis kind)
     /// or 7 (`Free`: 3 translation + 4 quaternion).
     position_width: usize,
-    inertia: SpatialInertia,
+    /// Row-major 6x6 spatial inertia about the link origin.
+    inertia: [f64; 36],
 }
 
 /// A profile's joint tree, preprocessed into the articulated structure
@@ -158,37 +174,40 @@ pub struct ArticulatedBody {
 /// frame, used as a ground-contact point.
 struct ContactSphere {
     body: usize,
-    center: Vec3,
+    center: [f64; 3],
     radius: f64,
 }
 
 /// The motion subspace of `kind`: the basis twists (expressed in the
-/// joint's own, constant local axes — see `JointSpec::transform_at`'s own
-/// doc comment on why this is value-independent) that its generalized
-/// velocity multiplies. Width `k` matches [`JointKind::dof_count`]: empty
-/// for `Fixed`, one twist for every single-axis kind, six (three angular
-/// then three linear, matching this module's `Free`-joint velocity
-/// layout) for `Free`.
-fn motion_subspace_basis(kind: JointKind, axis: Vec3) -> Vec<Twist> {
+/// joint's own, constant local axes) that its generalized velocity
+/// multiplies, returned as a fixed-capacity array and the number `k` of
+/// valid entries. `k` matches [`JointKind::dof_count`]: zero for `Fixed`,
+/// one twist for every single-axis kind, six (three angular then three
+/// linear, matching this module's `Free`-joint velocity layout) for `Free`.
+fn motion_subspace_basis(kind: JointKind, axis: [f64; 3]) -> ([[f64; 6]; 6], usize) {
+    let mut basis = [ZERO6; 6];
     match kind {
-        JointKind::Fixed => Vec::new(),
-        JointKind::Revolute | JointKind::Continuous => vec![Twist::angular_rate(axis, 1.0)],
-        JointKind::Prismatic => vec![Twist::linear_rate(axis, 1.0)],
-        JointKind::Free => vec![
-            Twist::angular_rate(Vec3::unit_x(), 1.0),
-            Twist::angular_rate(Vec3::unit_y(), 1.0),
-            Twist::angular_rate(Vec3::unit_z(), 1.0),
-            Twist::linear_rate(Vec3::unit_x(), 1.0),
-            Twist::linear_rate(Vec3::unit_y(), 1.0),
-            Twist::linear_rate(Vec3::unit_z(), 1.0),
-        ],
+        JointKind::Fixed => (basis, 0),
+        JointKind::Revolute | JointKind::Continuous => {
+            basis[0] = join6(axis, [0.0; 3]);
+            (basis, 1)
+        }
+        JointKind::Prismatic => {
+            basis[0] = join6([0.0; 3], axis);
+            (basis, 1)
+        }
+        JointKind::Free => {
+            for (i, twist) in basis.iter_mut().enumerate() {
+                twist[i] = 1.0;
+            }
+            (basis, 6)
+        }
     }
 }
 
 /// Width of `kind`'s own slice of the `q` vector: 0 (`Fixed`), 1 (every
 /// single-axis kind) or 7 (`Free`: 3 translation then 4 quaternion,
-/// `w, x, y, z` — matching `robot_types::frames::Quat`'s own field
-/// order).
+/// `w, x, y, z`).
 const fn position_width(kind: JointKind) -> usize {
     match kind {
         JointKind::Fixed => 0,
@@ -198,47 +217,152 @@ const fn position_width(kind: JointKind) -> usize {
 }
 
 /// Combines a joint's basis twists with its own generalized velocity (or
-/// acceleration) slice into one spatial motion vector — `sum_j basis[j] *
-/// values[j]`. For a `Free` joint this is the standard "linear
-/// combination of the six basis twists" reading of a 6-DOF joint's
-/// motion; for a single-DOF joint it collapses to `basis[0] * values[0]`
-/// exactly, and for `Fixed` (`basis` and `values` both empty) it is
-/// `Twist::ZERO`.
-fn combine(basis: &[Twist], values: &[f64]) -> Twist {
-    basis
-        .iter()
-        .zip(values)
-        .fold(Twist::ZERO, |acc, (s, &v)| acc + s.scaled(v))
+/// acceleration) slice into one spatial motion vector: `sum_j basis[j] *
+/// values[j]`. For a single-DOF joint it collapses to `basis[0] *
+/// values[0]` exactly, and for `Fixed` (`k = 0`) it is the zero motion.
+fn combine(basis: &[[f64; 6]], values: &[f64]) -> [f64; 6] {
+    let mut acc = ZERO6;
+    for (s, &v) in basis.iter().zip(values) {
+        acc = add6(acc, scale6(*s, v));
+    }
+    acc
+}
+
+/// Normalizes `(w, x, y, z)`; `None` if any entry is non-finite or the norm
+/// is below `1e-9` (the same acceptance rule as
+/// `robot_types::frames::Quat::from_components`).
+fn normalize_quaternion(w: f64, x: f64, y: f64, z: f64) -> Option<[f64; 4]> {
+    if !(w.is_finite() && x.is_finite() && y.is_finite() && z.is_finite()) {
+        return None;
+    }
+    let n = (w * w + x * x + y * y + z * z).sqrt();
+    if n < 1e-9 {
+        return None;
+    }
+    Some([w / n, x / n, y / n, z / n])
+}
+
+/// The rotation of `angle` about `axis`: identity when the angle is not
+/// finite or the axis has no usable direction (norm at most `1e-12`).
+fn axis_angle_rotation(axis: [f64; 3], angle: f64) -> [f64; 9] {
+    if !angle.is_finite() {
+        return IDENTITY_ROTATION;
+    }
+    let n = dot3(axis, axis).sqrt();
+    if !n.is_finite() || n <= 1e-12 {
+        return IDENTITY_ROTATION;
+    }
+    let unit = scale3(axis, 1.0 / n);
+    let half = angle * 0.5;
+    let s = half.sin();
+    rotation_from_quat(half.cos(), unit[0] * s, unit[1] * s, unit[2] * s)
 }
 
 /// The pose a `Free` joint's own seven-number position slice contributes,
-/// relative to the joint's origin — translation then an (re-normalized)
-/// orientation quaternion.
-fn free_joint_pose(position: &[f64]) -> RigidPose {
-    let translation = Vec3::new(position[0], position[1], position[2]);
-    let rotation = Quat::from_components(position[3], position[4], position[5], position[6])
-        .unwrap_or(Quat::IDENTITY);
-    RigidPose::new(translation, rotation)
+/// relative to the joint's origin: translation, then a re-normalized
+/// orientation quaternion (identity if the quaternion is unusable).
+fn free_joint_pose(position: &[f64]) -> Pose {
+    let translation = [position[0], position[1], position[2]];
+    let [w, x, y, z] = normalize_quaternion(position[3], position[4], position[5], position[6])
+        .unwrap_or([1.0, 0.0, 0.0, 0.0]);
+    (rotation_from_quat(w, x, y, z), translation)
 }
 
 /// The pose this body's joint contributes at the current configuration
-/// `q`, relative to the parent link's own frame — dispatching to
-/// [`free_joint_pose`] for a `Free` joint (whose position
-/// `JointSpec::transform_at` cannot represent) and to
-/// `JointSpec::transform_at` otherwise.
-fn joint_transform(body: &Body, q: &[f64]) -> RigidPose {
+/// `q`, relative to the parent link's own frame: the joint origin composed
+/// with the motion the joint's position produces.
+fn joint_transform(body: &Body, q: &[f64]) -> Pose {
     let slice = &q[body.position_offset..body.position_offset + body.position_width];
-    if body.joint.kind == JointKind::Free {
-        body.joint.origin.compose(&free_joint_pose(slice))
-    } else {
-        let value = slice.first().copied().unwrap_or(0.0);
-        body.joint.transform_at(value)
+    let value = slice.first().copied().unwrap_or(0.0);
+    let (rot, trans) = match body.kind {
+        JointKind::Fixed => IDENTITY_POSE,
+        JointKind::Revolute | JointKind::Continuous => {
+            (axis_angle_rotation(body.axis, value), [0.0; 3])
+        }
+        JointKind::Prismatic => {
+            let n = dot3(body.axis, body.axis).sqrt();
+            let shift = if n.is_finite() && n > 1e-12 {
+                scale3(scale3(body.axis, 1.0 / n), value)
+            } else {
+                [0.0; 3]
+            };
+            (IDENTITY_ROTATION, shift)
+        }
+        JointKind::Free => free_joint_pose(slice),
+    };
+    compose_pose(body.origin.0, body.origin.1, rot, trans)
+}
+
+/// Solves `A X = B` by LU decomposition with partial pivoting, for a
+/// row-major `n x n` matrix `a` (stride `n`) and a row-major `n x m`
+/// right-hand side `b` (stride `m`), `n, m <= 6`. The pivot tolerance is
+/// `max|A| * 1e-14` (`1e-300` for an all-zero `A`), a pivot magnitude at or
+/// below it is singular, and any non-finite entry is singular. Returns
+/// `None` on singularity.
+#[allow(clippy::needless_range_loop)]
+fn solve_dense(mut a: [f64; 36], mut b: [f64; 36], n: usize, m: usize) -> Option<[f64; 36]> {
+    if a[..n * n].iter().any(|v| !v.is_finite()) || b[..n * m].iter().any(|v| !v.is_finite()) {
+        return None;
     }
+    let scale = a[..n * n].iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+    let tol = if scale > 0.0 { scale * 1e-14 } else { 1e-300 };
+
+    for col in 0..n {
+        let mut pivot_row = col;
+        let mut pivot_mag = a[col * n + col].abs();
+        for r in (col + 1)..n {
+            let mag = a[r * n + col].abs();
+            if mag > pivot_mag {
+                pivot_mag = mag;
+                pivot_row = r;
+            }
+        }
+        if pivot_mag <= tol {
+            return None;
+        }
+        if pivot_row != col {
+            for c in 0..n {
+                a.swap(col * n + c, pivot_row * n + c);
+            }
+            for c in 0..m {
+                b.swap(col * m + c, pivot_row * m + c);
+            }
+        }
+        let pivot = a[col * n + col];
+        for r in (col + 1)..n {
+            let factor = a[r * n + col] / pivot;
+            if factor == 0.0 {
+                continue;
+            }
+            for c in col..n {
+                let v = a[col * n + c];
+                a[r * n + c] -= factor * v;
+            }
+            for c in 0..m {
+                let v = b[col * m + c];
+                b[r * m + c] -= factor * v;
+            }
+        }
+    }
+
+    let mut x = [0.0; 36];
+    for c in 0..m {
+        for r in (0..n).rev() {
+            let mut sum = b[r * m + c];
+            for k in (r + 1)..n {
+                sum -= a[r * n + k] * x[k * m + c];
+            }
+            x[r * m + c] = sum / a[r * n + r];
+        }
+    }
+    Some(x)
 }
 
 impl ArticulatedBody {
     /// Preprocesses `profile` into the articulated structure the
-    /// dynamics algorithms recurse over.
+    /// dynamics algorithms recurse over. This is the boundary adapter: it
+    /// converts `robot-model` poses, vectors and mass properties into the
+    /// plain arrays every later function uses.
     ///
     /// Assumes `profile.validate()` has already passed, exactly as
     /// `robot_model::kinematics::forward_kinematics` assumes it — a tree
@@ -246,23 +370,23 @@ impl ArticulatedBody {
     /// every dynamics call.
     #[must_use]
     pub fn from_profile(profile: &RobotProfile) -> Self {
-        let mut dof_slots: HashMap<robot_types::ids::JointId, (usize, usize)> = HashMap::new();
-        let mut position_slots: HashMap<robot_types::ids::JointId, (usize, usize)> = HashMap::new();
+        let mut dof_slots = Vec::new();
+        let mut position_slots = Vec::new();
         let mut next_dof = 0usize;
         let mut next_position = 0usize;
         for j in profile.actuated_joints() {
             let dof_width = j.kind.dof_count();
-            dof_slots.insert(j.id, (next_dof, dof_width));
+            dof_slots.push((j.id, (next_dof, dof_width)));
             next_dof += dof_width;
 
             let pos_width = position_width(j.kind);
-            position_slots.insert(j.id, (next_position, pos_width));
+            position_slots.push((j.id, (next_position, pos_width)));
             next_position += pos_width;
         }
 
         let order = profile.topological_link_order();
-        let mut body_index: HashMap<LinkId, usize> = HashMap::new();
-        let mut bodies = Vec::with_capacity(order.len().saturating_sub(1));
+        let mut body_index = Vec::new();
+        let mut bodies: Vec<Body> = Vec::with_capacity(order.len().saturating_sub(1));
         let mut contact_spheres = Vec::new();
         let mut unmodelled_collision_shapes = 0usize;
 
@@ -273,31 +397,57 @@ impl ArticulatedBody {
             let link = profile
                 .link(link_id)
                 .expect("link exists in a validated profile");
-            let parent = body_index.get(&joint.parent).copied();
+            let parent = body_index
+                .iter()
+                .find(|(id, _)| *id == joint.parent)
+                .map(|(_, index)| *index);
             let index = bodies.len();
-            let (dof_offset, dof_width) = dof_slots.get(&joint.id).copied().unwrap_or((0, 0));
-            let (position_offset, pos_width) =
-                position_slots.get(&joint.id).copied().unwrap_or((0, 0));
+            let (dof_offset, dof_width) = dof_slots
+                .iter()
+                .find(|(id, _)| *id == joint.id)
+                .map_or((0, 0), |(_, slot)| *slot);
+            let (position_offset, pos_width) = position_slots
+                .iter()
+                .find(|(id, _)| *id == joint.id)
+                .map_or((0, 0), |(_, slot)| *slot);
+
+            let q = joint.origin.rotation;
+            let t = joint.origin.translation;
+            let props = &link.mass;
+            let com = props.center_of_mass;
+            let i = &props.inertia;
             bodies.push(Body {
-                joint: joint.clone(),
+                kind: joint.kind,
+                axis: [joint.axis.x, joint.axis.y, joint.axis.z],
+                origin: (rotation_from_quat(q.w, q.x, q.y, q.z), [t.x, t.y, t.z]),
+                effort: joint.limits.effort.0,
                 parent,
                 dof_offset,
                 dof_width,
                 position_offset,
                 position_width: pos_width,
-                inertia: SpatialInertia::from_mass_properties(&link.mass),
+                inertia: inertia_from_mass(
+                    props.mass.value(),
+                    [com.x, com.y, com.z],
+                    [
+                        i.ixx, i.ixy, i.ixz, i.ixy, i.iyy, i.iyz, i.ixz, i.iyz, i.izz,
+                    ],
+                ),
             });
             for shape in &link.collision {
                 match shape.geometry {
-                    CollisionGeometry::Sphere { radius } => contact_spheres.push(ContactSphere {
-                        body: index,
-                        center: shape.pose.translation,
-                        radius,
-                    }),
+                    CollisionGeometry::Sphere { radius } => {
+                        let c = shape.pose.translation;
+                        contact_spheres.push(ContactSphere {
+                            body: index,
+                            center: [c.x, c.y, c.z],
+                            radius,
+                        });
+                    }
                     _ => unmodelled_collision_shapes += 1,
                 }
             }
-            body_index.insert(link_id, index);
+            body_index.push((link_id, index));
         }
 
         Self {
@@ -337,13 +487,16 @@ impl ArticulatedBody {
     /// Negative means that sphere is below the plane `z = 0` (penetration).
     pub fn lowest_contact_height(&self, q: &[f64]) -> Result<Option<f64>, DynamicsError> {
         self.check_width("q", q, self.n_position)?;
-        let mut world: Vec<RigidPose> = Vec::with_capacity(self.bodies.len());
+        let mut world: Vec<Pose> = Vec::with_capacity(self.bodies.len());
         let mut lowest: Option<f64> = None;
         for (i, body) in self.bodies.iter().enumerate() {
-            let t = joint_transform(body, q);
-            let world_i = body.parent.map_or(t, |p| world[p].compose(&t));
+            let (rot, trans) = joint_transform(body, q);
+            let world_i = body.parent.map_or((rot, trans), |p| {
+                compose_pose(world[p].0, world[p].1, rot, trans)
+            });
             for sphere in self.contact_spheres.iter().filter(|s| s.body == i) {
-                let bottom = world_i.apply(sphere.center).z - sphere.radius;
+                let point = add3(mat3_mul_vec(world_i.0, sphere.center), world_i.1);
+                let bottom = point[2] - sphere.radius;
                 lowest = Some(lowest.map_or(bottom, |l| l.min(bottom)));
             }
             world.push(world_i);
@@ -418,7 +571,7 @@ impl ArticulatedBody {
                 tau[slots].fill(0.0);
                 continue;
             }
-            let effort = body.joint.limits.effort.0;
+            let effort = body.effort;
             let q_j = q[body.position_offset];
             let qd_j = qd[body.dof_offset];
             tau[body.dof_offset] = (-kp * q_j - kd[body.dof_offset] * qd_j).clamp(-effort, effort);
@@ -429,26 +582,32 @@ impl ArticulatedBody {
     /// The world-frame contact wrench on body `body_index`, expressed in that
     /// body's own frame at its origin. Each sphere contributes the ground's
     /// force at its centre, and the torque that force produces about the
-    /// body origin.
+    /// body origin. `body_world` is the body's pose in the world and `v` its
+    /// spatial velocity in its own frame. The `Vec3` conversion is confined
+    /// to the call into [`GroundContact::force`], whose signature is public.
     fn contact_wrench(
         &self,
         body_index: usize,
-        body_world: &RigidPose,
-        v: Twist,
+        body_world: &Pose,
+        v: [f64; 6],
         ground: &GroundContact,
-    ) -> Wrench {
-        let mut total = Wrench::ZERO;
+    ) -> [f64; 6] {
+        let (rot, trans) = *body_world;
+        let (omega, linear) = split6(v);
+        let mut total = ZERO6;
         for sphere in self.contact_spheres.iter().filter(|s| s.body == body_index) {
-            let point_world = body_world.apply(sphere.center);
-            let point_velocity_body = v.linear + v.angular.cross(sphere.center);
-            let velocity_world = body_world.rotation.rotate(point_velocity_body);
-            let force_world = ground.force(point_world, sphere.radius, velocity_world);
-            let force_body = body_world.rotation.conjugate().rotate(force_world);
-            total = total
-                + Wrench {
-                    angular: sphere.center.cross(force_body),
-                    linear: force_body,
-                };
+            let c = sphere.center;
+            let point_world = add3(mat3_mul_vec(rot, c), trans);
+            let point_velocity_body = add3(linear, cross3(omega, c));
+            let velocity_world = mat3_mul_vec(rot, point_velocity_body);
+            let force_world = ground.force(
+                Vec3::new(point_world[0], point_world[1], point_world[2]),
+                sphere.radius,
+                Vec3::new(velocity_world[0], velocity_world[1], velocity_world[2]),
+            );
+            let force_body =
+                mat3_transpose_mul_vec(rot, [force_world.x, force_world.y, force_world.z]);
+            total = add6(total, join6(cross3(c, force_body), force_body));
         }
         total
     }
@@ -489,46 +648,50 @@ impl ArticulatedBody {
 
         // Featherstone's trick: fold gravity into the base's acceleration
         // rather than adding a separate force everywhere it matters.
-        let base_accel = Twist {
-            angular: Vec3::ZERO,
-            linear: -gravity,
-        };
+        let base_accel = join6([0.0; 3], [-gravity.x, -gravity.y, -gravity.z]);
 
         let n = self.bodies.len();
-        let mut v: Vec<Twist> = Vec::with_capacity(n);
-        let mut a: Vec<Twist> = Vec::with_capacity(n);
-        let mut f: Vec<Wrench> = Vec::with_capacity(n);
-        let mut transforms = Vec::with_capacity(n);
+        let mut v: Vec<[f64; 6]> = Vec::with_capacity(n);
+        let mut a: Vec<[f64; 6]> = Vec::with_capacity(n);
+        let mut f: Vec<[f64; 6]> = Vec::with_capacity(n);
+        let mut transforms: Vec<Pose> = Vec::with_capacity(n);
 
         for body in &self.bodies {
-            let t = joint_transform(body, q);
-            let s = motion_subspace_basis(body.joint.kind, body.joint.axis);
+            let (rot, trans) = joint_transform(body, q);
+            let (s, k) = motion_subspace_basis(body.kind, body.axis);
             let dof = body.dof_offset..body.dof_offset + body.dof_width;
-            let joint_v = combine(&s, &qd[dof.clone()]);
-            let joint_a = combine(&s, &qdd[dof]);
+            let joint_v = combine(&s[..k], &qd[dof.clone()]);
+            let joint_a = combine(&s[..k], &qdd[dof]);
 
-            let v_parent = body.parent.map_or(Twist::ZERO, |p| v[p]);
+            let v_parent = body.parent.map_or(ZERO6, |p| v[p]);
             let a_parent = body.parent.map_or(base_accel, |p| a[p]);
 
-            let v_i = transform_motion(&t, v_parent) + joint_v;
-            let a_i = transform_motion(&t, a_parent) + joint_a + cross_motion_motion(v_i, joint_v);
-            let f_i = body.inertia.apply(a_i) + cross_motion_force(v_i, body.inertia.apply(v_i));
+            let v_i = add6(transform_motion(rot, trans, v_parent), joint_v);
+            let a_i = add6(
+                add6(transform_motion(rot, trans, a_parent), joint_a),
+                cross_motion_motion(v_i, joint_v),
+            );
+            let f_i = add6(
+                inertia_apply(&body.inertia, a_i),
+                cross_motion_force(v_i, inertia_apply(&body.inertia, v_i)),
+            );
 
             v.push(v_i);
             a.push(a_i);
             f.push(f_i);
-            transforms.push(t);
+            transforms.push((rot, trans));
         }
 
         let mut tau = vec![0.0; self.n_dof];
         for i in (0..n).rev() {
             let body = &self.bodies[i];
-            let s = motion_subspace_basis(body.joint.kind, body.joint.axis);
-            for (j, s_j) in s.iter().enumerate() {
-                tau[body.dof_offset + j] = f[i].dot(*s_j);
+            let (s, k) = motion_subspace_basis(body.kind, body.axis);
+            for (j, s_j) in s[..k].iter().enumerate() {
+                tau[body.dof_offset + j] = dot6(f[i], *s_j);
             }
             if let Some(p) = body.parent {
-                f[p] = f[p] + transform_force(&transforms[i], f[i]);
+                let (rot, trans) = transforms[i];
+                f[p] = add6(f[p], transform_force(rot, trans, f[i]));
             }
         }
         Ok(tau)
@@ -566,6 +729,7 @@ impl ArticulatedBody {
         self.articulated_accelerations(q, qd, tau, gravity, Some(ground))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn articulated_accelerations(
         &self,
         q: &[f64],
@@ -578,94 +742,117 @@ impl ArticulatedBody {
         self.check_width("qd", qd, self.n_dof)?;
         self.check_width("tau", tau, self.n_dof)?;
 
-        let base_accel = Twist {
-            angular: Vec3::ZERO,
-            linear: -gravity,
-        };
+        let base_accel = join6([0.0; 3], [-gravity.x, -gravity.y, -gravity.z]);
         let n = self.bodies.len();
 
-        let mut v: Vec<Twist> = Vec::with_capacity(n);
-        let mut c: Vec<Twist> = Vec::with_capacity(n);
-        let mut transforms = Vec::with_capacity(n);
-        let mut ia: Vec<SpatialInertia> = Vec::with_capacity(n);
-        let mut pa: Vec<Wrench> = Vec::with_capacity(n);
-        let mut bases: Vec<Vec<Twist>> = Vec::with_capacity(n);
+        let mut v: Vec<[f64; 6]> = Vec::with_capacity(n);
+        let mut c: Vec<[f64; 6]> = Vec::with_capacity(n);
+        let mut transforms: Vec<Pose> = Vec::with_capacity(n);
+        let mut ia: Vec<[f64; 36]> = Vec::with_capacity(n);
+        let mut pa: Vec<[f64; 6]> = Vec::with_capacity(n);
+        let mut bases: Vec<([[f64; 6]; 6], usize)> = Vec::with_capacity(n);
 
         // Pass 1 (root -> leaf): velocities, bias accelerations, and each
         // body's own (not-yet-reduced) articulated inertia/bias force.
-        let mut world: Vec<RigidPose> = Vec::with_capacity(n);
+        let mut world: Vec<Pose> = Vec::with_capacity(n);
         for (i, body) in self.bodies.iter().enumerate() {
-            let t = joint_transform(body, q);
-            let s = motion_subspace_basis(body.joint.kind, body.joint.axis);
-            let joint_v = combine(&s, &qd[body.dof_offset..body.dof_offset + body.dof_width]);
+            let (rot, trans) = joint_transform(body, q);
+            let (s, k) = motion_subspace_basis(body.kind, body.axis);
+            let joint_v = combine(
+                &s[..k],
+                &qd[body.dof_offset..body.dof_offset + body.dof_width],
+            );
 
-            let v_parent = body.parent.map_or(Twist::ZERO, |p| v[p]);
-            let v_i = transform_motion(&t, v_parent) + joint_v;
+            let v_parent = body.parent.map_or(ZERO6, |p| v[p]);
+            let v_i = add6(transform_motion(rot, trans, v_parent), joint_v);
             let c_i = cross_motion_motion(v_i, joint_v);
-            let world_i = body.parent.map_or(t, |p| world[p].compose(&t));
-            let external =
-                ground.map_or(Wrench::ZERO, |g| self.contact_wrench(i, &world_i, v_i, g));
-            let pa_i = cross_motion_force(v_i, body.inertia.apply(v_i)) - external;
+            let world_i = body.parent.map_or((rot, trans), |p| {
+                compose_pose(world[p].0, world[p].1, rot, trans)
+            });
+            let external = ground.map_or(ZERO6, |g| self.contact_wrench(i, &world_i, v_i, g));
+            let pa_i = sub6(
+                cross_motion_force(v_i, inertia_apply(&body.inertia, v_i)),
+                external,
+            );
 
             v.push(v_i);
             c.push(c_i);
-            transforms.push(t);
+            transforms.push((rot, trans));
             world.push(world_i);
-            ia.push(body.inertia.clone());
+            ia.push(body.inertia);
             pa.push(pa_i);
-            bases.push(s);
+            bases.push((s, k));
         }
 
         // Pass 2 (leaf -> root): eliminate each joint's own `k` degrees
-        // of freedom (k = |basis|), folding its effective inertia/bias
-        // force into its parent. U/D/u are retained per body (not just
-        // the effective, parent-folded quantities) for pass 3 below,
-        // exactly as the single-DOF version already had to.
-        let mut u_list: Vec<Vec<Wrench>> = vec![Vec::new(); n];
-        let mut u_scalar_list: Vec<Vec<f64>> = vec![Vec::new(); n];
-        let mut d_mats: Vec<Matrix> = (0..n).map(|_| Matrix::zeros(0, 0)).collect();
+        // of freedom, folding its effective inertia/bias force into its
+        // parent. U/D/u are retained per body (not just the effective,
+        // parent-folded quantities) for pass 3 below.
+        let mut u_list: Vec<[[f64; 6]; 6]> = vec![[ZERO6; 6]; n];
+        let mut u_scalar_list: Vec<[f64; 6]> = vec![ZERO6; n];
+        let mut d_mats: Vec<[f64; 36]> = vec![[0.0; 36]; n];
 
         for i in (0..n).rev() {
             let body = &self.bodies[i];
-            let s = &bases[i];
-            let k = s.len();
+            let (s, k) = bases[i];
 
             let (ia_eff, pa_eff) = if k == 0 {
-                (ia[i].clone(), pa[i] + ia[i].apply(c[i]))
+                (ia[i], add6(pa[i], inertia_apply(&ia[i], c[i])))
             } else {
-                let u_wrenches: Vec<Wrench> = s.iter().map(|sj| ia[i].apply(*sj)).collect();
-                let mut d_mat = Matrix::zeros(k, k);
-                for (a_idx, s_a) in s.iter().enumerate() {
-                    for (b_idx, u_b) in u_wrenches.iter().enumerate() {
-                        d_mat[(a_idx, b_idx)] = u_b.dot(*s_a);
+                // U_a = I^A S_a, D_ab = S_a . U_b, u_a = tau_a - S_a . pA.
+                let mut u_wrenches = [ZERO6; 6];
+                for a_idx in 0..k {
+                    u_wrenches[a_idx] = inertia_apply(&ia[i], s[a_idx]);
+                }
+                let mut d_mat = [0.0; 36];
+                for a_idx in 0..k {
+                    for b_idx in 0..k {
+                        d_mat[a_idx * k + b_idx] = dot6(u_wrenches[b_idx], s[a_idx]);
                     }
                 }
                 let tau_slice = &tau[body.dof_offset..body.dof_offset + body.dof_width];
-                let u_scalar: Vec<f64> = (0..k)
-                    .map(|a_idx| tau_slice[a_idx] - pa[i].dot(s[a_idx]))
-                    .collect();
+                let mut u_scalar = [0.0; 6];
+                for a_idx in 0..k {
+                    u_scalar[a_idx] = tau_slice[a_idx] - dot6(pa[i], s[a_idx]);
+                }
 
-                let mut u_mat = Matrix::zeros(6, k);
-                for (col, w) in u_wrenches.iter().enumerate() {
-                    let wc = w.to_column();
+                // U as a 6 x k matrix (stride k) and U^T as k x 6 (stride 6).
+                let mut u_mat = [0.0; 36];
+                let mut u_t = [0.0; 36];
+                for col in 0..k {
                     for row in 0..6 {
-                        u_mat[(row, col)] = wc[(row, 0)];
+                        u_mat[row * k + col] = u_wrenches[col][row];
+                        u_t[col * 6 + row] = u_wrenches[col][row];
                     }
                 }
 
-                let d_inv_ut = d_mat
-                    .solve(&u_mat.transposed())
-                    .map_err(|_| DynamicsError::SingularJointInertia)?;
-                let reduction = u_mat
-                    .mul(&d_inv_ut)
-                    .expect("6xk * kx6 is always well-formed");
-                let ia_eff = ia[i].sub(&SpatialInertia::from_matrix(reduction));
+                // I^a = I^A - U D^-1 U^T.
+                let d_inv_ut =
+                    solve_dense(d_mat, u_t, k, 6).ok_or(DynamicsError::SingularJointInertia)?;
+                let mut reduction = [0.0; 36];
+                for row in 0..6 {
+                    for col in 0..6 {
+                        let mut sum = 0.0;
+                        for a_idx in 0..k {
+                            sum += u_mat[row * k + a_idx] * d_inv_ut[a_idx * 6 + col];
+                        }
+                        reduction[row * 6 + col] = sum;
+                    }
+                }
+                let ia_eff = matrix6_sub(&ia[i], &reduction);
 
-                let z = d_mat
-                    .solve(&Matrix::column(&u_scalar))
-                    .map_err(|_| DynamicsError::SingularJointInertia)?;
-                let u_dinv_u = u_mat.mul(&z).expect("6xk * kx1 is always well-formed");
-                let pa_eff = pa[i] + ia_eff.apply(c[i]) + Wrench::from_column(&u_dinv_u);
+                // p^a = pA + I^a c + U D^-1 u.
+                let z = solve_dense(d_mat, u_scalar_as_column(&u_scalar), k, 1)
+                    .ok_or(DynamicsError::SingularJointInertia)?;
+                let mut u_dinv_u = ZERO6;
+                for (row, out) in u_dinv_u.iter_mut().enumerate() {
+                    let mut sum = 0.0;
+                    for a_idx in 0..k {
+                        sum += u_mat[row * k + a_idx] * z[a_idx];
+                    }
+                    *out = sum;
+                }
+                let pa_eff = add6(add6(pa[i], inertia_apply(&ia_eff, c[i])), u_dinv_u);
 
                 u_list[i] = u_wrenches;
                 u_scalar_list[i] = u_scalar;
@@ -674,37 +861,36 @@ impl ArticulatedBody {
             };
 
             if let Some(p) = body.parent {
-                ia[p] = ia[p].add(&ia_eff.transform_to_parent(&transforms[i]));
-                pa[p] = pa[p] + transform_force(&transforms[i], pa_eff);
+                let (rot, trans) = transforms[i];
+                ia[p] = matrix6_add(&ia[p], &inertia_transform_to_parent(&ia_eff, rot, trans));
+                pa[p] = add6(pa[p], transform_force(rot, trans, pa_eff));
             }
         }
 
         // Pass 3 (root -> leaf): solve for qdd given the parent's now-known
         // true acceleration, using each body's own (non-reduced) U/D/u.
         let mut qdd = vec![0.0; self.n_dof];
-        let mut a: Vec<Twist> = Vec::with_capacity(n);
+        let mut a: Vec<[f64; 6]> = Vec::with_capacity(n);
         for (i, body) in self.bodies.iter().enumerate() {
-            let s = &bases[i];
-            let k = s.len();
+            let (s, k) = bases[i];
             let a_parent = body.parent.map_or(base_accel, |p| a[p]);
-            let a_prime = transform_motion(&transforms[i], a_parent) + c[i];
+            let (rot, trans) = transforms[i];
+            let a_prime = add6(transform_motion(rot, trans, a_parent), c[i]);
 
             let a_i = if k == 0 {
                 a_prime
             } else {
-                let u_wrenches = &u_list[i];
-                let u_scalar = &u_scalar_list[i];
-                let rhs: Vec<f64> = (0..k)
-                    .map(|a_idx| u_scalar[a_idx] - u_wrenches[a_idx].dot(a_prime))
-                    .collect();
-                let qdd_col = d_mats[i]
-                    .solve(&Matrix::column(&rhs))
-                    .map_err(|_| DynamicsError::SingularJointInertia)?;
+                let mut rhs = [0.0; 36];
+                for a_idx in 0..k {
+                    rhs[a_idx] = u_scalar_list[i][a_idx] - dot6(u_list[i][a_idx], a_prime);
+                }
+                let qdd_col =
+                    solve_dense(d_mats[i], rhs, k, 1).ok_or(DynamicsError::SingularJointInertia)?;
                 let mut a_i = a_prime;
                 for a_idx in 0..k {
-                    let qdd_val = qdd_col[(a_idx, 0)];
+                    let qdd_val = qdd_col[a_idx];
                     qdd[body.dof_offset + a_idx] = qdd_val;
-                    a_i = a_i + s[a_idx].scaled(qdd_val);
+                    a_i = add6(a_i, scale6(s[a_idx], qdd_val));
                 }
                 a_i
             };
@@ -724,19 +910,29 @@ impl ArticulatedBody {
         self.check_width("q", q, self.n_position)?;
         self.check_width("qd", qd, self.n_dof)?;
 
-        let mut v: Vec<Twist> = Vec::with_capacity(self.bodies.len());
+        let mut v: Vec<[f64; 6]> = Vec::with_capacity(self.bodies.len());
         let mut total = 0.0;
         for body in &self.bodies {
-            let t = joint_transform(body, q);
-            let s = motion_subspace_basis(body.joint.kind, body.joint.axis);
-            let joint_v = combine(&s, &qd[body.dof_offset..body.dof_offset + body.dof_width]);
-            let v_parent = body.parent.map_or(Twist::ZERO, |p| v[p]);
-            let v_i = transform_motion(&t, v_parent) + joint_v;
-            total += 0.5 * body.inertia.apply(v_i).dot(v_i);
+            let (rot, trans) = joint_transform(body, q);
+            let (s, k) = motion_subspace_basis(body.kind, body.axis);
+            let joint_v = combine(
+                &s[..k],
+                &qd[body.dof_offset..body.dof_offset + body.dof_width],
+            );
+            let v_parent = body.parent.map_or(ZERO6, |p| v[p]);
+            let v_i = add6(transform_motion(rot, trans, v_parent), joint_v);
+            total += 0.5 * dot6(inertia_apply(&body.inertia, v_i), v_i);
             v.push(v_i);
         }
         Ok(total)
     }
+}
+
+/// A length-`k` scalar vector laid out as a `k x 1` right-hand side.
+fn u_scalar_as_column(u: &[f64; 6]) -> [f64; 36] {
+    let mut out = [0.0; 36];
+    out[..6].copy_from_slice(u);
+    out
 }
 
 /// Configuration and velocity of every actuated joint, steppable in time
@@ -828,7 +1024,7 @@ impl MultibodyState {
             *v += a * dt_s;
         }
         for b in &body.bodies {
-            if b.joint.kind == JointKind::Free {
+            if b.kind == JointKind::Free {
                 Self::integrate_free_position(
                     &mut self.q[b.position_offset..b.position_offset + 7],
                     &self.qd[b.dof_offset..b.dof_offset + 6],
@@ -849,47 +1045,49 @@ impl MultibodyState {
     /// algebra convention throughout).
     ///
     /// Translation integrates in the *world* frame
-    /// (`translation += dt * rotation.rotate(local_linear_velocity)`,
-    /// since the stored linear velocity is local); orientation
-    /// integrates via the standard local-angular-velocity quaternion
-    /// derivative `qdot = 0.5 * q * omega_local` (`omega_local` as a
-    /// pure quaternion), a first-order step re-normalized afterward
-    /// (`Quat::from_components` does the renormalizing). This is a
-    /// stated simplification: a higher-order or exponential-map update
-    /// would integrate orientation more accurately per step, and is an
-    /// open option, not a claim that this is the only valid approach.
+    /// (`translation += dt * R * local_linear_velocity`, since the stored
+    /// linear velocity is local); orientation integrates via the standard
+    /// local-angular-velocity quaternion derivative `qdot = 0.5 * q *
+    /// omega_local` (`omega_local` as a pure quaternion), a first-order
+    /// step re-normalized afterward ([`normalize_quaternion`] does the
+    /// renormalizing). This is a stated simplification: a higher-order or
+    /// exponential-map update would integrate orientation more accurately
+    /// per step, and is an open option, not a claim that this is the only
+    /// valid approach.
     fn integrate_free_position(position: &mut [f64], velocity: &[f64], dt_s: f64) {
-        let angular = Vec3::new(velocity[0], velocity[1], velocity[2]);
-        let linear_local = Vec3::new(velocity[3], velocity[4], velocity[5]);
-        let translation = Vec3::new(position[0], position[1], position[2]);
-        let rotation = Quat::from_components(position[3], position[4], position[5], position[6])
-            .unwrap_or(Quat::IDENTITY);
+        let angular = [velocity[0], velocity[1], velocity[2]];
+        let linear_local = [velocity[3], velocity[4], velocity[5]];
+        let translation = [position[0], position[1], position[2]];
+        let [w, x, y, z] = normalize_quaternion(position[3], position[4], position[5], position[6])
+            .unwrap_or([1.0, 0.0, 0.0, 0.0]);
 
-        let new_translation = translation + rotation.rotate(linear_local) * dt_s;
+        let rotation = rotation_from_quat(w, x, y, z);
+        let new_translation = add3(
+            translation,
+            scale3(mat3_mul_vec(rotation, linear_local), dt_s),
+        );
 
-        let omega_pure = Quat {
-            w: 0.0,
-            x: angular.x,
-            y: angular.y,
-            z: angular.z,
-        };
-        let qdot = rotation.mul(omega_pure);
+        // Hamilton product q * (0, omega).
+        let qdot_w = -(x * angular[0] + y * angular[1] + z * angular[2]);
+        let qdot_x = w * angular[0] + y * angular[2] - z * angular[1];
+        let qdot_y = w * angular[1] - x * angular[2] + z * angular[0];
+        let qdot_z = w * angular[2] + x * angular[1] - y * angular[0];
         let half_dt = 0.5 * dt_s;
-        let new_rotation = Quat::from_components(
-            rotation.w + half_dt * qdot.w,
-            rotation.x + half_dt * qdot.x,
-            rotation.y + half_dt * qdot.y,
-            rotation.z + half_dt * qdot.z,
+        let [nw, nx, ny, nz] = normalize_quaternion(
+            w + half_dt * qdot_w,
+            x + half_dt * qdot_x,
+            y + half_dt * qdot_y,
+            z + half_dt * qdot_z,
         )
-        .unwrap_or(rotation);
+        .unwrap_or([w, x, y, z]);
 
-        position[0] = new_translation.x;
-        position[1] = new_translation.y;
-        position[2] = new_translation.z;
-        position[3] = new_rotation.w;
-        position[4] = new_rotation.x;
-        position[5] = new_rotation.y;
-        position[6] = new_rotation.z;
+        position[0] = new_translation[0];
+        position[1] = new_translation[1];
+        position[2] = new_translation[2];
+        position[3] = nw;
+        position[4] = nx;
+        position[5] = ny;
+        position[6] = nz;
     }
 }
 
@@ -1073,6 +1271,221 @@ pub(crate) mod tests {
 
     const G: f64 = 9.806_65;
     const GRAVITY: Vec3 = Vec3::new(0.0, 0.0, -G);
+
+    #[test]
+    fn dense_solver_solves_a_known_2x2_system() {
+        let mut a = [0.0; 36];
+        a[..4].copy_from_slice(&[3.0, 2.0, 1.0, 2.0]);
+        let mut b = [0.0; 36];
+        b[..2].copy_from_slice(&[4.0, 0.0]);
+
+        let x = solve_dense(a, b, 2, 1).unwrap();
+        assert!((x[0] - 2.0).abs() < 1e-14);
+        assert!((x[1] + 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn dense_solver_pivots_when_the_leading_entry_is_zero() {
+        let mut a = [0.0; 36];
+        a[..4].copy_from_slice(&[0.0, 2.0, 1.0, 3.0]);
+        let mut b = [0.0; 36];
+        b[..2].copy_from_slice(&[-2.0, -1.0]);
+
+        let x = solve_dense(a, b, 2, 1).unwrap();
+        assert!((x[0] - 2.0).abs() < 1e-14);
+        assert!((x[1] + 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn dense_solver_rejects_a_rank_deficient_matrix() {
+        let mut a = [0.0; 36];
+        a[..4].copy_from_slice(&[1.0, 2.0, 2.0, 4.0]);
+        let mut b = [0.0; 36];
+        b[..2].copy_from_slice(&[3.0, 6.0]);
+
+        assert!(solve_dense(a, b, 2, 1).is_none());
+    }
+
+    #[test]
+    fn dense_solver_uses_relative_pivot_tolerance() {
+        // Case 1: diag(1e6, 1e-9) -> None
+        let mut a1 = [0.0; 36];
+        a1[0] = 1e6;
+        a1[3] = 1e-9;
+        let mut b1 = [0.0; 36];
+        b1[0] = 1.0;
+        b1[1] = 1.0;
+        assert!(
+            solve_dense(a1, b1, 2, 1).is_none(),
+            "diag(1e6, 1e-9) should be singular"
+        );
+
+        // Case 2: diag(1e-6, 1e-19) -> Some
+        // Tol = 1e-6 * 1e-14 = 1e-20. 1e-19 > 1e-20, so Some.
+        let mut a2 = [0.0; 36];
+        a2[0] = 1e-6;
+        a2[3] = 1e-19;
+        let mut b2 = [0.0; 36];
+        b2[0] = 1.0;
+        b2[1] = 1.0;
+        assert!(
+            solve_dense(a2, b2, 2, 1).is_some(),
+            "diag(1e-6, 1e-19) should be non-singular"
+        );
+    }
+
+    #[test]
+    fn dense_solver_rejects_zero_and_non_finite_inputs() {
+        let zero = [0.0; 36];
+        assert!(solve_dense(zero, zero, 2, 1).is_none());
+
+        let mut a = [0.0; 36];
+        a[0] = f64::NAN;
+        let mut b = [0.0; 36];
+        b[0] = 1.0;
+        assert!(solve_dense(a, b, 1, 1).is_none());
+
+        let mut a_inf = [0.0; 36];
+        a_inf[0] = 1.0;
+        a_inf[4] = 1.0;
+        a_inf[8] = 1.0;
+        let mut b_inf = [0.0; 36];
+        b_inf[0] = f64::INFINITY;
+        assert!(solve_dense(a_inf, b_inf, 3, 1).is_none());
+    }
+
+    #[test]
+    fn dense_solver_solves_a_dense_6x6_system_with_six_rhs_columns() {
+        // A = [ 0.0, 2.0, 1.0, 1.0, 1.0, 1.0;
+        //       1.0, 1.0, 1.0, 1.0, 1.0, 1.0;
+        //       1.0, 1.0, 2.0, 1.0, 1.0, 1.0;
+        //       1.0, 1.0, 1.0, 2.0, 1.0, 1.0;
+        //       1.0, 1.0, 1.0, 1.0, 2.0, 1.0;
+        //       1.0, 1.0, 1.0, 1.0, 1.0, 2.0 ]
+        // Row 0 has a 0.0 at (0,0), forcing a swap.
+        let mut a = [0.0; 36];
+        a[0] = 0.0;
+        a[1] = 2.0;
+        a[2] = 1.0;
+        a[3] = 1.0;
+        a[4] = 1.0;
+        a[5] = 1.0;
+        a[6] = 1.0;
+        a[7] = 1.0;
+        a[8] = 1.0;
+        a[9] = 1.0;
+        a[10] = 1.0;
+        a[11] = 1.0;
+        a[12] = 1.0;
+        a[13] = 1.0;
+        a[14] = 2.0;
+        a[15] = 1.0;
+        a[16] = 1.0;
+        a[17] = 1.0;
+        a[18] = 1.0;
+        a[19] = 1.0;
+        a[20] = 1.0;
+        a[21] = 2.0;
+        a[22] = 1.0;
+        a[23] = 1.0;
+        a[24] = 1.0;
+        a[25] = 1.0;
+        a[26] = 1.0;
+        a[27] = 1.0;
+        a[28] = 2.0;
+        a[29] = 1.0;
+        a[30] = 1.0;
+        a[31] = 1.0;
+        a[32] = 1.0;
+        a[33] = 1.0;
+        a[34] = 1.0;
+        a[35] = 2.0;
+
+        let mut x_expected = [0.0; 36];
+        for i in 0..6 {
+            x_expected[i * 6 + i] = 1.0;
+        } // X is identity
+
+        let mut b = [0.0; 36];
+        // B = A * X_expected = A * I = A
+        b.copy_from_slice(&a);
+
+        let x = solve_dense(a, b, 6, 6).unwrap();
+        for i in 0..36 {
+            assert!((x[i] - x_expected[i]).abs() < 1e-12, "entry {i}");
+        }
+    }
+
+    #[test]
+    fn massless_revolute_joint_reports_singular_joint_inertia() {
+        let profile = wrap_profile(
+            vec![revolute(
+                0,
+                "massless_joint",
+                0,
+                1,
+                RigidPose::IDENTITY,
+                Vec3::unit_y(),
+            )],
+            vec![
+                empty_link(0, "root", MassProperties::MASSLESS),
+                empty_link(1, "massless", MassProperties::MASSLESS),
+            ],
+        );
+        profile
+            .validate()
+            .expect("massless fixture has a valid tree");
+        let body = ArticulatedBody::from_profile(&profile);
+
+        assert!(matches!(
+            body.forward_dynamics(&[0.0], &[0.0], &[0.0], GRAVITY),
+            Err(DynamicsError::SingularJointInertia)
+        ));
+    }
+
+    #[test]
+    fn degenerate_axis_angle_uses_identity_rotation() {
+        assert_eq!(axis_angle_rotation([0.0; 3], 0.7), IDENTITY_ROTATION);
+        assert_eq!(
+            axis_angle_rotation([1e-12, 0.0, 0.0], 0.7),
+            IDENTITY_ROTATION
+        );
+        assert_eq!(
+            axis_angle_rotation([0.0, 1.0, 0.0], f64::NAN),
+            IDENTITY_ROTATION
+        );
+    }
+
+    #[test]
+    fn prismatic_joint_with_zero_axis_has_no_translation() {
+        let body = Body {
+            kind: JointKind::Prismatic,
+            axis: [0.0; 3],
+            origin: IDENTITY_POSE,
+            effort: 0.0,
+            parent: None,
+            dof_offset: 0,
+            dof_width: 1,
+            position_offset: 0,
+            position_width: 1,
+            inertia: [0.0; 36],
+        };
+
+        assert_eq!(joint_transform(&body, &[2.5]), IDENTITY_POSE);
+    }
+
+    #[test]
+    fn free_joint_with_zero_or_nan_quaternion_uses_identity_rotation() {
+        let zero_quaternion = free_joint_pose(&[1.0, -2.0, 3.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(zero_quaternion.0, IDENTITY_ROTATION);
+        assert_eq!(zero_quaternion.1, [1.0, -2.0, 3.0]);
+
+        let nan_quaternion = free_joint_pose(&[3.0, 2.0, 1.0, f64::NAN, 0.0, 0.0, 0.0]);
+        assert_eq!(nan_quaternion.0, IDENTITY_ROTATION);
+        assert_eq!(nan_quaternion.1, [3.0, 2.0, 1.0]);
+        assert_eq!(normalize_quaternion(0.0, 0.0, 0.0, 0.0), None);
+        assert_eq!(normalize_quaternion(f64::NAN, 0.0, 0.0, 1.0), None);
+    }
 
     #[test]
     fn forward_dynamics_matches_the_textbook_point_mass_pendulum() {
@@ -1331,6 +1744,8 @@ pub(crate) mod tests {
         }
     }
 
+    /// The PD-hold stance at `dt = 5e-4` stays finite over 2 s. The failing
+    /// zero-torque G1 probe is recorded in `fidelity.rs`, not here.
     #[test]
     fn the_g1_stance_hold_keeps_the_pelvis_above_the_plane_for_two_seconds() {
         // Qualification, not balance: a clamped PD hold toward the zero
