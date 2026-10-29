@@ -14,12 +14,43 @@ for its disposition.
 ## Implementation
 
 This repository is a devenv-managed Rust workspace implementing SPECS.md and
-PLAN.md. Enter the environment and run the full gate with:
+PLAN.md. The default dependency policy is std-only (ADR 0003), and no MuJoCo or
+other foreign simulator is in the default closure. The CubeCL GPU dependency is
+optional, behind `--features cubecl`, and off by default (ADR 0012). Enter the
+environment and run the full gate with:
 
 ```
 devenv shell   # or: direnv allow, if configured
 devenv test    # fmt-check + clippy -D warnings + cargo test --workspace
 ```
+
+### Running the components
+
+The program a user runs is the `robot` command-line tool in `robot-cli`. Run it
+through cargo, or build it once with `cargo build -p robot-cli --release` and
+use `target/release/robot`. With no arguments it prints its usage.
+
+| Command | What it does | Example |
+| --- | --- | --- |
+| `robot data inspect <path>` | Decodes a binary chunk or a TOML artifact and reports its contents | `cargo run -p robot-cli -- data inspect <file>` |
+| `robot motion validate <path>` | Parses a BVH source file and checks its motion record (channels, frame rate, license, missing frames). It does not validate a retargeted robot motion | `cargo run -p robot-cli -- motion validate <file.bvh>` |
+| `robot sim qualify [--steps N] [--dt S]` | Runs the analytic pendulum energy-drift check (defaults: 2000 steps, 0.001 s) | `cargo run -p robot-cli -- sim qualify` |
+| `robot sim multibody [--floating] [--zero-torque] [--dt S] [--steps N] [--out DIR]` | Runs the vendored Unitree G1 joint tree through the articulated-body solver. Without `--floating` the pelvis is fixed. With `--floating` it is a free base on a sphere ground plane under a clamped PD stance hold, or zero torque with `--zero-torque`. `--out DIR` writes per-step SVG pose frames and requires `--floating`. Defaults: `--dt 0.0001`; a floating run covers 2 s of simulated time, a fixed-base run 2000 steps | `cargo run -p robot-cli -- sim multibody --floating --out /tmp/g1-frames` |
+| `robot eval summarize <values...>` | Prints summary statistics for a list of numbers | `cargo run -p robot-cli -- eval summarize 1.0 2.0 3.0` |
+
+Exit codes: `0` success, `1` a command ran and found a real problem (a rejected
+motion, a failed qualification), `2` named but not yet implemented, `64` usage
+error. Commands named in PLAN.md but not built (`data import`, `motion retarget`,
+`eval run`, `train`, `skills`, `deps`, `adapt`, `deploy`, `replay`) exit with `2`
+and a reason on stderr.
+
+The other crates are libraries, used by the CLI and by each other, and are
+exercised through their tests. Beyond the CLI, these are available:
+
+- GPU examples (need `--features cubecl` and a working wgpu/Vulkan adapter; ADR 0012 records runs on Intel Vulkan and Mesa Lavapipe):
+  - `cargo run -p robot-sim-gpu --features cubecl --example gpu_latency` prints the max error against the CPU reference, bitwise determinism over repeated launches, and wall-clock latency. It is not a throughput benchmark.
+  - `cargo run -p robot-sim-gpu --features cubecl --example gpu_resource_repeatability` prints transfer-inclusive resource accounting for the pendulum RK4 and equality paths.
+- Fidelity report: `robot_sim::fidelity` writes `fidelity.toml` (schema v7) through its library API. Only the tests call it, so no command currently produces the file.
 
 Every crate below has a real, tested implementation grounded in a specific
 SPECS.md section (no stub crates remain) and its own `README.md` describing
@@ -41,7 +72,8 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`motion-retarget`](crates/motion-retarget/README.md) | §8.3 | Damped-least-squares task-space IK |
 | [`motion-validate`](crates/motion-validate/README.md) | §8.3 | Retargeting validation reports and acceptance thresholds |
 | [`robot-nn`](crates/robot-nn/README.md) | gap-filling, §9/§10 | A small MLP with zero-allocation inference, kept isolated from training code |
-| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Single-DOF pendulum/point-mass contact benchmarks plus a multi-body (ABA/RNE) solver with a floating base, limited sphere ground contact, and an analytic-subset fidelity harness (TOML report); [`SIMULATION_SPECS.md`](crates/robot-sim/SIMULATION_SPECS.md) specifies the GPU-batched, MuJoCo-caliber target |
+| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Pure-array CPU core: pendulum benchmarks, ABA/RNE multi-body solver with a floating base, ports of MuJoCo 3.17.0 integrator, passive-force, actuator, equality-constraint and plane-sphere functions (each cited by source function), an oracle module, and a schema-v7 fidelity harness. The per-step spec index is [`specs/README.md`](crates/robot-sim/specs/README.md) |
+| [`robot-sim-gpu`](crates/robot-sim-gpu) | §9.1, PLAN.md Phase 3 | Feature-gated CubeCL f32 backend (`--features cubecl`, off by default) for a subset of the `robot-sim` functions, with CPU-vs-GPU agreement tests and `tolerances.toml`. Not part of the default build |
 | [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Reward registry and a balance/stabilization task |
 | [`robot-learn`](crates/robot-learn/README.md) | §§7.6, 9.2, 9.5 | Backprop, Adam, GAE, a diagonal Gaussian policy, rollout buffers, PPO |
 | [`robot-skills`](crates/robot-skills/README.md) | §10.6 | The three retrieval tiers (R0 exact index, R1 working set, R2 in-loop router) |
@@ -65,10 +97,14 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
   not a known implementation bug. Recorded as an honest negative result per
   `robot-learn`'s README and SPECS.md Section 3's evidence discipline,
   rather than hidden behind a passing-looking assertion.
-- **`robot-sim` has a floating-base multi-body solver and limited ground
-  contact, but no GPU execution path.** Contact is modelled for only the eight
-  ankle-roll spheres; box, cylinder and mesh shapes are not modelled, and the
-  pelvis and torso have no collision geometry. At `dt=1e-4`, a clamped-PD
+- **`robot-sim` is a partial port, not a MuJoCo-caliber engine.** The CPU
+  formula modules (integrators, passive forces, actuators, equality constraints,
+  plane-sphere contact) are not yet wired into the multibody stepper. The GPU
+  backend covers only the subset listed in `crates/robot-sim-gpu/src/lib.rs`;
+  the general closure-based RK4, batched G1/ABA, and the contact, limit and
+  friction solver are not ported. Contact in the multibody path is modelled for
+  only the eight ankle-roll spheres; box, cylinder and mesh shapes are not
+  modelled, and the pelvis and torso have no collision geometry. At `dt=1e-4`, a clamped-PD
   supported-stance hold keeps the vendored G1 pelvis above the plane for 2 s
   (minimum 0.787 m); this is not a balance result. With zero torque, the pelvis
   falls to −0.77 m below the plane. The fidelity harness reports an analytic
@@ -76,8 +112,9 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
   `not_applicable` at coarse; neither status qualifies G1 contact. The
   GPU-batched, variable-fidelity target, on par with MuJoCo, is specified in
   `crates/robot-sim/SIMULATION_SPECS.md` and informed by research against
-  MuJoCo's own source, MJX, Brax, CubeCL and `wgpu`. No physics-engine or
-  GPU-compute dependency has passed the qualification gate of Appendix B.6.
+  MuJoCo's own source, MJX, Brax, CubeCL and `wgpu`. CubeCL passed the Appendix B.6
+  qualification for the implemented subset only (ADR 0012); it is not a default
+  dependency.
 - **No GUI/rendering or constrained-QP-solver dependency is qualified**, so
   `robot-viewer` stops at a data layer and `motion-retarget`'s IK is a
   damped-least-squares baseline rather than the QP/whole-body solve SPECS.md
@@ -86,9 +123,6 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
   Appendix C's other open questions remain genuinely open** — not resolved
   by this implementation, by design; see the ADRs in `docs/decisions/` for
   which gaps were filled and how, versus left open.
-- No commit has been made to version control as part of this
-  implementation pass; everything above is uncommitted in the working tree
-  pending review.
 
 ## Vendor SDK integration recommendations
 
