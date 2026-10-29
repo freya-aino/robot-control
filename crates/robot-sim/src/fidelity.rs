@@ -2,8 +2,9 @@
 //! simulation [`Tier`], reported as an immutable TOML artifact.
 //!
 //! The report format is fixed by `docs/decisions/0008-fidelity-report-schema.md`.
-//! Each [`Check`] carries its tolerance, its measured value and a pass flag
-//! computed by one rule: `measured.is_finite() && measured <= tolerance`.
+//! Scalar checks use `measured.is_finite() && measured <= tolerance`;
+//! v6 series checks record the maximum absolute error and its sample index,
+//! with zero relative tolerance so the pass decision is auditable.
 //! GPU-only checks are listed as not applicable rather than omitted, so a
 //! reader cannot mistake their absence for a pass.
 
@@ -12,6 +13,8 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::articulated::{ArticulatedBody, DynamicsError, MultibodyState};
+use crate::contact::GroundContact;
+use crate::oracle::{self, OracleError};
 use crate::pendulum::{NonFiniteInput, Pendulum, PendulumParams, PendulumState};
 use robot_artifacts::hash::{ContentId, HashError};
 use robot_artifacts::store::{write_immutable, StoreError};
@@ -30,7 +33,7 @@ use robot_types::units::{Kilograms, NewtonMetres, Radians, RadiansPerSecond, Ran
 /// Battery identifier written into every report. Its version suffix tracks
 /// the battery contents (check set, canonical tolerances, horizons) and is
 /// bumped together with [`SCHEMA_VERSION`] whenever those change.
-pub const BATTERY: &str = "shared-analytic-v5";
+pub const BATTERY: &str = "shared-analytic-v7";
 /// Scope written into every report. The archival battery covers the analytic
 /// subset only: it contains no ground-contact check, so no report qualifies
 /// the floating-base G1 contact path (ADR 0010). See [`contact_applicability`].
@@ -38,13 +41,14 @@ pub const SCOPE: &str = "analytic-subset";
 /// Schema identifier written into every report.
 pub const SCHEMA: &str = "robot-sim.fidelity-report";
 /// Schema version written into every report.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 7;
 /// File name the report is written under.
 pub const REPORT_FILE: &str = "fidelity.toml";
 /// Largest total number of integration steps [`run_battery`] accepts for one
 /// call. [`run_checks`] applies the same cap to its custom checks at one tier.
-/// The declared tiers need 495 000 steps; anything above this cap is refused
-/// before any simulation runs.
+/// The declared analytic tiers need 539 000 steps. The archival battery and
+/// `reproduce` also budget the G1 probe's 4 000-step cap, for 543 000 total;
+/// anything above this cap is refused before any simulation runs.
 pub const MAX_BATTERY_STEPS: u64 = 2_000_000;
 /// Maximum archival report size accepted by the reader (one MiB).
 pub const MAX_REPORT_BYTES: usize = 1024 * 1024;
@@ -53,8 +57,9 @@ pub const INTEGRATOR_SEMI_IMPLICIT_EULER: &str = "semi-implicit-euler";
 /// The only solver the battery can run.
 pub const SOLVER_EXPLICIT_ABA: &str = "explicit-articulated-body";
 /// The checks the battery runs at every tier, in run order.
-pub const CHECK_NAMES: [&str; 6] = [
+pub const CHECK_NAMES: [&str; 7] = [
     "pendulum_period",
+    "pendulum_trajectory",
     "pd_equilibrium",
     "aba_rne_closed_form",
     "energy_drift",
@@ -64,7 +69,8 @@ pub const CHECK_NAMES: [&str; 6] = [
 /// The physical system each battery check exercises, in [`CHECK_NAMES`] order.
 /// A reader rejects any row whose `system` differs from this table, so a
 /// standalone pendulum result cannot be relabelled as articulated evidence.
-const CHECK_SYSTEMS: [&str; 6] = [
+const CHECK_SYSTEMS: [&str; 7] = [
+    "standalone_pendulum",
     "standalone_pendulum",
     "standalone_pendulum",
     "point_mass_pendulum_articulated",
@@ -73,7 +79,7 @@ const CHECK_SYSTEMS: [&str; 6] = [
     "free_body_articulated",
 ];
 /// Top-level keys a report may carry. Anything else is rejected.
-const REPORT_KEYS: [&str; 10] = [
+const REPORT_KEYS: [&str; 11] = [
     "schema",
     "schema_version",
     "battery",
@@ -84,9 +90,21 @@ const REPORT_KEYS: [&str; 10] = [
     "check",
     "not_applicable",
     "contact",
+    "probe",
 ];
+const PROBE_KEYS: [&str; 6] = ["scenario", "system", "status", "step", "error", "reason"];
 const TIER_KEYS: [&str; 4] = ["name", "timestep_ns", "integrator", "solver"];
-const CHECK_KEYS: [&str; 6] = ["tier", "name", "system", "tolerance", "measured", "pass"];
+const CHECK_KEYS: [&str; 9] = [
+    "tier",
+    "name",
+    "system",
+    "tolerance",
+    "tolerance_abs",
+    "tolerance_rel",
+    "measured",
+    "sample",
+    "pass",
+];
 const NOT_APPLICABLE_KEYS: [&str; 2] = ["name", "reason"];
 const CONTACT_KEYS: [&str; 4] = ["tier", "system", "status", "reason"];
 
@@ -104,6 +122,12 @@ const PENDULUM_MASS: f64 = 1.0;
 const PERIOD_AMPLITUDE: f64 = 1.0;
 const PERIOD_HORIZON_NANOS: u64 = 4_000_000_000;
 const PERIOD_TOLERANCE: f64 = 1e-4;
+const TRAJECTORY_HORIZON_NANOS: u64 = 4_000_000_000;
+// Semi-implicit Euler accumulates O(dt) phase error over four seconds.
+// The absolute budgets scale by ten between 100 us and 1 ms; relative
+// tolerance is zero so the stored maximum error determines the pass flag.
+const TRAJECTORY_REFERENCE_TOLERANCE: f64 = 5e-4;
+const TRAJECTORY_COARSE_TOLERANCE: f64 = 5e-3;
 const PD_START: f64 = 1.5;
 const PD_TARGET: f64 = 0.3;
 const PD_KP: f64 = 20.0;
@@ -132,29 +156,60 @@ pub struct Check {
     /// The physical system the check exercised. Must match the canonical
     /// system for `name` (see the report reader).
     pub system: String,
-    /// Largest accepted measured value, in the check's own units.
+    /// Largest accepted scalar measured value, in the check's own units.
+    /// For a series check this is the absolute component of `series_tolerance`.
     pub tolerance: f64,
+    /// Pointwise tolerance for a series check. `None` for legacy scalar
+    /// metrics; TOML writes only `tolerance_abs` and `tolerance_rel` when set.
+    pub series_tolerance: Option<oracle::Tolerance>,
     /// The measured error. Non-finite values always fail.
     pub measured: f64,
-    /// `measured.is_finite() && measured <= tolerance`.
+    /// Index of the sample (or step) where `measured` is attained. Zero when
+    /// the check is a single scalar with no per-sample series.
+    pub sample: usize,
+    /// For scalars, `measured.is_finite() && measured <= tolerance`.
+    /// The built-in series check has zero relative tolerance, so the same
+    /// rule applies to its maximum absolute pointwise error.
     pub pass: bool,
 }
 
 impl Check {
-    /// Builds a check and derives its pass flag from the single pass rule.
+    /// Builds a scalar check at sample zero and derives its pass flag from the
+    /// single pass rule.
     #[must_use]
     pub fn new(name: &str, tolerance: f64, measured: f64) -> Self {
-        Self::for_system(name, system_of(name), tolerance, measured)
+        Self::for_system(name, system_of(name), tolerance, measured, 0)
     }
 
-    fn for_system(name: &str, system: &str, tolerance: f64, measured: f64) -> Self {
+    fn for_system(name: &str, system: &str, tolerance: f64, measured: f64, sample: usize) -> Self {
         let pass = measured.is_finite() && measured <= tolerance;
         Self {
             name: name.to_owned(),
             system: system.to_owned(),
             tolerance,
+            series_tolerance: None,
             measured,
+            sample,
             pass,
+        }
+    }
+
+    fn for_series(
+        name: &str,
+        system: &str,
+        tolerance: oracle::Tolerance,
+        measured: Measurement,
+    ) -> Self {
+        Self {
+            name: name.to_owned(),
+            system: system.to_owned(),
+            tolerance: tolerance.abs,
+            series_tolerance: Some(tolerance),
+            measured: measured.value,
+            sample: measured.sample,
+            // The v6 battery uses rel=0: maximum raw error is sufficient to
+            // reproduce the pointwise pass rule from the serialized report.
+            pass: measured.value.is_finite() && measured.value <= tolerance.abs,
         }
     }
 }
@@ -166,6 +221,27 @@ fn system_of(name: &str) -> &'static str {
         .iter()
         .position(|n| *n == name)
         .map_or("", |i| CHECK_SYSTEMS[i])
+}
+
+/// What a check measured: the worst error and the sample index where it is
+/// attained. For a per-sample series, `sample` is the index of that sample
+/// (for the trajectory and energy series, the number of integration steps
+/// taken before it). For a scalar measured at the end of a run, `sample` is
+/// the final step count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measurement {
+    /// The measured error, in the check's own units. Non-finite values fail.
+    pub value: f64,
+    /// Index of the sample or step at which `value` is attained.
+    pub sample: usize,
+}
+
+impl Measurement {
+    /// A measurement attained at `sample`.
+    #[must_use]
+    pub const fn new(value: f64, sample: usize) -> Self {
+        Self { value, sample }
+    }
 }
 
 /// One fidelity check the battery can run. The battery runner iterates over
@@ -182,10 +258,19 @@ pub trait FidelityCheck {
     /// Largest accepted measured value, in the check's own units.
     fn tolerance(&self) -> f64;
 
+    /// Optional tier-specific pointwise tolerance for a series check. `None`
+    /// denotes a scalar check. V6 maximum-error rows require finite, non-
+    /// negative `abs` and `rel = 0`; `run_checks` rejects any other series
+    /// tolerance because the serialized maximum raw error cannot audit a
+    /// pointwise relative-tolerance decision.
+    fn series_tolerance(&self, _tier: &Tier) -> Option<oracle::Tolerance> {
+        None
+    }
+
     /// Measures the check's error at `tier`. Returning `None` skips the check
     /// in the standalone [`run_checks`] result; it does not create an archival
     /// not-applicable entry. Built-in battery checks must return `Some`.
-    fn measure(&self, tier: &Tier) -> Result<Option<f64>, BatteryError>;
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError>;
 
     /// Upper bound on the integration steps the check needs at `tier`.
     /// [`run_checks`] includes this value in its budget before measuring.
@@ -227,12 +312,23 @@ fn run_checks_inner(
                 tier: tier.name.clone(),
             });
         };
-        out.push(Check::for_system(
-            check.name(),
-            check.system(),
-            check.tolerance(),
-            measured,
-        ));
+        out.push(if let Some(tolerance) = check.series_tolerance(tier) {
+            if tolerance.rel != 0.0 || !tolerance.abs.is_finite() || tolerance.abs < 0.0 {
+                return Err(BatteryError::CheckFailed {
+                    name: check.name().to_owned(),
+                    message: "v6 maximum-error rows require finite non-negative absolute and zero relative tolerance".to_owned(),
+                });
+            }
+            Check::for_series(check.name(), check.system(), tolerance, measured)
+        } else {
+            Check::for_system(
+                check.name(),
+                check.system(),
+                check.tolerance(),
+                measured.value,
+                measured.sample,
+            )
+        });
     }
     Ok(out)
 }
@@ -343,6 +439,226 @@ impl ContactStatus {
     }
 }
 
+/// Measured outcome of the floating-base G1 zero-torque fall at one tier.
+/// Unlike [`ContactApplicability`], this is a measurement, not a status. A
+/// `Fail` row is a recorded failure: it does not change [`FidelityReport::all_pass`]
+/// and it does not make the default gate fail.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContactProbe {
+    /// Scenario label, always [`G1_PROBE_LABEL`].
+    pub scenario: String,
+    /// Always [`G1_CONTACT_SYSTEM`].
+    pub system: String,
+    /// `Fail` when the fall stopped with a [`DynamicsError`] within the step
+    /// window; `Pass` when it stayed finite and solvable for the whole window.
+    pub status: ProbeStatus,
+    /// Index of the first failing step, or `None` for a pass.
+    pub step: Option<u64>,
+    /// The [`DynamicsError`] variant name at the failing step, or `None` for a pass.
+    pub error: Option<String>,
+    /// Why the row says what it says, including the model attribution.
+    pub reason: String,
+}
+
+/// Outcome of a [`ContactProbe`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeStatus {
+    /// The probe ran the full window without a dynamics error.
+    Pass,
+    /// The probe stopped at a dynamics error. Recorded, not hidden.
+    Fail,
+}
+
+impl ProbeStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "pass" => Some(Self::Pass),
+            "fail" => Some(Self::Fail),
+            _ => None,
+        }
+    }
+}
+
+/// Timestep of the G1 zero-torque probe row, in microseconds (`5e-4` s).
+pub const G1_PROBE_DT_MICROS: i64 = 500;
+/// Number of steps the probe runs at most. Two seconds at [`G1_PROBE_DT_MICROS`].
+pub const G1_PROBE_MAX_STEPS: u64 = 4_000;
+
+/// Scenario label of the G1 probe row. The probe is one fixed scenario at
+/// `dt = 5e-4` s, not a per-tier run, so it is recorded once per report.
+pub const G1_PROBE_LABEL: &str = "g1-zero-torque-dt-5e-4";
+
+/// Start clearance of the G1 probe above the ground plane, in metres.
+const G1_PROBE_START_CLEARANCE: f64 = 0.005;
+/// Gravity magnitude of the G1 probe, in m/s^2 (the `robot-cli` value).
+const G1_PROBE_GRAVITY: f64 = 9.806_65;
+/// Ground contact of the G1 probe (the `robot-cli` `FLOATING_GROUND` values).
+const G1_PROBE_GROUND: GroundContact = GroundContact {
+    stiffness: 2.0e4,
+    normal_damping: 200.0,
+    friction: 0.8,
+    friction_regularization: 1e-3,
+    ground_height: 0.0,
+};
+/// Canonical reason text of the G1 probe row. The reader requires this exact text.
+pub const G1_PROBE_REASON: &str = "zero-torque floating G1 fall on the sphere ground at dt = 500 us, run for at most 4000 steps; the pelvis and torso have no collision geometry, so the trunk reaches the plane through unmodelled shapes once the legs fold (ADR 0010)";
+/// Error names a `fail` probe row may carry: the [`DynamicsError`] variants.
+const DYNAMICS_ERROR_NAMES: [&str; 4] = [
+    "WidthMismatch",
+    "NotFinite",
+    "SingularJointInertia",
+    "InvalidGroundContact",
+];
+
+/// Setup failures of the G1 probe. A setup failure is an error, never a `pass` row.
+#[derive(Debug, PartialEq)]
+pub enum ProbeError {
+    /// The vendored G1 fixture did not load.
+    Fixture(String),
+    /// The G1 floating base has no contact sphere to place on the ground.
+    NoContactSpheres,
+    /// A dynamics call failed during setup.
+    Dynamics(DynamicsError),
+}
+
+impl fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fixture(message) => write!(f, "the G1 fixture did not load: {message}"),
+            Self::NoContactSpheres => write!(f, "the G1 floating base has no contact sphere"),
+            Self::Dynamics(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl core::error::Error for ProbeError {}
+
+/// The zero-torque floating-G1 fall on the sphere ground, run for at most
+/// `max_steps` steps at `dt`. Returns the first failing step and its error,
+/// or `None` if the fall stays finite and solvable for the whole window.
+/// Setup failures are returned as [`ProbeError`], never as a pass.
+///
+/// The ground and start pose match the `robot-cli` `sim multibody --floating`
+/// path. The failure is attributed to the model as well as to `dt`: the pelvis
+/// and torso carry no collision geometry, so once the legs fold the trunk
+/// reaches the plane through unmodelled shapes (ADR 0010).
+fn g1_zero_torque_fall(
+    dt: Duration,
+    max_steps: u64,
+) -> Result<Option<(u64, DynamicsError)>, ProbeError> {
+    let profile = robot_model::fixtures::unitree_g1_29dof_floating_base()
+        .map_err(|e| ProbeError::Fixture(e.to_string()))?;
+    let body = ArticulatedBody::from_profile(&profile);
+    let mut q = vec![0.0; body.position_width()];
+    q[3] = 1.0;
+    let lowest = body
+        .lowest_contact_height(&q)
+        .map_err(ProbeError::Dynamics)?
+        .ok_or(ProbeError::NoContactSpheres)?;
+    q[2] = G1_PROBE_START_CLEARANCE - lowest;
+    let mut state = MultibodyState::at_rest(q, body.dof());
+    let tau = vec![0.0; body.dof()];
+    let gravity = Vec3::new(0.0, 0.0, -G1_PROBE_GRAVITY);
+    for step in 0..max_steps {
+        if let Err(error) = state.step_with_ground(&body, &tau, gravity, &G1_PROBE_GROUND, dt) {
+            return Ok(Some((step, error)));
+        }
+        if state.q.iter().chain(&state.qd).any(|v| !v.is_finite()) {
+            return Ok(Some((
+                step,
+                DynamicsError::NotFinite {
+                    what: "G1 joint state",
+                },
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Runs the G1 zero-torque probe at `dt = 5e-4` and records the outcome.
+/// Called by the battery and by [`FidelityReport::reproduce`], never by the reader.
+pub fn g1_zero_torque_probe() -> Result<ContactProbe, ProbeError> {
+    let outcome = g1_zero_torque_fall(
+        Duration::from_micros(G1_PROBE_DT_MICROS),
+        G1_PROBE_MAX_STEPS,
+    )?;
+    let (status, step, error) = match outcome {
+        None => (ProbeStatus::Pass, None, None),
+        Some((step, error)) => (
+            ProbeStatus::Fail,
+            Some(step),
+            Some(dynamics_error_name(&error).to_owned()),
+        ),
+    };
+    Ok(ContactProbe {
+        scenario: G1_PROBE_LABEL.to_owned(),
+        system: G1_CONTACT_SYSTEM.to_owned(),
+        status,
+        step,
+        error,
+        reason: G1_PROBE_REASON.to_owned(),
+    })
+}
+
+/// Structural check of one probe row, run by the archival reader. It never
+/// simulates: the row must carry the canonical scenario, system and reason,
+/// a `fail` row a step inside the window and a known error name, and a
+/// `pass` row neither.
+fn validate_probe_row(row: &ContactProbe) -> Result<(), ReportError> {
+    if row.scenario != G1_PROBE_LABEL {
+        return Err(invalid(format!(
+            "probe scenario {:?} is not {G1_PROBE_LABEL:?}",
+            row.scenario
+        )));
+    }
+    if row.system != G1_CONTACT_SYSTEM {
+        return Err(invalid(format!(
+            "probe system {:?} is not {G1_CONTACT_SYSTEM:?}",
+            row.system
+        )));
+    }
+    if row.reason != G1_PROBE_REASON {
+        return Err(invalid(
+            "probe reason is not the canonical G1 probe reason".to_owned(),
+        ));
+    }
+    match (row.status, row.step, row.error.as_deref()) {
+        (ProbeStatus::Pass, None, None) => Ok(()),
+        (ProbeStatus::Fail, Some(step), Some(error)) => {
+            if step >= G1_PROBE_MAX_STEPS {
+                return Err(invalid(format!(
+                    "probe step {step} is outside the window of {G1_PROBE_MAX_STEPS} steps"
+                )));
+            }
+            if !DYNAMICS_ERROR_NAMES.contains(&error) {
+                return Err(invalid(format!(
+                    "probe error {error:?} is not a known DynamicsError"
+                )));
+            }
+            Ok(())
+        }
+        _ => Err(invalid(
+            "probe status, step and error do not agree".to_owned(),
+        )),
+    }
+}
+
+fn dynamics_error_name(error: &DynamicsError) -> &'static str {
+    match error {
+        DynamicsError::WidthMismatch { .. } => "WidthMismatch",
+        DynamicsError::NotFinite { .. } => "NotFinite",
+        DynamicsError::SingularJointInertia => "SingularJointInertia",
+        DynamicsError::InvalidGroundContact => "InvalidGroundContact",
+    }
+}
+
 /// The G1 ground-contact applicability of one declared tier.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContactApplicability {
@@ -418,6 +734,9 @@ pub struct FidelityReport {
     pub not_applicable: Vec<NotApplicable>,
     /// G1 ground-contact applicability of each tier. Not a pass or fail.
     pub contact: Vec<ContactApplicability>,
+    /// Measured G1 zero-torque probe, one row for the fixed `dt = 5e-4` scenario.
+    /// A `fail` row is a recorded failure and does not change [`Self::all_pass`].
+    pub probe: Vec<ContactProbe>,
 }
 
 impl FidelityReport {
@@ -496,10 +815,22 @@ impl FidelityReport {
                 ),
             );
         }
+        if !self.probe.is_empty() {
+            root.insert(
+                "probe",
+                Value::Array(
+                    self.probe
+                        .iter()
+                        .map(probe_table)
+                        .map(Value::Table)
+                        .collect(),
+                ),
+            );
+        }
         to_string(&root)
     }
 
-    /// Validates the v5 report layout without executing any simulation.
+    /// Validates the v7 report layout without executing any simulation.
     /// Declared reports require exactly [`declared_tiers`]; custom experiments
     /// must be explicitly labeled. Both modes require canonical check rows,
     /// tolerances, pass flags and not-applicable entries.
@@ -591,17 +922,34 @@ impl FidelityReport {
                     tc.tier
                 )));
             }
-            let canonical = canonical_tolerance(&tc.check.name).ok_or_else(|| {
-                invalid(format!("check {:?} is not a battery check", tc.check.name))
-            })?;
+            let tier = tiers
+                .iter()
+                .find(|t| t.name == tc.tier)
+                .expect("tier checked");
+            let builtin = BUILTIN_CHECKS
+                .iter()
+                .find(|c| c.name() == tc.check.name)
+                .ok_or_else(|| {
+                    invalid(format!("check {:?} is not a battery check", tc.check.name))
+                })?;
+            let canonical = builtin.series_tolerance(tier).map_or_else(
+                || canonical_tolerance(&tc.check.name).expect("known battery check"),
+                |tol| tol.abs,
+            );
             if tc.check.tolerance.to_bits() != canonical.to_bits() {
                 return Err(invalid(format!(
                     "check {:?} at tier {:?} has tolerance {} but the battery declares {}",
                     tc.check.name, tc.tier, tc.check.tolerance, canonical
                 )));
             }
-            let rule = Check::new(&tc.check.name, tc.check.tolerance, tc.check.measured);
-            if tc.check.pass != rule.pass {
+            if tc.check.series_tolerance != builtin.series_tolerance(tier) {
+                return Err(invalid(format!(
+                    "check {:?} at tier {:?} has non-canonical series tolerance",
+                    tc.check.name, tc.tier
+                )));
+            }
+            let rule = tc.check.measured.is_finite() && tc.check.measured <= canonical;
+            if tc.check.pass != rule {
                 return Err(invalid(format!(
                     "check {:?} at tier {:?} has pass={} but measured={} tolerance={}",
                     tc.check.name, tc.tier, tc.check.pass, tc.check.measured, tc.check.tolerance
@@ -632,6 +980,20 @@ impl FidelityReport {
             ));
         }
 
+        let mut probe = Vec::new();
+        for row in tables(&root, "probe")? {
+            reject_unknown_keys(row, &PROBE_KEYS, "probe")?;
+            let parsed = read_probe(row)?;
+            validate_probe_row(&parsed)?;
+            probe.push(parsed);
+        }
+        if probe.len() != 1 {
+            return Err(invalid(format!(
+                "a report carries exactly one probe row, found {}",
+                probe.len()
+            )));
+        }
+
         let report = Self {
             battery: battery.to_owned(),
             tier_set,
@@ -639,6 +1001,7 @@ impl FidelityReport {
             checks,
             not_applicable,
             contact,
+            probe,
         };
         if report.all_pass() != stored_all_pass {
             return Err(invalid(format!(
@@ -655,14 +1018,26 @@ impl FidelityReport {
         Self::from_toml(&self.to_toml())?;
         let fresh = run_battery_with_limit(&self.tiers, max_steps)
             .map_err(|e| invalid(format!("the declared tiers cannot be re-run: {e}")))?;
+        if self.probe != fresh.probe {
+            return Err(invalid(
+                "stored probe row does not match a fresh G1 probe run".to_owned(),
+            ));
+        }
         if self.checks.len() != fresh.checks.len() {
             return Err(invalid("reproduction check count differs".to_owned()));
         }
         for (stored, rerun) in self.checks.iter().zip(&fresh.checks) {
-            if stored.check.measured.to_bits() != rerun.check.measured.to_bits() {
+            if stored.check.measured.to_bits() != rerun.check.measured.to_bits()
+                || stored.check.sample != rerun.check.sample
+            {
                 return Err(invalid(format!(
-                    "check {:?} at tier {:?} stores measured={} but re-running the battery gives {}",
-                    stored.check.name, stored.tier, stored.check.measured, rerun.check.measured
+                    "check {:?} at tier {:?} stores measured={} (sample {}) but re-running gives {} (sample {})",
+                    stored.check.name,
+                    stored.tier,
+                    stored.check.measured,
+                    stored.check.sample,
+                    rerun.check.measured,
+                    rerun.check.sample
                 )));
             }
         }
@@ -827,6 +1202,12 @@ pub enum BatteryError {
         /// The check's own description of the failure.
         message: String,
     },
+    /// The pure oracle comparator rejected its inputs, for example a series
+    /// length mismatch. Never converted to a silent pass or truncation.
+    Oracle(OracleError),
+    /// The G1 probe could not be set up. A setup failure is an error, never a
+    /// `pass` row.
+    Probe(ProbeError),
 }
 
 impl fmt::Display for BatteryError {
@@ -861,6 +1242,8 @@ impl fmt::Display for BatteryError {
             Self::CheckFailed { name, message } => {
                 write!(f, "check {name:?} failed: {message}")
             }
+            Self::Oracle(e) => write!(f, "oracle comparison rejected: {e}"),
+            Self::Probe(e) => write!(f, "G1 probe could not be set up: {e}"),
         }
     }
 }
@@ -881,7 +1264,7 @@ pub fn run_battery_with_limit(
     max_steps: u64,
 ) -> Result<FidelityReport, BatteryError> {
     validate_tiers(tiers)?;
-    let required = battery_steps(tiers)?;
+    let required = battery_steps(tiers)? + u128::from(G1_PROBE_MAX_STEPS);
     if required > u128::from(max_steps) {
         return Err(BatteryError::StepBudget {
             required,
@@ -898,6 +1281,7 @@ pub fn run_battery_with_limit(
             });
         }
     }
+    let probe = g1_zero_torque_probe().map_err(BatteryError::Probe)?;
     Ok(FidelityReport {
         battery: BATTERY.to_owned(),
         tier_set: if tiers == declared_tiers() {
@@ -909,6 +1293,7 @@ pub fn run_battery_with_limit(
         checks,
         not_applicable: not_applicable_checks(),
         contact: contact_applicability(tiers),
+        probe: vec![probe],
     })
 }
 
@@ -961,8 +1346,9 @@ fn check_steps(checks: &[&dyn FidelityCheck], tiers: &[Tier]) -> Result<u128, Ba
 }
 
 /// The built-in checks, in [`CHECK_NAMES`] order.
-const BUILTIN_CHECKS: [&dyn FidelityCheck; 6] = [
+const BUILTIN_CHECKS: [&dyn FidelityCheck; 7] = [
     &PendulumPeriod,
+    &PendulumTrajectory,
     &PdEquilibrium,
     &AbaRneClosedForm,
     &EnergyDrift,
@@ -986,11 +1372,44 @@ impl FidelityCheck for PendulumPeriod {
     fn tolerance(&self) -> f64 {
         PERIOD_TOLERANCE
     }
-    fn measure(&self, tier: &Tier) -> Result<Option<f64>, BatteryError> {
-        Ok(Some(pendulum_period(tier.timestep)?.measured))
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(pendulum_period(tier.timestep)?))
     }
     fn steps(&self, tier: &Tier) -> u64 {
         steps_for(PERIOD_HORIZON_NANOS, tier.timestep)
+    }
+}
+
+struct PendulumTrajectory;
+
+impl FidelityCheck for PendulumTrajectory {
+    fn name(&self) -> &'static str {
+        "pendulum_trajectory"
+    }
+    fn system(&self) -> &'static str {
+        system_of(self.name())
+    }
+    fn tolerance(&self) -> f64 {
+        TRAJECTORY_REFERENCE_TOLERANCE
+    }
+    fn series_tolerance(&self, tier: &Tier) -> Option<oracle::Tolerance> {
+        Some(oracle::Tolerance {
+            abs: if tier.timestep.nanos() <= 100_000 {
+                TRAJECTORY_REFERENCE_TOLERANCE
+            } else {
+                TRAJECTORY_COARSE_TOLERANCE
+            },
+            rel: 0.0,
+        })
+    }
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(pendulum_trajectory(
+            tier.timestep,
+            &self.series_tolerance(tier).expect("series check"),
+        )?))
+    }
+    fn steps(&self, tier: &Tier) -> u64 {
+        steps_for(TRAJECTORY_HORIZON_NANOS, tier.timestep)
     }
 }
 
@@ -1006,8 +1425,8 @@ impl FidelityCheck for PdEquilibrium {
     fn tolerance(&self) -> f64 {
         PD_TOLERANCE
     }
-    fn measure(&self, tier: &Tier) -> Result<Option<f64>, BatteryError> {
-        Ok(Some(pd_equilibrium(tier.timestep)?.measured))
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(pd_equilibrium(tier.timestep)?))
     }
     fn steps(&self, tier: &Tier) -> u64 {
         steps_for(PD_HORIZON_NANOS, tier.timestep)
@@ -1026,8 +1445,8 @@ impl FidelityCheck for AbaRneClosedForm {
     fn tolerance(&self) -> f64 {
         ABA_RNE_TOLERANCE
     }
-    fn measure(&self, _tier: &Tier) -> Result<Option<f64>, BatteryError> {
-        Ok(Some(aba_rne_closed_form().measured))
+    fn measure(&self, _tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(aba_rne_closed_form()))
     }
     fn steps(&self, _tier: &Tier) -> u64 {
         0
@@ -1046,8 +1465,8 @@ impl FidelityCheck for EnergyDrift {
     fn tolerance(&self) -> f64 {
         ENERGY_TOLERANCE
     }
-    fn measure(&self, tier: &Tier) -> Result<Option<f64>, BatteryError> {
-        Ok(Some(energy_drift(tier.timestep)?.measured))
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(energy_drift(tier.timestep)?))
     }
     fn steps(&self, tier: &Tier) -> u64 {
         steps_for(ENERGY_HORIZON_NANOS, tier.timestep)
@@ -1066,8 +1485,8 @@ impl FidelityCheck for ArticulatedEnergyDrift {
     fn tolerance(&self) -> f64 {
         ARTICULATED_ENERGY_TOLERANCE
     }
-    fn measure(&self, tier: &Tier) -> Result<Option<f64>, BatteryError> {
-        Ok(Some(articulated_energy_drift(tier.timestep)?.measured))
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(articulated_energy_drift(tier.timestep)?))
     }
     fn steps(&self, tier: &Tier) -> u64 {
         steps_for(ARTICULATED_ENERGY_HORIZON_NANOS, tier.timestep)
@@ -1086,8 +1505,8 @@ impl FidelityCheck for FreeFall {
     fn tolerance(&self) -> f64 {
         FREE_FALL_TOLERANCE
     }
-    fn measure(&self, tier: &Tier) -> Result<Option<f64>, BatteryError> {
-        Ok(Some(free_fall(tier.timestep)?.measured))
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(free_fall(tier.timestep)?))
     }
     fn steps(&self, tier: &Tier) -> u64 {
         steps_for(FREE_FALL_HORIZON_NANOS, tier.timestep)
@@ -1114,30 +1533,12 @@ fn steps_for(horizon_nanos: u64, dt: Duration) -> u64 {
     horizon_nanos.div_ceil(dt.nanos() as u64)
 }
 
-/// Arithmetic-geometric mean, used for the complete elliptic integral.
-fn agm(mut a: f64, mut b: f64) -> f64 {
-    for _ in 0..32 {
-        let next_a = 0.5 * (a + b);
-        b = (a * b).sqrt();
-        a = next_a;
-    }
-    a
-}
-
-/// Exact period of an undamped pendulum, `T = 4 K(k) / omega0` with
-/// `k = sin(theta0 / 2)`, where `K` is the complete elliptic integral of the
-/// first kind evaluated through the AGM.
-fn exact_pendulum_period(length: f64, gravity: f64, amplitude: f64) -> f64 {
-    let k = (amplitude / 2.0).sin();
-    let complete_elliptic_k = std::f64::consts::FRAC_PI_2 / agm(1.0, (1.0 - k * k).sqrt());
-    4.0 * complete_elliptic_k / (gravity / length).sqrt()
-}
-
-/// Relative error of the measured period against the exact elliptic period.
-/// The period is taken between two successive upward zero crossings of the
-/// angle, with linear interpolation inside the step.
-fn pendulum_period(dt: Duration) -> Result<Check, BatteryError> {
-    let exact = exact_pendulum_period(PENDULUM_LENGTH, GRAVITY, PERIOD_AMPLITUDE);
+/// Relative error of the measured period against the exact elliptic period
+/// from [`oracle::pendulum_period`]. The period is taken between two
+/// successive upward zero crossings of the angle, with linear interpolation
+/// inside the step. The sample index is the step of the second crossing.
+fn pendulum_period(dt: Duration) -> Result<Measurement, BatteryError> {
+    let exact = oracle::pendulum_period(PERIOD_AMPLITUDE) * (PENDULUM_LENGTH / GRAVITY).sqrt();
     let mut pendulum = Pendulum::new(
         pendulum_params(),
         PendulumState {
@@ -1147,6 +1548,7 @@ fn pendulum_period(dt: Duration) -> Result<Check, BatteryError> {
     );
     let dt_s = dt.as_secs_f64();
     let mut crossings = Vec::with_capacity(2);
+    let mut second_step = 0_usize;
     for k in 0..steps_for(PERIOD_HORIZON_NANOS, dt) {
         let before = pendulum.state().theta;
         pendulum.step(0.0, dt).map_err(BatteryError::Pendulum)?;
@@ -1154,6 +1556,7 @@ fn pendulum_period(dt: Duration) -> Result<Check, BatteryError> {
         if before < 0.0 && after >= 0.0 && crossings.len() < 2 {
             let fraction = -before / (after - before);
             crossings.push((k as f64 + fraction) * dt_s);
+            second_step = k as usize + 1;
         }
     }
     // A horizon that holds fewer than two crossings yields an infinite
@@ -1162,11 +1565,51 @@ fn pendulum_period(dt: Duration) -> Result<Check, BatteryError> {
         [first, second] => ((second - first) - exact).abs() / exact,
         _ => f64::INFINITY,
     };
-    Ok(Check::new("pendulum_period", PERIOD_TOLERANCE, measured))
+    Ok(Measurement::new(measured, second_step))
+}
+
+/// Compares every angle of a free 1-rad pendulum with the elliptic solution.
+/// The reference uses dimensionless time `t * sqrt(g/L)`; index zero is the
+/// initial state, index `n` is the state after `n` integration steps.
+fn pendulum_trajectory(
+    dt: Duration,
+    tolerance: &oracle::Tolerance,
+) -> Result<Measurement, BatteryError> {
+    let mut pendulum = Pendulum::new(
+        pendulum_params(),
+        PendulumState {
+            theta: PERIOD_AMPLITUDE,
+            omega: 0.0,
+        },
+    );
+    let count = steps_for(TRAJECTORY_HORIZON_NANOS, dt) as usize;
+    let mut reference = Vec::with_capacity(count + 1);
+    let mut candidate = Vec::with_capacity(count + 1);
+    let dt_s = dt.as_secs_f64();
+    let scale = (GRAVITY / PENDULUM_LENGTH).sqrt();
+    for sample in 0..=count {
+        reference.push(oracle::pendulum_closed_form(
+            PERIOD_AMPLITUDE,
+            sample as f64 * dt_s * scale,
+        ));
+        candidate.push(pendulum.state().theta);
+        if sample < count {
+            pendulum.step(0.0, dt).map_err(BatteryError::Pendulum)?;
+        }
+    }
+    let result =
+        oracle::compare_series(&reference, &candidate, tolerance).map_err(BatteryError::Oracle)?;
+    // The battery's series bound is absolute (rel=0), so this measured
+    // maximum and index reproduce the oracle pass flag in the TOML reader.
+    debug_assert_eq!(
+        result.pass,
+        result.max_error.is_finite() && result.max_error <= tolerance.abs
+    );
+    Ok(Measurement::new(result.max_error, result.at_sample))
 }
 
 /// A PD-held pendulum with gravity compensation must settle at its target.
-fn pd_equilibrium(dt: Duration) -> Result<Check, BatteryError> {
+fn pd_equilibrium(dt: Duration) -> Result<Measurement, BatteryError> {
     let params = pendulum_params();
     let mut pendulum = Pendulum::new(
         params,
@@ -1182,14 +1625,17 @@ fn pd_equilibrium(dt: Duration) -> Result<Check, BatteryError> {
         pendulum.step(torque, dt).map_err(BatteryError::Pendulum)?;
     }
     let measured = (pendulum.state().theta - PD_TARGET).abs();
-    Ok(Check::new("pd_equilibrium", PD_TOLERANCE, measured))
+    Ok(Measurement::new(
+        measured,
+        steps_for(PD_HORIZON_NANOS, dt) as usize,
+    ))
 }
 
 /// Joint forward and inverse dynamics of a point-mass pendulum against the
 /// closed form `qdd = tau / (m L^2) + (g / L) cos q` and its inverse
 /// `tau = m L^2 qdd - m g L cos q`. No time integration is involved, so the
 /// value is identical at every tier.
-fn aba_rne_closed_form() -> Check {
+fn aba_rne_closed_form() -> Measurement {
     let mass = PENDULUM_MASS;
     let length = PENDULUM_LENGTH;
     let profile = point_mass_pendulum(mass, length);
@@ -1198,26 +1644,41 @@ fn aba_rne_closed_form() -> Check {
     let inertia = mass * length * length;
 
     let mut worst = 0.0_f64;
+    let mut worst_sample = 0_usize;
     for sample in 0..16 {
         let q = -std::f64::consts::PI + sample as f64 * std::f64::consts::TAU / 16.0;
         let qd = 0.5;
         let qdd = 1.2;
         let tau_closed = inertia * qdd - mass * GRAVITY * length * q.cos();
         match body.inverse_dynamics(&[q], &[qd], &[qdd], gravity) {
-            Ok(tau) => worst = worst.max((tau[0] - tau_closed).abs()),
-            Err(_) => return Check::new("aba_rne_closed_form", ABA_RNE_TOLERANCE, f64::INFINITY),
+            Ok(tau) => {
+                let error = (tau[0] - tau_closed).abs();
+                if error > worst {
+                    worst = error;
+                    worst_sample = sample;
+                }
+            }
+            Err(_) => return Measurement::new(f64::INFINITY, sample),
         }
         let qdd_closed = tau_closed / inertia + (GRAVITY / length) * q.cos();
         match body.forward_dynamics(&[q], &[qd], &[tau_closed], gravity) {
-            Ok(acc) => worst = worst.max((acc[0] - qdd_closed).abs()),
-            Err(_) => return Check::new("aba_rne_closed_form", ABA_RNE_TOLERANCE, f64::INFINITY),
+            Ok(acc) => {
+                let error = (acc[0] - qdd_closed).abs();
+                if error > worst {
+                    worst = error;
+                    worst_sample = sample;
+                }
+            }
+            Err(_) => return Measurement::new(f64::INFINITY, sample),
         }
     }
-    Check::new("aba_rne_closed_form", ABA_RNE_TOLERANCE, worst)
+    Measurement::new(worst, worst_sample)
 }
 
-/// Relative mechanical-energy drift of an undamped, unforced pendulum.
-fn energy_drift(dt: Duration) -> Result<Check, BatteryError> {
+/// Maximum relative mechanical-energy drift over every step of an undamped,
+/// unforced pendulum, computed by [`oracle::energy_drift`]. The sample is the
+/// step where the largest drift is attained.
+fn energy_drift(dt: Duration) -> Result<Measurement, BatteryError> {
     let mut pendulum = Pendulum::new(
         pendulum_params(),
         PendulumState {
@@ -1225,18 +1686,36 @@ fn energy_drift(dt: Duration) -> Result<Check, BatteryError> {
             omega: 0.0,
         },
     );
-    let e0 = pendulum.energy();
+    let mut energies = Vec::with_capacity(steps_for(ENERGY_HORIZON_NANOS, dt) as usize + 1);
+    energies.push(pendulum.energy());
     for _ in 0..steps_for(ENERGY_HORIZON_NANOS, dt) {
         pendulum.step(0.0, dt).map_err(BatteryError::Pendulum)?;
+        energies.push(pendulum.energy());
     }
-    let measured = (pendulum.energy() - e0).abs() / e0.abs();
-    Ok(Check::new("energy_drift", ENERGY_TOLERANCE, measured))
+    Ok(series_drift(&energies))
+}
+
+/// Largest energy drift over a series and the step where it is attained. A
+/// non-finite or empty series yields `NaN`, which fails the check.
+fn series_drift(energies: &[f64]) -> Measurement {
+    let measured = oracle::energy_drift(energies);
+    let sample = energies
+        .iter()
+        .enumerate()
+        .skip(1)
+        .max_by(|(_, a), (_, b)| {
+            ((**a) - energies[0])
+                .abs()
+                .total_cmp(&((**b) - energies[0]).abs())
+        })
+        .map_or(0, |(i, _)| i);
+    Measurement::new(measured, sample)
 }
 
 /// Relative mechanical-energy drift of a two-link planar chain released from
 /// rest, with no torque applied. Kinetic energy comes from the articulated
 /// body and potential energy from forward kinematics of the same profile.
-fn articulated_energy_drift(dt: Duration) -> Result<Check, BatteryError> {
+fn articulated_energy_drift(dt: Duration) -> Result<Measurement, BatteryError> {
     let profile = double_pendulum(CHAIN_MASS_1, CHAIN_LENGTH_1, CHAIN_MASS_2, CHAIN_LENGTH_2);
     let body = ArticulatedBody::from_profile(&profile);
     let gravity = Vec3::new(0.0, 0.0, -GRAVITY);
@@ -1249,22 +1728,15 @@ fn articulated_energy_drift(dt: Duration) -> Result<Check, BatteryError> {
     };
     let e0 = energy(&state)?;
     let tau = vec![0.0; body.dof()];
-    for _ in 0..steps_for(ARTICULATED_ENERGY_HORIZON_NANOS, dt) {
+    let steps = steps_for(ARTICULATED_ENERGY_HORIZON_NANOS, dt);
+    for k in 0..steps {
         if state.step(&body, &tau, gravity, dt).is_err() {
-            return Ok(Check::new(
-                "articulated_energy_drift",
-                ARTICULATED_ENERGY_TOLERANCE,
-                f64::NAN,
-            ));
+            return Ok(Measurement::new(f64::NAN, k as usize + 1));
         }
     }
     let e1 = energy(&state)?;
     let measured = (e1 - e0).abs() / e0.abs();
-    Ok(Check::new(
-        "articulated_energy_drift",
-        ARTICULATED_ENERGY_TOLERANCE,
-        measured,
-    ))
+    Ok(Measurement::new(measured, steps as usize))
 }
 
 /// Sum over links of `-m g . p_com`, with each centre of mass placed by
@@ -1286,7 +1758,7 @@ fn potential_energy(profile: &RobotProfile, q: &[f64], gravity: Vec3) -> Result<
 /// `g t^2 / 2 + g t dt / 2` after `t` seconds, so the relative error is
 /// `dt / t`. It shrinks with the timestep but is not fixed by it: a 3 s step
 /// over the 1 s horizon gives a relative error of 1.
-fn free_fall(dt: Duration) -> Result<Check, BatteryError> {
+fn free_fall(dt: Duration) -> Result<Measurement, BatteryError> {
     let profile = free_body(1.0, InertiaTensor::diagonal(1.0, 1.0, 1.0));
     let body = ArticulatedBody::from_profile(&profile);
     let gravity = Vec3::new(0.0, 0.0, -GRAVITY);
@@ -1303,7 +1775,7 @@ fn free_fall(dt: Duration) -> Result<Check, BatteryError> {
     let t = steps as f64 * dt.as_secs_f64();
     let z_exact = -0.5 * GRAVITY * t * t;
     let measured = (state.q[2] - z_exact).abs() / z_exact.abs();
-    Ok(Check::new("free_fall", FREE_FALL_TOLERANCE, measured))
+    Ok(Measurement::new(measured, steps as usize))
 }
 
 /// A revolute two-link planar chain: joint1 at the origin carries link1 (point
@@ -1340,8 +1812,9 @@ fn double_pendulum(m1: f64, l1: f64, m2: f64, l2: f64) -> RobotProfile {
     wrap_profile(vec![joint1, joint2], vec![root, link1, link2])
 }
 
-/// The tolerance the battery declares for `name`, or `None` for a name the
-/// battery does not run. No check's tolerance depends on the tier timestep.
+/// The scalar tolerance the battery declares for `name`, or `None` for a name
+/// the battery does not run. The series check uses a tier-specific tolerance
+/// which the reader validates separately.
 fn canonical_tolerance(name: &str) -> Option<f64> {
     BUILTIN_CHECKS
         .iter()
@@ -1460,8 +1933,14 @@ fn check_table(tc: &TierCheck) -> Table {
     t.insert("tier", Value::String(tc.tier.clone()));
     t.insert("name", Value::String(tc.check.name.clone()));
     t.insert("system", Value::String(tc.check.system.clone()));
-    t.insert("tolerance", Value::Float(tc.check.tolerance));
+    if let Some(tol) = tc.check.series_tolerance {
+        t.insert("tolerance_abs", Value::Float(tol.abs));
+        t.insert("tolerance_rel", Value::Float(tol.rel));
+    } else {
+        t.insert("tolerance", Value::Float(tc.check.tolerance));
+    }
     t.insert("measured", Value::Float(tc.check.measured));
+    t.insert("sample", Value::Integer(tc.check.sample as i64));
     t.insert("pass", Value::Boolean(tc.check.pass));
     t
 }
@@ -1525,6 +2004,13 @@ fn read_tier(t: &Table) -> Result<Tier, ReportError> {
     })
 }
 
+/// The `sample` field of a check row. Must be a non-negative integer.
+fn read_sample(t: &Table) -> Result<usize, ReportError> {
+    let sample = t.require_integer("sample").map_err(ReportError::Toml)?;
+    usize::try_from(sample)
+        .map_err(|_| invalid(format!("sample is {sample}, must be non-negative")))
+}
+
 fn read_check(t: &Table) -> Result<TierCheck, ReportError> {
     let name = t.require_str("name").map_err(ReportError::Toml)?;
     let system = t.require_str("system").map_err(ReportError::Toml)?;
@@ -1537,13 +2023,45 @@ fn read_check(t: &Table) -> Result<TierCheck, ReportError> {
             "check {name:?} is labelled {system:?}, its system is {canonical:?}"
         )));
     }
+    let series_tolerance = if name == "pendulum_trajectory" {
+        if t.get("tolerance").is_some() {
+            return Err(invalid(
+                "series check must not have scalar tolerance".to_owned(),
+            ));
+        }
+        let abs = t
+            .require_float("tolerance_abs")
+            .map_err(ReportError::Toml)?;
+        let rel = t
+            .require_float("tolerance_rel")
+            .map_err(ReportError::Toml)?;
+        if !(abs.is_finite() && abs >= 0.0 && rel.is_finite() && rel >= 0.0) {
+            return Err(invalid(
+                "series tolerance must be finite and non-negative".to_owned(),
+            ));
+        }
+        Some(oracle::Tolerance { abs, rel })
+    } else {
+        if t.get("tolerance_abs").is_some() || t.get("tolerance_rel").is_some() {
+            return Err(invalid(
+                "scalar check must not have series tolerance".to_owned(),
+            ));
+        }
+        None
+    };
     Ok(TierCheck {
         tier: t.require_str("tier").map_err(ReportError::Toml)?.to_owned(),
         check: Check {
             name: name.to_owned(),
             system: system.to_owned(),
-            tolerance: t.require_float("tolerance").map_err(ReportError::Toml)?,
+            tolerance: if let Some(tol) = series_tolerance {
+                tol.abs
+            } else {
+                t.require_float("tolerance").map_err(ReportError::Toml)?
+            },
+            series_tolerance,
             measured: t.require_float("measured").map_err(ReportError::Toml)?,
+            sample: read_sample(t)?,
             pass: t.require_bool("pass").map_err(ReportError::Toml)?,
         },
     })
@@ -1569,6 +2087,62 @@ fn read_contact(t: &Table) -> Result<ContactApplicability, ReportError> {
             .map_err(ReportError::Toml)?
             .to_owned(),
         status,
+        reason: t
+            .require_str("reason")
+            .map_err(ReportError::Toml)?
+            .to_owned(),
+    })
+}
+
+fn probe_table(p: &ContactProbe) -> Table {
+    let mut t = Table::new();
+    t.insert("scenario", Value::String(p.scenario.clone()));
+    t.insert("system", Value::String(p.system.clone()));
+    t.insert("status", Value::String(p.status.as_str().to_owned()));
+    if let Some(step) = p.step {
+        t.insert("step", Value::Integer(step as i64));
+    }
+    if let Some(error) = &p.error {
+        t.insert("error", Value::String(error.clone()));
+    }
+    t.insert("reason", Value::String(p.reason.clone()));
+    t
+}
+
+fn read_probe(t: &Table) -> Result<ContactProbe, ReportError> {
+    let status_text = t.require_str("status").map_err(ReportError::Toml)?;
+    let status = ProbeStatus::parse(status_text)
+        .ok_or_else(|| invalid(format!("unknown probe status {status_text:?}")))?;
+    let step = match t.get("step") {
+        None => None,
+        Some(_) => {
+            let value = t.require_integer("step").map_err(ReportError::Toml)?;
+            Some(
+                u64::try_from(value)
+                    .map_err(|_| invalid(format!("probe step {value} is negative")))?,
+            )
+        }
+    };
+    let error = match t.get("error") {
+        None => None,
+        Some(_) => Some(
+            t.require_str("error")
+                .map_err(ReportError::Toml)?
+                .to_owned(),
+        ),
+    };
+    Ok(ContactProbe {
+        scenario: t
+            .require_str("scenario")
+            .map_err(ReportError::Toml)?
+            .to_owned(),
+        system: t
+            .require_str("system")
+            .map_err(ReportError::Toml)?
+            .to_owned(),
+        status,
+        step,
+        error,
         reason: t
             .require_str("reason")
             .map_err(ReportError::Toml)?
@@ -1617,7 +2191,7 @@ mod tests {
         fn tolerance(&self) -> f64 {
             0.1
         }
-        fn measure(&self, _tier: &Tier) -> Result<Option<f64>, BatteryError> {
+        fn measure(&self, _tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
             Ok(None)
         }
         fn steps(&self, _tier: &Tier) -> u64 {
@@ -1689,6 +2263,210 @@ mod tests {
     }
 
     #[test]
+    fn v7_report_round_trips_the_per_check_sample_index() {
+        let report = declared();
+        let text = report.to_toml();
+        assert!(text.contains("schema_version = 7"));
+        assert!(text.contains("battery = \"shared-analytic-v7\""));
+        let parsed = FidelityReport::from_toml(&text).unwrap();
+        assert_eq!(parsed, report);
+        let stored = declared_check("reference", "aba_rne_closed_form");
+        assert!(stored.sample < 16, "sample={}", stored.sample);
+        let period = declared_check("reference", "pendulum_period");
+        assert!(period.sample > 0, "period sample={}", period.sample);
+        for (tier, expected) in [
+            ("reference", TRAJECTORY_REFERENCE_TOLERANCE),
+            ("coarse", TRAJECTORY_COARSE_TOLERANCE),
+        ] {
+            let trajectory = declared_check(tier, "pendulum_trajectory");
+            let (low, high, sample) = if tier == "reference" {
+                (1e-4, 2e-4, 37_435)
+            } else {
+                (1e-3, 2e-3, 3_744)
+            };
+            assert_eq!(trajectory.sample, sample, "{tier} worst sample");
+            assert!(
+                (low..high).contains(&trajectory.measured),
+                "{tier} max error {} at {}",
+                trajectory.measured,
+                trajectory.sample
+            );
+            assert_eq!(
+                trajectory.series_tolerance,
+                Some(oracle::Tolerance {
+                    abs: expected,
+                    rel: 0.0
+                })
+            );
+            assert!(
+                trajectory.pass,
+                "{tier} max error {} at {} exceeds {expected}",
+                trajectory.measured, trajectory.sample
+            );
+        }
+    }
+
+    #[test]
+    fn trajectory_tolerance_round_trips_and_rejects_tampering() {
+        let report = declared();
+        let text = report.to_toml();
+        assert!(text.contains("tolerance_abs = 0.0005"));
+        assert!(text.contains("tolerance_rel = 0.0"));
+        assert_eq!(FidelityReport::from_toml(&text).unwrap(), report);
+        let mut changed = report;
+        let trajectory = changed
+            .checks
+            .iter_mut()
+            .find(|c| c.check.name == "pendulum_trajectory")
+            .unwrap();
+        trajectory.check.series_tolerance.as_mut().unwrap().abs *= 2.0;
+        assert_rejected(&changed.to_toml());
+        let missing = text.replacen("tolerance_rel = 0.0\n", "", 1);
+        assert!(FidelityReport::from_toml(&missing).is_err());
+        let contradictory = text.replacen("tolerance_rel = 0.0", "tolerance_rel = 0.1", 1);
+        assert_rejected(&contradictory);
+    }
+
+    #[test]
+    fn trajectory_oracle_failure_is_not_silently_accepted() {
+        let tier = declared_tiers().remove(0);
+        let check = PendulumTrajectory;
+        let mut tolerance = check.series_tolerance(&tier).unwrap();
+        tolerance.abs = 1e-10;
+        let measured = pendulum_trajectory(tier.timestep, &tolerance).unwrap();
+        assert!(measured.sample > 0);
+        assert!(!Check::for_series(check.name(), check.system(), tolerance, measured).pass);
+    }
+
+    #[test]
+    fn g1_probe_fail_row_round_trips_strictly_without_changing_the_gate() {
+        // The probe re-runs the G1 zero-torque fall at dt = 5e-4 and must record
+        // the measured failure: status fail, step inside the recorded window, and
+        // error SingularJointInertia. The row round-trips through the strict reader,
+        // and all_pass() stays a function of the analytic checks only.
+        let report = declared();
+        let probe = g1_zero_torque_probe().expect("the G1 fixture must load");
+        assert_eq!(probe.status, ProbeStatus::Fail);
+        assert_eq!(probe.error.as_deref(), Some("SingularJointInertia"));
+        let step = probe.step.unwrap();
+        assert!((2_100..=2_400).contains(&step), "step={step}");
+        let text = report.to_toml();
+        assert!(text.contains("status = \"fail\""));
+        assert!(text.contains("error = \"SingularJointInertia\""));
+        let parsed = FidelityReport::from_toml(&text).unwrap();
+        assert_eq!(parsed.probe, report.probe);
+        assert!(parsed.all_pass());
+    }
+
+    #[test]
+    fn tampered_probe_row_is_refused_by_the_strict_reader() {
+        let text = declared().to_toml();
+        let forged = text.replace("status = \"fail\"", "status = \"pass\"");
+        assert!(matches!(
+            FidelityReport::from_toml(&forged),
+            Err(ReportError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn probe_row_with_wrong_scenario_unknown_error_or_window_step_is_refused() {
+        let text = declared().to_toml();
+        let wrong_scenario = text.replace(
+            "scenario = \"g1-zero-torque-dt-5e-4\"",
+            "scenario = \"other\"",
+        );
+        let unknown_error = text.replace("error = \"SingularJointInertia\"", "error = \"Bogus\"");
+        let step_outside = text.replace("step = 2236", "step = 4000");
+        for forged in [wrong_scenario, unknown_error, step_outside] {
+            assert!(matches!(
+                FidelityReport::from_toml(&forged),
+                Err(ReportError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_fresh_probe_run_matches_the_archived_row_and_respects_the_budget() {
+        let report = declared();
+        assert!(matches!(
+            report.reproduce(1_000),
+            Err(ReportError::Invalid(_))
+        ));
+        assert!(report.reproduce(1_000_000).is_ok());
+    }
+
+    #[test]
+    fn reproduction_refuses_a_probe_row_that_differs_from_a_fresh_run() {
+        let mut report = declared();
+        report.probe[0].step = Some(2_101);
+        assert!(matches!(
+            report.reproduce(1_000_000),
+            Err(ReportError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn v7_reader_refuses_a_v6_report() {
+        let text = declared()
+            .to_toml()
+            .replace("schema_version = 7", "schema_version = 6")
+            .replace("shared-analytic-v7", "shared-analytic-v6");
+        assert!(matches!(
+            FidelityReport::from_toml(&text),
+            Err(ReportError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn v6_reader_refuses_a_negative_sample_index() {
+        let text = declared()
+            .to_toml()
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("sample = ") {
+                    "sample = -1".to_owned()
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            FidelityReport::from_toml(&text),
+            Err(ReportError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn reproduction_rejects_a_tampered_trajectory_sample_index() {
+        let mut report = declared();
+        let trajectory = report
+            .checks
+            .iter_mut()
+            .find(|row| row.tier == "reference" && row.check.name == "pendulum_trajectory")
+            .unwrap();
+        assert_ne!(trajectory.check.sample, 0);
+        trajectory.check.sample = 0;
+
+        let archived = FidelityReport::from_toml(&report.to_toml())
+            .expect("a structurally valid report may contain an incorrect sample index");
+        assert_eq!(
+            archived
+                .checks
+                .iter()
+                .find(|row| row.tier == "reference" && row.check.name == "pendulum_trajectory")
+                .unwrap()
+                .check
+                .sample,
+            0
+        );
+        assert!(matches!(
+            archived.reproduce(1_000_000),
+            Err(ReportError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn battery_runs_every_check_at_every_declared_tier() {
         let report = declared();
         assert_eq!(report.tiers.len(), 2);
@@ -1712,14 +2490,18 @@ mod tests {
 
     #[test]
     fn measured_pendulum_period_matches_the_elliptic_reference() {
-        let exact = exact_pendulum_period(PENDULUM_LENGTH, GRAVITY, PERIOD_AMPLITUDE);
+        let exact = oracle::pendulum_period(PERIOD_AMPLITUDE) * (PENDULUM_LENGTH / GRAVITY).sqrt();
         // Small-amplitude limit is 2 pi sqrt(L/g); the finite-amplitude period is larger.
         let small = 2.0 * std::f64::consts::PI * (PENDULUM_LENGTH / GRAVITY).sqrt();
         assert!(exact > small);
         // Series T = T0 (1 + th^2/16 + 11 th^4/3072 + ...) at th = 1 rad gives 2.1393 s.
         assert!((exact - 2.1393).abs() < 1e-3, "exact {exact}");
-        let check = pendulum_period(Duration::from_micros(100)).unwrap();
-        assert!(check.pass, "period error {}", check.measured);
+        let measured = pendulum_period(Duration::from_micros(100)).unwrap();
+        assert!(
+            measured.value <= PERIOD_TOLERANCE,
+            "period error {}",
+            measured.value
+        );
     }
 
     #[test]
@@ -1761,6 +2543,7 @@ mod tests {
         report.tiers.pop();
         report.checks.retain(|c| c.tier == "reference");
         report.contact = contact_applicability(&report.tiers);
+        report.probe = vec![g1_zero_torque_probe().unwrap()];
         assert!(FidelityReport::from_toml(&report.to_toml()).is_err());
         let switched = report
             .to_toml()
@@ -2040,6 +2823,7 @@ mod tests {
             }
         }
         report.contact = contact_applicability(&report.tiers);
+        report.probe = vec![g1_zero_torque_probe().unwrap()];
         let dir = temp_dir("nano-read");
         let path = write_report(&dir, &report).unwrap();
         assert_eq!(read_report(&path).unwrap(), report);
@@ -2097,12 +2881,22 @@ mod tests {
     fn non_finite_measurements_round_trip_as_failing_checks() {
         let mut report = declared();
         report.checks[0].check = Check::new("pendulum_period", PERIOD_TOLERANCE, f64::NAN);
-        report.checks[1].check = Check::new("pd_equilibrium", PD_TOLERANCE, f64::INFINITY);
+        let pd = report
+            .checks
+            .iter_mut()
+            .find(|c| c.tier == "reference" && c.check.name == "pd_equilibrium")
+            .unwrap();
+        pd.check = Check::new("pd_equilibrium", PD_TOLERANCE, f64::INFINITY);
         let back = FidelityReport::from_toml(&report.to_toml()).unwrap();
         assert!(back.checks[0].check.measured.is_nan());
         assert!(!back.checks[0].check.pass);
-        assert!(back.checks[1].check.measured.is_infinite());
-        assert!(!back.checks[1].check.pass);
+        let pd = back
+            .checks
+            .iter()
+            .find(|c| c.tier == "reference" && c.check.name == "pd_equilibrium")
+            .unwrap();
+        assert!(pd.check.measured.is_infinite());
+        assert!(!pd.check.pass);
     }
 
     #[test]
@@ -2121,9 +2915,17 @@ mod tests {
     #[test]
     fn free_fall_fails_a_gross_three_second_step_and_passes_declared_tiers() {
         let coarse = free_fall(Duration::from_secs(3)).unwrap();
-        assert!(!coarse.pass, "3 s step measured {}", coarse.measured);
+        assert!(
+            coarse.value > FREE_FALL_TOLERANCE,
+            "3 s step measured {}",
+            coarse.value
+        );
         let over = free_fall(Duration::from_millis(20)).unwrap();
-        assert!(!over.pass, "20 ms step measured {}", over.measured);
+        assert!(
+            over.value > FREE_FALL_TOLERANCE,
+            "20 ms step measured {}",
+            over.value
+        );
         for tier in declared_tiers() {
             let c = declared_check(&tier.name, "free_fall");
             assert!(c.pass, "{} measured {}", tier.name, c.measured);
@@ -2137,20 +2939,25 @@ mod tests {
             assert!(c.pass, "{} measured {}", tier.name, c.measured);
         }
         let divergent = articulated_energy_drift(Duration::from_millis(200)).unwrap();
-        assert!(!divergent.pass);
+        assert!(divergent.value.is_nan() || divergent.value > ARTICULATED_ENERGY_TOLERANCE);
     }
 
     #[test]
     fn articulated_energy_drift_fails_a_finite_accuracy_loss_not_only_divergence() {
         let c = articulated_energy_drift(Duration::from_millis(5)).unwrap();
-        assert!(c.measured.is_finite(), "measured {}", c.measured);
-        assert!(!c.pass, "5 ms measured {}", c.measured);
+        assert!(c.value.is_finite(), "measured {}", c.value);
+        assert!(
+            c.value > ARTICULATED_ENERGY_TOLERANCE,
+            "5 ms measured {}",
+            c.value
+        );
     }
 
     #[test]
     fn declared_tiers_fit_the_battery_step_budget() {
         let required = battery_steps(&declared_tiers()).unwrap();
-        assert_eq!(required, 495_000);
+        assert_eq!(required, 539_000);
+        assert_eq!(required + u128::from(G1_PROBE_MAX_STEPS), 543_000);
         assert!(required <= u128::from(MAX_BATTERY_STEPS));
     }
 
@@ -2174,14 +2981,15 @@ mod tests {
     #[test]
     fn explicit_step_limit_is_enforced_exactly() {
         let coarse = [declared_tiers()[1].clone()];
+        let required = 49_000 + G1_PROBE_MAX_STEPS;
         assert!(matches!(
-            run_battery_with_limit(&coarse, 44_999),
+            run_battery_with_limit(&coarse, required - 1),
             Err(BatteryError::StepBudget {
-                required: 45_000,
-                limit: 44_999
-            })
+                required: r,
+                limit
+            }) if r == u128::from(required) && limit == required - 1
         ));
-        let report = run_battery_with_limit(&coarse, 45_000).unwrap();
+        let report = run_battery_with_limit(&coarse, required).unwrap();
         assert_eq!(report.checks, cached().checks[CHECK_NAMES.len()..]);
     }
 
@@ -2210,6 +3018,7 @@ mod tests {
             failing,
             [
                 "pendulum_period",
+                "pendulum_trajectory",
                 "energy_drift",
                 "articulated_energy_drift",
                 "free_fall"

@@ -1,12 +1,13 @@
 # 0008. Fidelity report schema and battery contract
 
-- Status: accepted; format selected before the writer; schema v5 (`scope`
-  key, per-tier `[[contact]]` applicability rows, battery identifier
-  `shared-analytic-v5`, `BatteryError::CheckFailed`) amended 2026-10-28.
-  Schema v4 (per-check `system` attribution, `FidelityCheck` runner) and v3
-  (`production_pass`, dt-independent free-fall tolerance, articulated energy
-  drift, step budget) are the baselines.
-- Date: 2026-10-28 (v5 amendment).
+- Status: accepted; format selected before the writer; schema v7 (`[[probe]]`
+  table for the measured G1 zero-torque probe, battery identifier
+  `shared-analytic-v7`) amended for Step 5 of the source-faithful plan. Schema
+  v6 (seventh check `pendulum_trajectory`, per-check `sample`, `tolerance_abs`
+  and `tolerance_rel` columns) and v5 (`scope` key, per-tier `[[contact]]`
+  rows, `BatteryError::CheckFailed`) are the earlier baselines; v5 and v6 reports
+  are refused by the v7 reader.
+- Date: 2026-10-29 (v6 and v7 amendments).
 - Scope: the archival battery is an **analytic subset**. It contains no
   ground-contact check, so no report qualifies the floating-base G1 contact path.
   The sphere/box contact check is deferred until it can be measured inside the
@@ -24,8 +25,18 @@ canonical system of each check name, and a `FidelityCheck` trait that the batter
 runner iterates over. Version 5 adds the top-level `scope = "analytic-subset"`
 key, a `[[contact]]` table that states the G1 contact applicability of every
 tier from its timestep alone, and `BatteryError::CheckFailed` for plug-in
-failures. Versions 1 through 4 are rejected rather than silently interpreted as
-a complete production report.
+failures. Version 6 adds the seventh check `pendulum_trajectory` (the 1 rad
+pendulum angle series against `oracle::pendulum_closed_form`), the per-check
+`sample` index of the measured worst case, and `tolerance_abs` / `tolerance_rel`
+for series rows only. Version 7 adds the `[[probe]]` table: one row for the
+measured G1 zero-torque fall at `dt = 5e-4` s, with `scenario`, `system`,
+`status`, `step`, `error` and `reason`. A failing probe is recorded as
+`status = "fail"` and does not change `all_pass`. Versions 1 through 6 are
+rejected rather than silently interpreted as a complete production report. The
+v6 series rows are abs-only: `tolerance_rel` must be exactly zero, because a
+stored maximum raw error and its index cannot reconstruct a pointwise relative
+pass decision. These results are source-faithful checks against an analytic
+oracle; they are not measured parity with MuJoCo.
 
 ## Context
 
@@ -47,15 +58,15 @@ until a GPU backend exists and must still appear in the report.
 2. **File name:** `fidelity.toml` in the directory the caller provides.
 3. **Top-level keys:**
    - `schema = "robot-sim.fidelity-report"` (string, fixed)
-   - `schema_version = 5` (integer)
+   - `schema_version = 7` (integer)
    - `scope = "analytic-subset"` (string, fixed). The report covers the analytic
      battery only. It is not a G1 or floating-base qualification; any other value
      is rejected.
-   - `battery = "shared-analytic-v5"` (string). The suffix versions the battery
+   - `battery = "shared-analytic-v7"` (string). The suffix versions the battery
      contents (check set, check definitions, horizons, canonical tolerances). It
      changes together with `schema_version` whenever those change, so the
      identifier always names what was measured. Earlier battery identifiers
-     (v1–v4) are rejected, not reinterpreted.
+     (v1–v5) are rejected, not reinterpreted.
    - `tier_set = "declared"` or `"experimental"` (string). `declared` means
      **exactly** `declared_tiers()` in order, including each name, timestep,
      integrator and solver. `experimental` means a nonempty custom tier list
@@ -76,12 +87,14 @@ until a GPU backend exists and must still appear in the report.
    naming a `[[tier]]`), `name`, `system` (string, the physical system the check
    exercised: `standalone_pendulum`, `point_mass_pendulum_articulated`,
    `double_pendulum_articulated` or `free_body_articulated`; the reader rejects any
-   value that differs from the canonical system of `name`), `tolerance` (float, same
-   units as the measured value and stated in the check's doc), `measured` (float),
-   `pass` (bool). A
-   non-finite measured value is written as `nan` or `inf` and always fails. A flat
-   array is used rather than nested arrays of tables so the subset parser and writer
-   stay simple.
+   value that differs from the canonical system of `name`), `sample` (integer
+   step or sample index associated with `measured`: the second crossing for
+   `pendulum_period`, the final step for final-state metrics, or the worst sample
+   for max-over-samples metrics such as series checks and `aba_rne_closed_form`),
+   `tolerance` (float, scalar only) / `tolerance_abs` + `tolerance_rel` (float,
+   series only; `tolerance_rel` must be 0.0), `measured` (float), `pass` (bool).
+   A non-finite measured value is written as `nan` or `inf` and always fails. A
+   flat array is used so the subset parser and writer stay simple.
 5a. **Contact table, one `[[contact]]` per declared tier (v5).** Fields: `tier`,
    `system` (always `g1_floating_base_ground_contact`), `status` and `reason`.
    `status` is `not_applicable` or `not_measured`; it is never a qualified value.
@@ -94,27 +107,41 @@ until a GPU backend exists and must still appear in the report.
 6. **Not-applicable table, one `[[not_applicable]]` per declared check that cannot
    run:** `name` and `reason`. No `measured` or `pass` is written for these, so a
    reader cannot mistake them for a pass.
-7. **Pass rule:** `pass = measured.is_finite() && measured <= tolerance`. Every
-   check's measured value is a non-negative error metric, so a single comparison
-   applies to all checks.
+7. **Pass rule:**
+   - For scalar checks: `pass = measured.is_finite() && measured <= tolerance`.
+   - For series checks: `pass = measured.is_finite() && measured <= tolerance_abs`.
+   Every check's measured value is a non-negative error metric, so these apply.
+   Series checks require `tolerance_rel` = 0.0, as maximum raw error cannot audit
+   a relative pointwise pass rule.
 8. **Reader:** `read_report` validates the structure of the stored report only.
    It reads at most 1 MiB plus one byte and rejects larger files before parsing;
    no timestep or report contents can trigger simulation during an archival read.
    It rejects malformed TOML, unknown keys at every table level, mismatched
    schema/version/battery/tier-set/scope, missing or changed production tiers,
    absent, extra or out-of-order battery checks for any tier, wrong scope,
-   [[contact]] rows that differ from the canonical applicability,
-   noncanonical tolerances (the tolerance for each check name is fixed;
-   see `canonical_tolerance`), contradictory `pass` or `all_pass`, and
-   absent or changed not-applicable entries. It returns no partially loaded
-   report. The reader **does not re-run simulation**: stored measurements are
-   archival claims, not bit-for-bit outputs to recompute with a later solver,
-   toolchain or libm. This version has no source-commit/toolchain/platform
-   provenance; callers must not claim cross-platform bit-identical replay.
+   [[contact]] rows that differ from the canonical applicability, missing or
+   negative `sample` indices, a scalar `tolerance` on a series row or
+   `tolerance_abs`/`tolerance_rel` on a scalar row, noncanonical tolerance values
+   (including nonzero `tolerance_rel` for a series row), contradictory `pass` or
+   `all_pass`, and absent or changed not-applicable entries.
+   It returns no partially loaded report. The reader **does not re-run simulation**:
+   stored measurements are archival claims, not bit-for-bit outputs to recompute
+   with a later solver, toolchain or libm. This version has no
+   source-commit/toolchain/platform provenance; callers must not claim
+   cross-platform bit-identical replay.
    `FidelityReport::reproduce(max_steps)` is an explicit opt-in same-build,
-   same-platform comparison; it validates the report and refuses any run whose
-   summed integration steps exceed the caller's cap. Its failure does not make
-   a structurally sound archival report unreadable.
+   same-platform comparison; it validates the report, refuses any run whose
+   summed integration steps exceed the caller's cap, and verifies that the `sample`
+   index matches the fresh measurement. Its failure does not make a structurally
+   sound archival report unreadable.
+   **Probe rows (v7).** The reader validates each `[[probe]]` row structurally
+   only: `scenario` and `system` are the canonical G1 probe labels, `reason` is the
+   canonical text, a `fail` row carries a `step` below the 4000-step window and an
+   `error` that names a `DynamicsError` variant, and a `pass` row carries neither.
+   The reader does not run the probe. `reproduce(max_steps)` re-runs it, counts its
+   4000 steps against `max_steps` before running, and refuses a stored row that
+   differs from the fresh measurement. A setup failure of the probe is an error,
+   never a `pass` row, and a non-finite state is reported as `NotFinite`.
    `write_report_with_id` returns `robot_artifacts::hash::ContentId` for the
    exact stored bytes; `read_report_verified` checks against an independently
    retained expected ID before parsing. A digest stored only alongside an
@@ -125,13 +152,24 @@ until a GPU backend exists and must still appear in the report.
      elliptic period `T = 4 K(sin(theta0/2)) / omega0` (K evaluated by the AGM),
      with theta0 = 1 rad, the period taken between two upward zero crossings with
      linear interpolation, tolerance 1e-4.
+   - `pendulum_trajectory` (v6): the 1 rad pendulum angle series, sampled at every
+     integration step over 4 s, compared with `oracle::pendulum_closed_form` at
+     dimensionless time `t * sqrt(g/L)` through `oracle::compare_series`. Index 0
+     is the initial state; index `n` is the state after `n` steps. Abs-only:
+     `tolerance_abs` is 5e-4 rad at `reference` (100 us) and 5e-3 rad at `coarse`
+     (1 ms), and `tolerance_rel` is exactly 0. Each row stores the maximum error
+     and its `sample` index. The archival reader does not re-run the series, so
+     `reproduce` is the only path that checks the stored `measured` and `sample`
+     bit-for-bit against a fresh run. This is a source-faithful
+     check against an analytic oracle, not measured MuJoCo parity.
    - `pd_equilibrium`: `|theta_end - theta_target|` for a gravity-compensated PD
      pendulum after 20 s, tolerance 1e-4 rad.
    - `aba_rne_closed_form`: max absolute error of the articulated point-mass pendulum
      forward and inverse dynamics against the textbook closed form, tolerance 1e-9.
      This check does not integrate, so its value does not depend on the tier.
    - `energy_drift`: relative energy drift of the undamped pendulum over 10 s,
-     tolerance 0.02.
+     tolerance 0.02. The metric is the maximum relative energy drift over all
+     samples `max_i |E_i - E_0| / |E_0|`, recording the worst-step index `i`.
    - `articulated_energy_drift`: relative mechanical-energy drift of a two-link
      planar revolute chain (point masses 1.0 and 0.6 kg, lengths 0.5 and 0.35 m,
      initial angles 0.6 and -0.3 rad, released from rest, no torque) over 10 s.
@@ -154,8 +192,10 @@ until a GPU backend exists and must still appear in the report.
      with `BatteryError::StepBudget` if the total exceeds `MAX_BATTERY_STEPS`
      (2 000 000). The check runs after tier validation and before any
      simulation, so a pathological tier (for example dt = 1 ns, about 4.5e10
-     steps) fails immediately instead of running for hours. The declared tiers
-     need 495 000 steps. `run_battery_with_limit` takes an explicit limit, and
+     steps) fails immediately instead of running for hours. The declared analytic
+     tiers need 539 000 steps (49 000 at the coarse tier); the v7 G1 probe adds
+     its 4 000-step cap, so `run_battery` and `reproduce` budget up to 543 000
+     steps in total. `run_battery_with_limit` takes an explicit limit, and
      `reproduce(max_steps)` uses it with the caller's cap.
  10. **Not applicable (recorded, not run):** `cpu_gpu_agreement`
     (`SIMULATION_SPECS.md` Section 14.2) and `contact_budget_exhaustion`
@@ -165,7 +205,7 @@ until a GPU backend exists and must still appear in the report.
 ## Production qualification scope
 
 `production_pass()` qualifies the analytic subset only: the declared tier set ran
-and all six analytic checks passed. It does not qualify floating-base G1 ground
+and all seven analytic checks (v6) passed. It does not qualify floating-base G1 ground
 contact at any tier. The `contact` rows are the statement of that scope, and a
 `coarse` `all_pass = true` must not be read as contact evidence.
 
@@ -202,6 +242,10 @@ and tolerances aligned with the archival reader's canonical tables.
   or amendment (as with the v2 tier-set change and the v3 check change recorded here).
 - Changing a canonical tolerance or a check's physical definition is a schema
   change, not a parameter tweak.
+- The v6 series rows record only a maximum raw error and its index. A reader
+  cannot rebuild a pointwise relative decision from them, so `tolerance_rel`
+  must be zero. A positive relative tolerance needs extra persisted comparison
+  evidence first.
 - The writer validates the same structure and one-MiB size limit before creating
   a report file; invalid production tiers cannot be emitted as valid archives.
 - The writer and reader live in `robot-sim`, which gains a dependency on

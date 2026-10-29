@@ -60,5 +60,6 @@ pub mod contact;
 pub mod env;
 pub mod fidelity;
 pub mod multibody_env;
+pub mod oracle;
 pub mod pendulum;
 pub mod spatial;
