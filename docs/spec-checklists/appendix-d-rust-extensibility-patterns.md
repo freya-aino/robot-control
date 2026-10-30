@@ -26,11 +26,11 @@ The mechanism descriptions in Appendix B.2.14 link to the Rust Book and crate do
 
 ## Implementation checklist
 
-Status legend: `[x]` implemented, `[~]` partial, `[ ]` not implemented, `[?]` not audited in this pass. Summary: 2 `[x]`, 1 `[~]`, 1 `[ ]`, 2 `[?]` across 6 items. This appendix is advisory; the checklist records the constraints it places on code.
+Status legend: `[x]` implemented, `[~]` partial, `[ ]` not implemented, `[?]` not audited in this pass. Summary: 2 `[x]`, 2 `[~]`, 2 `[ ]`, 0 `[?]` across 6 items. This appendix is advisory; the checklist records the constraints it places on code.
 
-- [x] D.1-a No registry, plugin or dynamic code loading — Evidence: a case-insensitive grep of `*.toml`, `*.rs` and `*.nix` for `enum_dispatch`, `inventory`, `linkme`, `typetag`, `erased-serde`, `ringbuffer`, `libloading` and `dlopen` finds no dependency (the single match is a CLI test string in `crates/robot-cli/src/main.rs` line 205).
+- [x] D.1-a No registry, plugin or dynamic code loading — Evidence: a case-insensitive `grep` of `*.rs`, `*.toml` and `*.nix` outside `target/` for `enum_dispatch`, `linkme`, `typetag`, `erased-serde`, `libloading` and `dlopen` finds nothing, and `inventory` appears in no manifest; `[workspace.dependencies]` in `Cargo.toml` is empty.
 - [x] D.1-b Registries do not mutate during a run or get queried on a control tick — Evidence: no registry exists (see 9.6.4 and C-20).
-- [?] D.1-c Benchmark generics against trait objects before claiming size or speed — not measured; no benchmark artifact exists in `docs/benchmarks/`.
-- [?] D.2-a Ring buffer defines capacity exhaustion, generation IDs and wraparound — `crates/robot-learn/src/rollout.rs` was not read for the overflow contract (see 7.6.1).
+- [ ] D.1-c Benchmark generics against trait objects before claiming size or speed — Evidence: `docs/benchmarks/` is empty and no crate has a `benches/` directory; no size or speed claim about dispatch is made anywhere, so nothing is in breach. Note: becomes due when a hot-path trait object is introduced.
+- [~] D.2-a Ring buffer defines capacity exhaustion, generation IDs and wraparound — Evidence: `crates/robot-learn/src/rollout.rs` `RolloutBuffer` (line 48) is fixed-capacity, reserves up front, refuses a push past capacity with `CapacityExhausted` (line 86) rather than wrapping, and every transition carries a `Generation`; `crates/robot-types/src/transition.rs` line 583 declares the `BoundedRing` policy but no implementation consumes it (`grep BoundedRing` hits only that file). Note: exhaustion and generation are defined; an overwriting ring with wraparound semantics does not exist.
 - [~] D.2-b Sampler traits separate from storage — Evidence: no sampler trait exists (see 9.3.2); the stores and the sampler are not separated because the prioritized sampler is absent.
 - [ ] D.3-a Each adopted mechanism has a B.6 qualification record — Evidence: no mechanism from this list is adopted, so the record is not yet needed; the gap is recorded as C-20 and C-21 for future adoption.

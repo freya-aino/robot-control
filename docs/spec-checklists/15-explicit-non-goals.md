@@ -5,10 +5,10 @@ The first release does not promise universal zero-shot robot control, production
 
 ## Implementation checklist
 
-Status legend: `[x]` implemented, `[~]` partial, `[ ]` not implemented, `[?]` not audited in this pass. Summary: 4 `[x]`, 0 `[~]`, 0 `[ ]`, 1 `[?]` across 5 items.
+Status legend: `[x]` implemented, `[~]` partial, `[ ]` not implemented, `[?]` not audited in this pass. Summary: 5 `[x]`, 0 `[~]`, 0 `[ ]`, 0 `[?]` across 5 items.
 
-- [x] 15.1 No universal zero-shot control claim — Evidence: `docs/ledger/evidence-ledger.md` closing note: no row licenses a claim beyond the listed host and embodiment.
-- [x] 15.2 No language model in the servo loop — Evidence: a case-insensitive grep of `crates/` for `llm`, `language model`, `openai`, `anthropic` and `agent runtime` returned no match in any dependency or source file.
-- [x] 15.3 No robot-hosted agent runtime or agent-selected action — Evidence: the same grep found no agent crate; `crates/robot-persona/` is outside `robot-control` (see 6.4).
-- [x] 15.4 No durable agent-run training campaigns — Evidence: no agent-run configuration or campaign directory was found in `crates/` or `docs/`.
-- [?] 15.5 No reproduction of every named paper — a documentation scope rule, not audited against the ledger in this pass.
+- [x] 15.1 No universal zero-shot control claim — Evidence: `docs/ledger/evidence-ledger.md` closing note (before "## Demotion log"): "None of the rows above is a `validated_on_hardware` claim, and none involves a robot. No row in this table licenses a statement about any other host, embodiment, firmware or acceptance profile".
+- [x] 15.2 No language model in the servo loop — Evidence: `grep -rli -E "llm|language model|openai|anthropic|agent runtime" crates devenv.nix Cargo.toml` matches only `crates/robot-artifacts/src/manifest.rs` (the identifier `SkillManifest`, lines 41, 55, 70); `crates/robot-control/Cargo.toml` depends on path crates only and `ControlLoop` is generic over `Policy` (`crates/robot-nn/src/policy.rs:22`), a forward-only network trait.
+- [x] 15.3 No robot-hosted agent runtime or agent-selected action — Evidence: the same grep finds no agent runtime; `crates/robot-devtools/README.md:7-8` states it is developer/CI-only and nothing under `robot-control` depends on it; `crates/robot-persona/README.md:27` records that persistent identity and opponent memory are not implemented.
+- [x] 15.4 No durable agent-run training campaigns — Evidence: `docs/ledger/automation-log.md` records development-time automation (U1) only; no agent-run training configuration or campaign artifact exists in `crates/` or `docs/`, and `robot train` is a stub (`crates/robot-cli/src/main.rs:26-28`).
+- [x] 15.5 No reproduction of every named paper — Evidence: `docs/ledger/evidence-ledger.md` "Primary methodology references" records RoboStriker as `paper_verified` "Reference decomposition only" (line 26) and SGFT, SPiRL, NPMP, ControlVAE, PhysicsVAE and NCP as `unverified` (lines 31, 36); no row claims a paper reproduction, and the only `reproduced_in_sim`-adjacent rows are this project's own crate tests.
