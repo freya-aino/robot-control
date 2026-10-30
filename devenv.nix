@@ -12,8 +12,10 @@
 #      live under `processes`, never as a deployment dependency (item 5).
 #   4. The excluded runtimes of Section 2 / Section 1.1 (PyTorch, JAX, MuJoCo
 #      MJX, CycloneDDS) do not appear in this environment at all: the
-#      exclusion gate below checks the *Cargo* dependency closure, and this
-#      file simply never introduces a Python or foreign-simulator input.
+#      exclusion gate (robot-devtools `exclusion-gate`, run from enterTest
+#      and as a git hook) fails the build on any excluded runtime in the
+#      *Cargo* closure, and this file simply never introduces a Python or
+#      foreign-simulator input.
 { pkgs, lib, ... }:
 
 {
@@ -39,27 +41,23 @@
   # no branching, parsing or numerics belongs here.
   scripts.robot-fmt-check.exec = "cargo fmt --all -- --check";
   scripts.robot-clippy.exec = "cargo clippy --workspace --all-targets -- -D warnings";
-  scripts.robot-exclusion-gate.exec = ''
-    set -euo pipefail
-    # Section 2.1 item 4: the default build MUST fail if an excluded runtime
-    # appears in its dependency closure. The default closure is empty
-    # (0003-std-only-default-closure.md), so this currently degrades to
-    # confirming Cargo.lock has no entries at all beyond the workspace
-    # members themselves.
-    if [ -f Cargo.lock ]; then
-      extra=$(grep -c '^name = ' Cargo.lock || true)
-      members=$(find crates -maxdepth 1 -mindepth 1 -type d | wc -l)
-      if [ "$extra" -gt "$members" ]; then
-        echo "Cargo.lock has more entries than workspace members; review before trusting the empty-closure claim." >&2
-      fi
-    fi
-    echo "exclusion gate: no excluded runtime is declared as a dependency (default closure is empty)."
-  '';
+  # Section 2.1 item 4 and row A-25. The checks (no excluded runtime in the
+  # lockfile, a path-only default closure, no shipping crate reaching
+  # robot-devtools) are Rust, in crates/robot-devtools/src/exclusion_gate.rs;
+  # this alias only runs that binary, which exits 1 on any violation.
+  scripts.robot-exclusion-gate.exec = "cargo run -q -p robot-devtools --bin exclusion-gate --offline";
 
   # git-hooks: local and CI enforcement share this one definition (item 3).
   git-hooks.hooks = {
     rustfmt.enable = true;
     clippy.enable = true;
+    robot-exclusion-gate = {
+      enable = true;
+      name = "robot exclusion gate (SPECS.md Section 2.1 item 4, row A-25)";
+      entry = "cargo run -q -p robot-devtools --bin exclusion-gate --offline";
+      files = "(Cargo\\.(toml|lock)|devenv\\.(nix|yaml|lock))$";
+      pass_filenames = false;
+    };
   };
 
   # enterTest: what `devenv test` runs. CI executes through this so "passes
@@ -67,6 +65,7 @@
   enterTest = ''
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
+    cargo run -q -p robot-devtools --bin exclusion-gate --offline
     cargo test --workspace
   '';
 

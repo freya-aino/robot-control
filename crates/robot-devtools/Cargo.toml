@@ -11,6 +11,10 @@ description = "Development-time automation, the evidence ledger and the dependen
 robot-types = { path = "../robot-types" }
 robot-artifacts = { path = "../robot-artifacts" }
 
+[[bin]]
+name = "exclusion-gate"
+path = "src/bin/exclusion_gate.rs"
+
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"

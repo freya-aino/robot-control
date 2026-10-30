@@ -9,8 +9,9 @@ to work here.
 
 A Rust humanoid robotics platform: motion processing, simulation, policy
 training, and hardware control (including boxing research). It is a Cargo
-workspace of 22 crates under `crates/`, with one `robot` CLI binary in
-`crates/robot-cli`. Each crate has its own `README.md` that states what is
+workspace of 23 crates under `crates/`, with one `robot` CLI binary in
+`crates/robot-cli` and the developer-only `exclusion-gate` binary in
+`crates/robot-devtools`. Each crate has its own `README.md` that states what is
 implemented, the reasoning behind deviations, and what is deliberately not
 implemented yet. Read the crate README before changing a crate.
 
