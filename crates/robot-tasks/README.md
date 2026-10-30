@@ -1,7 +1,8 @@
 # robot-tasks
 
-Tracking, balance and reference tasks with a versioned reward registry, per
-SPECS.md §9.2 and the reward-term extension point of §9.3. Depends on
+A balance task with a versioned reward registry, per SPECS.md §9.2 and the
+reward-term extension point of §9.3. Tracking, reach, footwork, boxing and
+perturbation tasks (§6) are not implemented; `BalanceTask` is the only task. Depends on
 `robot-types`, `robot-model` (not yet used — reserved for a profile-aware
 task beyond the pendulum fixture) and `robot-sim`.
 

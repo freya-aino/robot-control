@@ -1,7 +1,8 @@
 # motion-retarget
 
-Robot mapping and constrained IK, per SPECS.md §8.3. Depends on
-`robot-types` and `robot-model`.
+Joint-limit-constrained IK, per SPECS.md §8.3. Skeleton-to-robot mapping,
+contact and collision constraints and temporal optimization are not
+implemented. Depends on `robot-types` and `robot-model`.
 
 ## What's here
 

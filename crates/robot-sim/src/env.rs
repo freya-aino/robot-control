@@ -3,7 +3,9 @@
 //!
 //! SPECS.md Section 9.1: "Implement simulator stepping, reset, batched
 //! environments and independently seeded randomization." This trait is the
-//! `robot-sim` half of that; reward terms and termination semantics are
+//! single-instance `robot-sim` half of that — stepping, reset and seeded
+//! randomization; batching is not implemented, and no vectorized
+//! environment exists on the CPU path. Reward terms and termination semantics are
 //! `robot-tasks`' job (SPECS.md Section 6), so `step` here returns the raw
 //! physical observation and a *physical* failure flag only (e.g. the state
 //! leaving a representable region), not a reward.

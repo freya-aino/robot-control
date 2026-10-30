@@ -1,6 +1,7 @@
 # robot-adapt
 
-System identification, history conditioning and bounded residuals, per
+System identification only (history conditioning and bounded residuals
+are not implemented), per
 SPECS.md §11.3. Depends on `robot-types` and `robot-model` (the latter not
 yet used — reserved for mapping identified parameters back onto a specific
 robot profile's actuators).

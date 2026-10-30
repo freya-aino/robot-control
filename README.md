@@ -76,7 +76,7 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`robot-sim-gpu`](crates/robot-sim-gpu) | §9.1, PLAN.md Phase 3 | Feature-gated CubeCL f32 backend (`--features cubecl`, off by default) for a subset of the `robot-sim` functions, with CPU-vs-GPU agreement tests and `tolerances.toml`. Not part of the default build |
 | [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Reward registry and a balance/stabilization task |
 | [`robot-learn`](crates/robot-learn/README.md) | §§7.6, 9.2, 9.5 | Backprop, Adam, GAE, a diagonal Gaussian policy, rollout buffers, PPO |
-| [`robot-skills`](crates/robot-skills/README.md) | §10.6 | The three retrieval tiers (R0 exact index, R1 working set, R2 in-loop router) |
+| [`robot-skills`](crates/robot-skills/README.md) | §10.6 | The R1 working set and the R2 in-loop router over an exact-search index; R0 offline corpus selection is not implemented |
 | [`robot-adapt`](crates/robot-adapt/README.md) | §11.3 | System identification (first, mandatory row of the adaptation-method table) |
 | [`robot-perception`](crates/robot-perception/README.md) | §11.2 | Linear/multiplicative-error-state Kalman filtering, contact classification |
 | [`robot-supervisor`](crates/robot-supervisor/README.md) | §12.1, §12.2 | The last-stage fault policy and safety supervisor, structurally isolated from policy/retrieval/personality |

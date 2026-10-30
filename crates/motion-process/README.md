@@ -1,7 +1,7 @@
 # motion-process
 
-Resampling, filtering, contact estimation and segmentation, per SPECS.md
-§8.2. Depends on `robot-types`.
+Resampling, per SPECS.md §8.2. Filtering, contact estimation and
+segmentation are not implemented (see below). Depends on `robot-types`.
 
 ## What's here
 

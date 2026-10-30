@@ -1,5 +1,8 @@
-//! Simulation interface, authored articulated physics, batching and
-//! randomization, per SPECS.md Section 9.1.
+//! Simulation interface and authored articulated physics, per SPECS.md
+//! Section 9.1. Seeded randomization is the [`env::Environment`]
+//! contract; batched (vectorized) environments are not implemented in
+//! this crate — the GPU-batched path is the separate, feature-gated
+//! `robot-sim-gpu` crate (ADR 0012), and no CPU batch runner exists.
 //!
 //! **See `SIMULATION_SPECS.md` at the root of this crate for the current
 //! target**: GPU-bound, batched execution across thousands of
@@ -27,15 +30,16 @@
 //! `robot_model::joint::JointKind::Free` lets a profile's root attach to
 //! an explicit `world` link with six unconstrained degrees of freedom,
 //! and `robot_model::fixtures::unitree_g1_29dof_floating_base` is a real
-//! floating-base G1 that genuinely falls under gravity (`robot sim
-//! multibody --floating` in `robot-cli` demonstrates it). What is still
-//! missing is **any ground-contact force resolution at all** — nothing
-//! stops that falling body from passing through a floor, because there
-//! is no floor, no collision geometry, and no contact solver yet. A
-//! humanoid can fall here; it cannot stand, balance, or walk, because
-//! nothing yet resists it touching the ground. That is a deliberate,
-//! documented limitation (see [`articulated`]'s own doc comment), not an
-//! oversight — resolving ground contact is the named next increment.
+//! floating-base G1 (`robot sim multibody --floating` in `robot-cli`).
+//! Ground contact exists only as the penalty sphere model of ADR 0010
+//! ([`contact::GroundContact`], applied through
+//! `ArticulatedBody::step_with_ground`): the 8 ankle-roll spheres touch a
+//! `+z` plane, the 28 box, cylinder and mesh shapes do not, and there is
+//! no general collision pipeline or contact solver. A humanoid can hold a
+//! clamped PD stance here within the qualified `dt` range; it cannot
+//! balance or walk, and under zero torque it collapses through its
+//! unmodelled geometry. That is a documented limitation (see
+//! [`articulated`] and [`contact`]), not a balance claim.
 //!
 //! SPECS.md Section 9.1 separately asks to qualify Rapier's multibody and
 //! collision capabilities, or a verified alternative, before authoring

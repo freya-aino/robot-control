@@ -1,6 +1,7 @@
-//! Tracking, balance and reference tasks with a versioned reward registry,
-//! per SPECS.md Section 9.2 and Section 9.3's reward-term registry
-//! extension point.
+//! A balance task with a versioned reward registry, per SPECS.md Section
+//! 9.2 and Section 9.3's reward-term registry extension point. The
+//! tracking, reach, footwork, boxing and perturbation tasks of Section 6
+//! are not implemented; [`balance::BalanceTask`] is the only task.
 //!
 //! [`reward::RewardRegistry`] is a name-keyed, build-time-constructed
 //! registry over plain function pointers — Section 9.3's "no control-path

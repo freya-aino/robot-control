@@ -8,7 +8,9 @@
 //! (advantage estimation) and [`crate::rollout`] (storage) into one agent
 //! that can run against any `robot_sim::env::Environment`. Recurrent policy
 //! support is not implemented in this revision — the policy is feed-forward
-//! — which is stated here rather than silently omitted.
+//! — and neither is action bounding inside the policy: the Gaussian policy
+//! emits unbounded samples and only the environment clamps them. Both are
+//! stated here rather than silently omitted.
 
 use crate::backprop::backward;
 use crate::gae::compute_gae;

@@ -1,5 +1,5 @@
-//! Resampling, filtering, contact estimation and segmentation, per
-//! SPECS.md Section 8.2.
+//! Resampling, per SPECS.md Section 8.2; the rest of that pipeline is
+//! not implemented, as stated below.
 //!
 //! [`resample::resample`] is the only step implemented in this revision.
 //! Filtering (beyond the implicit linear-interpolation smoothing resampling

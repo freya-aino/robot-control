@@ -4,10 +4,10 @@
 //! embodiment compatibility, initiation set, termination condition,
 //! expected duration, contact assumptions, supported disturbances,
 //! inference memory requirement and outgoing transition contracts." Every
-//! field below is one of those. Section 10.1's Markdown prose descriptor, if
-//! one exists, is a separate, non-authoritative catalog entry
-//! (`markdown_descriptor` module-level note) that "MUST NOT relax any
-//! feasibility check" against these typed fields.
+//! field below is one of those. Section 10.1's Markdown prose descriptor is
+//! not implemented in this crate; if one is added it is a separate,
+//! non-authoritative catalog entry that "MUST NOT relax any feasibility
+//! check" against these typed fields.
 
 use robot_types::ids::Name;
 use robot_types::time::Duration;

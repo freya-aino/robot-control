@@ -402,11 +402,11 @@ pub fn not_applicable_checks() -> Vec<NotApplicable> {
     vec![
         NotApplicable {
             name: "cpu_gpu_agreement".to_owned(),
-            reason: "no GPU backend exists; SIMULATION_SPECS.md Section 14.2 agreement is not measurable".to_owned(),
+            reason: "the battery does not run on the feature-gated robot-sim-gpu subset (ADR 0012); specs/12 agreement is not measurable here".to_owned(),
         },
         NotApplicable {
             name: "contact_budget_exhaustion".to_owned(),
-            reason: "no GPU backend exists; SIMULATION_SPECS.md Section 14.4 contact budget is not measurable".to_owned(),
+            reason: "robot-sim-gpu has no contact-slot budget (specs/11); exhaustion is not measurable".to_owned(),
         },
     ]
 }

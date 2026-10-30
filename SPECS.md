@@ -4,7 +4,7 @@ Status: proposed architecture and acceptance contract. Not ratified; no clause b
 
 | Field | Value |
 | --- | --- |
-| Document version | 0.7.3-draft |
+| Document version | 0.7.4-draft |
 | Last revised | 2026-10-27 |
 | Companion documents | `PLAN.md` (phasing, gates, backlog); evidence ledger; decision records; per-robot acceptance and safety profiles; `devenv.nix`, `devenv.yaml` and `devenv.lock` as the executable form of Section 2.2 |
 | Normative scope | Sections 1–15 bind the implementation. Appendix A is definitional, Appendix B is advisory until its gates pass, Appendix C records what is still undecided |
