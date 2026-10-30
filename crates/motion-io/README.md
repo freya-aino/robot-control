@@ -17,15 +17,27 @@ that step, authored per
 in place of Appendix B.2.4's still-`unverified` `bvh_anim`/`bvh_anim_parser`
 candidates.
 
-## Where root translation goes, and why non-root position channels are rejected
+## Where the root pose goes, and why non-root position channels are rejected
 
 A BVH root joint's position channels go into the canonical record's
 per-frame `root: Transform`, not into a `JointValue` — SPECS.md §7.2's
-schema has exactly one root pose per frame. A non-root joint declaring a
+schema has exactly one root pose per frame. The root's rotation channels
+go to `root.rotation` too, and are also kept as channel 0's
+`JointValue::Rotation` so the source channel order and count are
+preserved; the two are the same quantity, and a consumer reads the pose
+from `root`. A non-root joint declaring a
 position channel (legal BVH, essentially never used) has nowhere correct to
 go in that schema, so the importer reports
 `BvhError::Unsupported { construct: "position channel on non-root joint ..." }`
 rather than silently misplacing it into the wrong field.
+
+## Malformed-file limits
+
+SPECS.md §8.1 asks for malformed-file limits. A declared `Frames:` count
+above `MAX_FRAMES` (1,000,000) or a hierarchy above `MAX_CHANNELS` (4096)
+is rejected with `BvhError::Limit` before any allocation sized by the
+declaration. Offsets are not unit-reconciled (BVH does not declare its
+length unit); the caller's provenance record carries the unit.
 
 ## Rotation order is recorded, not assumed
 
@@ -37,7 +49,9 @@ not normalized away during import.
 
 ## Testing
 
-`cargo test -p motion-io` — 6 tests: hierarchy flattening and parent
+`cargo test -p motion-io` — 8 tests: hierarchy flattening and parent
 indices, root translation landing in `frame.root` rather than a joint
-value, rotation-order preservation, and three rejection cases (channel
-count mismatch, a non-root position channel, an unknown channel name).
+value, root rotation landing in `frame.root.rotation` as well as channel 0,
+rotation-order preservation, and four rejection cases (channel count
+mismatch, a non-root position channel, an unknown channel name, a frame
+count past the limit).

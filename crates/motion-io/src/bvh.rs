@@ -96,11 +96,27 @@ pub enum BvhError {
         /// Values found on that frame's line.
         found: usize,
     },
+    /// A declared size exceeds the importer's malformed-file limit
+    /// (SPECS.md Section 8.1: "malformed-file limits"). The limit is checked
+    /// before any allocation sized by the declaration.
+    Limit {
+        /// What was declared, e.g. `"frames"`.
+        what: &'static str,
+        /// The limit.
+        limit: usize,
+        /// The declared value.
+        found: usize,
+    },
     /// A name in the hierarchy failed the project's name rules.
     Name(NameError),
     /// The canonical record rejected the converted data.
     Motion(MotionError),
 }
+
+/// The most frames a BVH file may declare: about 2.3 hours at 120 Hz.
+pub const MAX_FRAMES: usize = 1_000_000;
+/// The most motion channels a BVH hierarchy may declare.
+pub const MAX_CHANNELS: usize = 4096;
 
 impl fmt::Display for BvhError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -120,6 +136,12 @@ impl fmt::Display for BvhError {
                 write!(
                     f,
                     "frame {frame} has {found} values, hierarchy declares {expected} channels"
+                )
+            }
+            Self::Limit { what, limit, found } => {
+                write!(
+                    f,
+                    "declared {found} {what}, more than the importer limit of {limit}"
                 )
             }
             Self::Name(e) => write!(f, "{e}"),
@@ -274,6 +296,20 @@ pub fn parse(
     }
 
     let total_channels: usize = flat.iter().map(|(n, _)| n.channels.len()).sum();
+    if total_channels > MAX_CHANNELS {
+        return Err(BvhError::Limit {
+            what: "channels",
+            limit: MAX_CHANNELS,
+            found: total_channels,
+        });
+    }
+    if frame_count > MAX_FRAMES {
+        return Err(BvhError::Limit {
+            what: "frames",
+            limit: MAX_FRAMES,
+            found: frame_count,
+        });
+    }
     let channels: Vec<Channel> = flat
         .iter()
         .map(|(n, parent)| -> Result<Channel, BvhError> {
@@ -309,8 +345,9 @@ pub fn parse(
 
         let mut cursor = 0usize;
         let mut root_translation = Vec3::ZERO;
+        let mut root_rotation = Quat::IDENTITY;
         let mut joint_values = Vec::with_capacity(flat.len());
-        for (node, _) in &flat {
+        for (node_index, (node, _)) in flat.iter().enumerate() {
             let mut translation = Vec3::ZERO;
             let mut rot_axes = Vec::with_capacity(3);
             let mut rot_values = Vec::with_capacity(3);
@@ -355,6 +392,13 @@ pub fn parse(
             } else {
                 None
             };
+            if node_index == 0 {
+                // The root's rotation is the root pose's rotation (SPECS.md
+                // Section 7.2: one root pose per frame). It is also kept as
+                // channel 0's value below, so the source channel order and
+                // count are preserved; the two are the same quantity.
+                root_rotation = rotation;
+            }
             if !node.channels.iter().any(|c| !c.is_rotation()) {
                 joint_values.push(JointValue::Rotation {
                     rotation,
@@ -378,7 +422,7 @@ pub fn parse(
             root: Transform::new(
                 robot_types::frames::FrameId::WORLD,
                 robot_types::frames::FrameId::WORLD,
-                Quat::IDENTITY,
+                root_rotation,
                 root_translation,
             ),
             validity: vec![Validity::Valid; joint_values.len()],
@@ -616,6 +660,29 @@ Frame Time: 0.033333
         assert!((second.root.translation.x - 1.0).abs() < 1e-9);
         assert!((second.root.translation.y - 2.0).abs() < 1e-9);
         assert!((second.root.translation.z - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn root_rotation_lands_in_the_frame_root_as_well_as_channel_zero() {
+        let record = parse(SIMPLE_BVH, "sha256:abc", license()).unwrap();
+        let second = &record.frames[1];
+        // 90 degrees about Z: +X goes to +Y, through the root pose itself.
+        let v = second.root.rotation.rotate(Vec3::unit_x());
+        assert!((v.y - 1.0).abs() < 1e-6, "{v:?}");
+        let JointValue::Rotation { rotation, .. } = &second.values[0] else {
+            panic!("expected a rotation value");
+        };
+        assert_eq!(*rotation, second.root.rotation);
+        assert_eq!(record.frames[0].root.rotation, Quat::IDENTITY);
+    }
+
+    #[test]
+    fn a_frame_count_past_the_limit_is_rejected_before_allocation() {
+        let huge = SIMPLE_BVH.replace("Frames: 2", "Frames: 99999999999");
+        assert!(matches!(
+            parse(&huge, "sha256:abc", license()),
+            Err(BvhError::Limit { what: "frames", .. })
+        ));
     }
 
     #[test]
