@@ -10,11 +10,11 @@
 //!
 //! This is a policy-tier loop only in this revision: it runs inference,
 //! supervision and transmission every tick. The tactical tier
-//! (`robot_skills::tiers::Router`) is held but not yet consulted on the
-//! control path to select among skills — that integration, and the
-//! per-tier compute-duration/decision-age split SPECS.md Section 5.1 asks
-//! for across *two* learned tiers, is future work this module does not
-//! claim. What is implemented — the policy tier's own timing split
+//! (`robot_skills::tiers::Router`) is not part of this loop: the struct
+//! holds no router and nothing on the tick path consults one — that
+//! integration, and the per-tier compute-duration/decision-age split
+//! SPECS.md Section 5.1 asks for across *two* learned tiers, is future
+//! work this module does not claim. What is implemented — the policy tier's own timing split
 //! (compute duration, sensor-to-command age, deadline margin) — is real and
 //! tested.
 
@@ -53,6 +53,11 @@ pub enum TickError {
         /// The width the loop was built for.
         width: usize,
     },
+    /// The mode is `hw-shadow` but the adapter reports transmit enabled.
+    /// SPECS.md Section 4: shadow "disables transmit and verifies it by
+    /// loopback readback each tick". The command was computed and
+    /// discarded; nothing was sent, and transmit is not re-enabled.
+    TransmitEnabledInShadow,
 }
 
 impl core::fmt::Display for TickError {
@@ -66,6 +71,12 @@ impl core::fmt::Display for TickError {
             }
             Self::ObservationWidth { width } => {
                 write!(f, "observation width differs from the built width {width}")
+            }
+            Self::TransmitEnabledInShadow => {
+                write!(
+                    f,
+                    "hw-shadow requires transmit disabled, but the adapter reports it enabled"
+                )
             }
         }
     }
@@ -232,12 +243,18 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
             policy,
             normalizer,
             supervisor,
-            adapter,
+            mut adapter,
             clock,
             mode,
             budget,
             freshness,
         } = config;
+        if mode == OperatingMode::HwShadow {
+            // SPECS.md Section 4: hw-shadow "disables transmit". Done here,
+            // once, before activation; every tick then verifies it by
+            // readback (`transmit`).
+            adapter.set_transmit_enabled(false);
+        }
         let obs_width = policy.input_width();
         let action_width = policy.output_width();
         let normalizer_width = normalizer.mean().len();
@@ -335,17 +352,35 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
             .check_tick(&supervisor_input, &self.raw_action, &mut self.command)
             .map_err(TickError::Supervisor)?;
 
-        if self.mode.authority() != robot_types::mode::ActuationAuthority::None {
-            // Even an emergency-stop command (all zeros) is transmitted
-            // wherever a device is attached at all: withholding a command
-            // leaves the actuator holding its last command, the uncommanded
-            // motion hazard of SPECS.md Section 12.2. Only `offline-replay`,
-            // which has no device, skips this call.
-            self.adapter
-                .send_command(&self.command, now)
-                .map_err(TickError::Adapter)?;
-        }
+        self.transmit(now)?;
         Ok(response)
+    }
+
+    /// Transmits `command` according to the mode's actuation authority.
+    ///
+    /// Even an emergency-stop command (all zeros) is transmitted wherever a
+    /// device is attached at all: withholding a command leaves the actuator
+    /// holding its last command, the uncommanded motion hazard of SPECS.md
+    /// Section 12.2. `offline-replay`, which has no device, skips the call.
+    /// `hw-shadow` computes and discards: nothing is sent, and the adapter
+    /// must read back transmit-disabled every tick (SPECS.md Section 4), or
+    /// the tick fails with [`TickError::TransmitEnabledInShadow`] without
+    /// ever enabling transmit as a fallback.
+    fn transmit(&mut self, now: Timestamp) -> Result<(), TickError> {
+        use robot_types::mode::ActuationAuthority;
+        match self.mode {
+            OperatingMode::HwShadow => {
+                if self.adapter.transmit_enabled() {
+                    return Err(TickError::TransmitEnabledInShadow);
+                }
+                Ok(())
+            }
+            mode if mode.authority() == ActuationAuthority::None => Ok(()),
+            _ => self
+                .adapter
+                .send_command(&self.command, now)
+                .map_err(TickError::Adapter),
+        }
     }
 
     /// Handles a tick whose observation cannot be used: the supervisor
@@ -371,12 +406,7 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
         self.supervisor
             .reject_observation(&supervisor_input, index, &mut self.command)
             .map_err(TickError::Supervisor)?;
-        if self.mode.authority() != robot_types::mode::ActuationAuthority::None {
-            self.adapter
-                .send_command(&self.command, now)
-                .map_err(TickError::Adapter)?;
-        }
-        Ok(())
+        self.transmit(now)
     }
 
     /// Runs one control tick: poll, infer, supervise, transmit.
@@ -599,6 +629,63 @@ mod tests {
                 comms: Duration::from_millis(100),
             },
         })
+    }
+
+    fn build_loop_in(mode: OperatingMode) -> ControlLoop<LoopbackDevice, SteppedClock, 8> {
+        let profile = two_joint_profile();
+        let supervisor = Supervisor::new(
+            &profile,
+            FaultPolicy::conservative_default(),
+            FreshnessLimits {
+                observation: Duration::from_millis(50),
+                comms: Duration::from_millis(100),
+            },
+            CommandKind::Position,
+        );
+        ControlLoop::new(ControlLoopConfig {
+            policy: identity_policy(),
+            normalizer: Normalizer::new(2, 5.0),
+            supervisor,
+            adapter: LoopbackDevice::new(2, 0),
+            clock: SteppedClock::new(0, ClockId::Simulation),
+            mode,
+            budget: Duration::from_millis(8),
+            freshness: FreshnessLimits {
+                observation: Duration::from_millis(50),
+                comms: Duration::from_millis(100),
+            },
+        })
+    }
+
+    #[test]
+    fn hw_shadow_disables_transmit_and_sends_nothing() {
+        // SPECS.md Section 4: hw-shadow "disables transmit and verifies it
+        // by loopback readback each tick". The loopback device starts with
+        // transmit enabled; construction in hw-shadow must turn it off.
+        let mut loop_ = build_loop_in(OperatingMode::HwShadow);
+        assert!(!loop_.adapter.transmit_enabled());
+        loop_.tick().unwrap();
+        loop_.tick().unwrap();
+        // Nothing reached the device: a poll finds no pending command.
+        let mut sink = [0.0; 2];
+        assert_eq!(loop_.adapter.poll_feedback(&mut sink).unwrap(), None);
+        assert!(!loop_.adapter.transmit_enabled());
+    }
+
+    #[test]
+    fn hw_shadow_with_transmit_enabled_is_a_tick_fault_and_never_re_enables() {
+        let mut loop_ = build_loop_in(OperatingMode::HwShadow);
+        // Something outside the loop re-enabled transmit between ticks.
+        loop_.adapter.set_transmit_enabled(true);
+        assert!(matches!(
+            loop_.tick(),
+            Err(TickError::TransmitEnabledInShadow)
+        ));
+        // The loop reports it and sends nothing; it does not silently flip
+        // the flag either way as a "fallback".
+        let mut sink = [0.0; 2];
+        assert_eq!(loop_.adapter.poll_feedback(&mut sink).unwrap(), None);
+        assert!(loop_.adapter.transmit_enabled());
     }
 
     #[test]

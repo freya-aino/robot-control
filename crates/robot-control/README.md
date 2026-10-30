@@ -29,15 +29,25 @@ hand-wringing about style, but the result is also just a better call site.
 
 ## What this revision does and does not implement
 
-Implemented: the **policy tier** — inference, the full supervisor check
-(finite/limit/mode/contact), and transmission — with real sensor-to-command
-age and deadline-margin accounting, exercised end to end against
-`robot_hardware::loopback::LoopbackDevice`.
+Implemented: the **policy tier** — inference, the supervisor check and
+transmission — with real sensor-to-command age and deadline-margin
+accounting, exercised end to end against
+`robot_hardware::loopback::LoopbackDevice`. The supervisor receives the
+freshness, comms, mode, finiteness and position/velocity/torque-limit
+inputs from the loop; the temperature and contact inputs are passed empty
+(`temperatures: &[]`, `active_contacts: &[]`), so those two checks never
+see data on this path until a sensor source is wired in.
+
+In `hw-shadow` the loop disables the adapter's transmit at construction,
+verifies by readback every tick that it is still disabled, and sends
+nothing; a tick that finds transmit enabled fails with
+`TickError::TransmitEnabledInShadow` and never re-enables or disables the
+flag itself (SPECS.md §4).
 
 Not implemented, and said so in `control_loop`'s own module doc rather than
 left to be discovered: the **tactical tier**. `robot-skills` is a declared
-dependency, but `ControlLoop::tick` does not yet query a
-`robot_skills::tiers::Router` to select among skills, so there is no
+but unused dependency: `ControlLoop` holds no `robot_skills::tiers::Router`
+and `tick` does not query one to select among skills, so there is no
 two-tier `decision_age` to report yet — `TickTiming::decision_age` is
 always `None` in this revision. SPECS.md §5.1's tier-rate and
 per-tier-budget machinery lives in `robot_types::tier` and is exercised
@@ -57,7 +67,7 @@ stale prior command.
 
 ## Testing
 
-`cargo test -p robot-control` — 34 tests: loopback feedback and deterministic
+`cargo test -p robot-control` — 36 tests: hw-shadow transmit readback (disabled at construction, nothing sent, a re-enabled flag is a tick fault), loopback feedback and deterministic
 timing, policy/operation plug-in and composition behavior, buffer reuse,
 construction-time width validation, safe supervisor escalation for
 non-finite observations and policy errors, and adapter-error precedence.
