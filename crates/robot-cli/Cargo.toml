@@ -32,6 +32,7 @@ robot-control = { path = "../robot-control" }
 robot-eval = { path = "../robot-eval" }
 robot-persona = { path = "../robot-persona" }
 robot-viewer = { path = "../robot-viewer" }
+robot-usd = { path = "../robot-usd" }
 
 [lints.rust]
 unsafe_code = "forbid"

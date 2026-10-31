@@ -4,6 +4,7 @@ members = [
     "crates/robot-types",
     "crates/robot-artifacts",
     "crates/robot-model",
+    "crates/robot-usd",
     "crates/motion-io",
     "crates/motion-process",
     "crates/motion-retarget",

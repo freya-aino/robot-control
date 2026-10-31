@@ -2972,6 +2972,7 @@ dependencies = [
  "robot-supervisor",
  "robot-tasks",
  "robot-types",
+ "robot-usd",
  "robot-viewer",
 ]
 
@@ -3027,6 +3028,7 @@ name = "robot-model"
 version = "0.1.0"
 dependencies = [
  "robot-types",
+ "robot-usd",
 ]
 
 [[package]]
@@ -3096,6 +3098,10 @@ dependencies = [
 
 [[package]]
 name = "robot-types"
+version = "0.1.0"
+
+[[package]]
+name = "robot-usd"
 version = "0.1.0"
 
 [[package]]

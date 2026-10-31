@@ -9,6 +9,7 @@ description = "Kinematic tree, inertias, actuator limits and robot profiles (SPE
 
 [dependencies]
 robot-types = { path = "../robot-types" }
+robot-usd = { path = "../robot-usd" }
 
 [lints.rust]
 missing_docs = "warn"
