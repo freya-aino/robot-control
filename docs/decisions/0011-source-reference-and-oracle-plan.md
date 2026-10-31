@@ -38,7 +38,7 @@ repository in any form.
    documented equations, with the derivation written in the test. Each
    tolerance is recorded with its scenario and tier. Every report describes
    the result as a **source-faithful port with oracle checks**. No report
-   claims measured parity with the reference simulator, because no the reference simulator output is in the
+   claims measured parity with the reference simulator, because no reference simulator output is in the
    loop. The oracle plan and the tolerance table are in
    `crates/robot-sim/specs/04-fidelity-loop.md`.
 

@@ -34,7 +34,7 @@ A `robot-sim` physics backend claiming parity with the reference simulator MUST,
 
 ### 1.2 GPU-bound, batched execution
 
-The primary execution mode MUST be thousands of environments stepped in parallel on a GPU, following the precedent of batched backend and Brax (Appendix A entries 12, 13, 17) rather than this project's existing CPU-only, single-instance `robot_sim::articulated::ArticulatedBody`. Section 11 specifies the batching architecture. A CPU reference backend remains REQUIRED regardless (Section 11.4) — not as the primary execution mode, but as the correctness oracle the GPU backend is checked against, exactly as JAX-based batched backend's own test suite is checked against CPU the reference simulator [batched backend §12].
+The primary execution mode MUST be thousands of environments stepped in parallel on a GPU, following the precedent of batched backend and Brax (Appendix A entries 12, 13, 17) rather than this project's existing CPU-only, single-instance `robot_sim::articulated::ArticulatedBody`. Section 11 specifies the batching architecture. A CPU reference backend remains REQUIRED regardless (Section 11.4) — not as the primary execution mode, but as the correctness oracle the GPU backend is checked against, exactly as JAX-based batched backend's own test suite is checked against CPU reference simulator [batched backend §12].
 
 ### 1.3 Variable fidelity
 
@@ -42,7 +42,7 @@ The engine MUST expose fidelity as a tunable, queryable property of a simulation
 
 ### 1.4 Rust-native-first
 
-No foreign runtime, no FFI to C/C++/CUDA-as-a-foreign-language, and no the reference simulator binding, continuing `SPECS.md` Section 2's standing exclusion rather than creating an exception to it. "As close to Rust-native as possible" is read as: author GPU kernels in Rust (via CubeCL) where feasible, fall back to hand-written WGSL compute shaders via `wgpu` (still Rust-hosted, still no foreign toolchain beyond the GPU driver) where CubeCL cannot express the needed control flow, and treat any C/CUDA-authored kernel as a foreign-dependency exception requiring the Section 2.1 procedure, not a default path. Section 11.3 details the specific candidates and their risks.
+No foreign runtime, no FFI to C/C++/CUDA-as-a-foreign-language, and no reference simulator binding, continuing `SPECS.md` Section 2's standing exclusion rather than creating an exception to it. "As close to Rust-native as possible" is read as: author GPU kernels in Rust (via CubeCL) where feasible, fall back to hand-written WGSL compute shaders via `wgpu` (still Rust-hosted, still no foreign toolchain beyond the GPU driver) where CubeCL cannot express the needed control flow, and treat any C/CUDA-authored kernel as a foreign-dependency exception requiring the Section 2.1 procedure, not a default path. Section 11.3 details the specific candidates and their risks.
 
 ### 1.5 Backend-agnostic / plug-and-play
 

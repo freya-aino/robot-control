@@ -12,7 +12,7 @@
 
 **Reference formulation**: reference formulation at commit `800a109a4bdd02cb60404d565db4ae16fb04a53b` (Appendix A). the reference simulator is a source reference only. This spec defines no algorithm and pins no engine function. Function pins are inherited from [spec 02](02-pure-dynamics-core.md), [spec 03](03-integrators.md), [spec 05](05-passive-forces-and-actuators.md), [spec 06](06-equality-constraints-and-solver.md) and [spec 07](07-collision-pipeline.md). Evidence per `SPECS.md` section 3: `code_inspected` for the existence and location of those functions at the pin (Appendix A); specs 03 and 05 record `code_inspected` bodies for their ported functions. This spec itself inspected no function bodies; bodies not read remain `unverified` in specs 02, 06 and 07.
 
-**Purity contract**: The oracle module (`crates/robot-sim/src/oracle.rs`, plan Step 4) uses `std` only, with plain `f64` slices. It contains no `Matrix`, `RigidPose` or `HashMap`, and no the reference simulator runtime, binding, trace reader or fixture.
+**Purity contract**: The oracle module (`crates/robot-sim/src/oracle.rs`, plan Step 4) uses `std` only, with plain `f64` slices. It contains no `Matrix`, `RigidPose` or `HashMap`, and no reference simulator runtime, binding, trace reader or fixture.
 
 **Inputs/outputs**: Input: the candidate series produced by the CPU port (and, after plan Step 7, the GPU backend), plus the closed-form or conservation reference computed inside the oracle. Output: an `OracleReport` for the pendulum trajectory (max error, index, pass), written as a v6 `fidelity.toml` check row with `measured`, `sample`, `tolerance_abs` and `tolerance_rel`. Other checks retain scalar `tolerance` fields.
 
@@ -100,12 +100,12 @@ Step 4 runs the pendulum trajectory oracle at both declared tiers. Its v6 check 
 
 ## 3. Derivation rules for hand-derived values
 
-1. A hand-derived reference value MUST come from a closed form, or from a the reference simulator equation whose function, file and commit (`800a109a`) are named.
+1. A hand-derived reference value MUST come from a closed form, or from a reference simulator equation whose function, file and commit (`800a109a`) are named.
 2. The derivation MUST be written as comments in the test, one step per line, and the final number MUST be reproduced to at least the tolerance precision.
 3. Each value MUST be cross-checked by a second derivation in the same test (for example, the closed form and a numerical integral of the same equation). If they disagree, the test fails and the derivation is corrected. The test is never relaxed.
 4. A hand-derived value MUST NOT be taken from a simulator run of this code. A value produced by the port under test is never its own reference.
-5. Evidence state of a hand-derived value (`SPECS.md` section 3): it is `unverified` with respect to the reference simulator behaviour, because no the reference simulator output is compared. Before the second derivation in rule 3 agrees, the value MUST NOT be used as a test reference. After agreement it MAY be used as a test reference, which is a test-internal check of the port. That use licenses no implementation claim about the reference simulator, and agreement of two derivations does not promote any the reference simulator claim.
-6. Evidence state of a pinned the reference simulator function: `code_inspected` only for what was read at the pin (existence, location, and what the function does). Per `SPECS.md` section 3, `code_inspected` does not license statements about numerical correctness. Functions whose bodies have not been read stay `unverified`, as in Appendix A.
+5. Evidence state of a hand-derived value (`SPECS.md` section 3): it is `unverified` with respect to the reference simulator behaviour, because no reference simulator output is compared. Before the second derivation in rule 3 agrees, the value MUST NOT be used as a test reference. After agreement it MAY be used as a test reference, which is a test-internal check of the port. That use licenses no implementation claim about the reference simulator, and agreement of two derivations does not promote any the reference simulator claim.
+6. Evidence state of a pinned reference-simulator function: `code_inspected` only for what was read at the pin (existence, location, and what the function does). Per `SPECS.md` section 3, `code_inspected` does not license statements about numerical correctness. Functions whose bodies have not been read stay `unverified`, as in Appendix A.
 
 ## 4. Evidence and reporting
 

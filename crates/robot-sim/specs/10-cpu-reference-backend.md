@@ -8,7 +8,7 @@
 
 **Depends on**: [02](02-pure-dynamics-core.md) (dynamics core), [03](03-integrators.md) (integrators).
 
-**Reference formulation**: Not applicable to the trait design. The oracle role is modeled on JAX-based batched backend's test suite against CPU the reference simulator (Appendix A, entry 12) and on Brax's `Env`/`PipelineEnv` split (Appendix A, entry 17). The CPU dynamics it calls are baselined in steps 02 and 03.
+**Reference formulation**: Not applicable to the trait design. The oracle role is modeled on JAX-based batched backend's test suite against CPU reference simulator (Appendix A, entry 12) and on Brax's `Env`/`PipelineEnv` split (Appendix A, entry 17). The CPU dynamics it calls are baselined in steps 02 and 03.
 
 **Purity contract**: The backend's numerical code is pure math (FR-6). The `Environment` and backend trait are the boundary and may use crate types, provided no algorithm function does.
 
@@ -22,7 +22,7 @@
 
 ### 11.4 CPU reference backend (required, not optional)
 
-1. A single-instance, full-control-flow CPU implementation MUST exist independent of whatever GPU-batched backend is built, and MUST remain the correctness oracle the GPU backend is checked against — mirroring exactly how JAX-based batched backend's own test suite is checked against CPU the reference simulator [batched backend §12], and continuing the pattern this session already established (`robot_sim::articulated::ArticulatedBody`, validated by closed-form/round-trip/energy tests with no GPU involved at all).
+1. A single-instance, full-control-flow CPU implementation MUST exist independent of whatever GPU-batched backend is built, and MUST remain the correctness oracle the GPU backend is checked against — mirroring exactly how JAX-based batched backend's own test suite is checked against CPU reference simulator [batched backend §12], and continuing the pattern this session already established (`robot_sim::articulated::ArticulatedBody`, validated by closed-form/round-trip/energy tests with no GPU involved at all).
 2. The CPU reference backend MUST NOT be retired once a GPU backend exists. It is the fixture every fidelity-tier definition (Section 12) and every cross-backend agreement test (Section 14) is measured against.
 
 ## 13. Backend-agnostic architecture
@@ -37,7 +37,7 @@ Following Brax's own two-layer design exactly — `Env` (stable) wraps a `Pipeli
 
 ### 13.3 What MAY legitimately differ by backend, named explicitly rather than hidden
 
-Brax's own `Env` trait exposes `backend: str` as a stable, queryable property — an explicit, honest acknowledgment that backend identity is sometimes observable even though the call signature never changes [Brax §17]. batched backend's own documented leaks (an exception raised at load time if a model uses an batched backend-unsupported feature; `naconmax`, an batched backend-only sizing concept with no CPU-the reference simulator equivalent a caller must learn to size correctly; differentiability present in JAX-based batched backend, absent in batched backend-Warp and CPU the reference simulator alike) are named directly in its own documentation, not discovered by accident [batched backend §17]. `robot-sim` MUST adopt the same honesty rather than claim a leak-free abstraction that the strongest found precedent (batched backend itself, built by the reference's own team) does not actually achieve:
+Brax's own `Env` trait exposes `backend: str` as a stable, queryable property — an explicit, honest acknowledgment that backend identity is sometimes observable even though the call signature never changes [Brax §17]. batched backend's own documented leaks (an exception raised at load time if a model uses an batched backend-unsupported feature; `naconmax`, an batched backend-only sizing concept with no CPU-the reference simulator equivalent a caller must learn to size correctly; differentiability present in JAX-based batched backend, absent in batched backend-Warp and CPU reference simulator alike) are named directly in its own documentation, not discovered by accident [batched backend §17]. `robot-sim` MUST adopt the same honesty rather than claim a leak-free abstraction that the strongest found precedent (batched backend itself, built by the reference's own team) does not actually achieve:
 
 1. A backend identifier MUST be queryable from any `Environment` implementation.
 2. Any backend-specific sizing parameter (the GPU backend's contact-slot budget, 11.2) MUST be named and documented as such, not folded silently into a profile or a generic config struct that reads as backend-independent.
