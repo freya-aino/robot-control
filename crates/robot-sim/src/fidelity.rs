@@ -2339,20 +2339,20 @@ mod tests {
     }
 
     #[test]
-    fn g1_probe_fail_row_round_trips_strictly_without_changing_the_gate() {
-        // The probe re-runs the G1 zero-torque fall at dt = 5e-4 and must record
-        // the measured failure: status fail, step inside the recorded window, and
-        // error SingularJointInertia. The row round-trips through the strict reader,
-        // and all_pass() stays a function of the analytic checks only.
+    fn g1_probe_row_round_trips_strictly_without_changing_the_gate() {
+        // The probe re-runs the G1 zero-torque fall at dt = 5e-4 for at most 4000
+        // steps. With hard joint limits (ADR 0015) the run completes without a
+        // numerical error, so the recorded row is pass with no step. This is a
+        // statement about the integration only; the reason string states that the
+        // trunk still meets unmodelled shapes. The row round-trips through the
+        // strict reader, and all_pass() stays a function of the analytic checks only.
         let report = declared();
         let probe = g1_zero_torque_probe().expect("the G1 fixture must load");
-        assert_eq!(probe.status, ProbeStatus::Fail);
-        assert_eq!(probe.error.as_deref(), Some("SingularJointInertia"));
-        let step = probe.step.unwrap();
-        assert!((2_100..=2_400).contains(&step), "step={step}");
+        assert_eq!(probe.status, ProbeStatus::Pass);
+        assert_eq!(probe.error, None);
+        assert_eq!(probe.step, None);
         let text = report.to_toml();
-        assert!(text.contains("status = \"fail\""));
-        assert!(text.contains("error = \"SingularJointInertia\""));
+        assert!(text.contains("status = \"pass\""));
         let parsed = FidelityReport::from_toml(&text).unwrap();
         assert_eq!(parsed.probe, report.probe);
         assert!(parsed.all_pass());
@@ -2361,7 +2361,8 @@ mod tests {
     #[test]
     fn tampered_probe_row_is_refused_by_the_strict_reader() {
         let text = declared().to_toml();
-        let forged = text.replace("status = \"fail\"", "status = \"pass\"");
+        // A row that claims fail without a step or an error is inconsistent.
+        let forged = text.replace("status = \"pass\"", "status = \"fail\"");
         assert!(matches!(
             FidelityReport::from_toml(&forged),
             Err(ReportError::Invalid(_))
@@ -2375,8 +2376,14 @@ mod tests {
             "scenario = \"g1-zero-torque-dt-5e-4\"",
             "scenario = \"other\"",
         );
-        let unknown_error = text.replace("error = \"SingularJointInertia\"", "error = \"Bogus\"");
-        let step_outside = text.replace("step = 2236", "step = 4000");
+        let fail_row = |step: &str, error: &str| {
+            text.replace(
+                "status = \"pass\"",
+                &format!("status = \"fail\"\nstep = {step}\nerror = \"{error}\""),
+            )
+        };
+        let unknown_error = fail_row("2236", "Bogus");
+        let step_outside = fail_row("4000", "SingularJointInertia");
         for forged in [wrong_scenario, unknown_error, step_outside] {
             assert!(matches!(
                 FidelityReport::from_toml(&forged),

@@ -1,4 +1,4 @@
-//! Passive joint forces and affine actuator gain/bias, ported from MuJoCo 3.17.0
+//! Passive joint forces and affine actuator gain/bias, ported from the reference simulator 3.17.0
 //! (commit `800a109a`).
 //!
 //! Pure algorithm module: `std` and plain `f64` only (FR-6). Scope is the
@@ -9,10 +9,10 @@
 
 /// Joint spring force for a hinge or slide joint with a linear stiffness.
 ///
-/// Source: MuJoCo 3.17.0 `src/engine/engine_passive.c`, `mj_springdamper`
+/// Formulation: `src/engine/engine_passive.c`, `springdamper`
 /// (a `static` function), hinge/slide branch: `x = qpos - qpos_spring`,
-/// `qfrc_spring = -x * mju_polyForce(stiffness, spoly, x, mjNPOLY, 0)`. With
-/// the polynomial coefficients zero, `mju_polyForce` returns `stiffness`, so
+/// `qfrc_spring = -x * polyForce(stiffness, spoly, x, NPOLY, 0)`. With
+/// the polynomial coefficients zero, `polyForce` returns `stiffness`, so
 /// the force is `-stiffness * (q - q_ref)`.
 pub fn joint_spring_force(q: f64, q_ref: f64, stiffness: f64) -> f64 {
     -(q - q_ref) * stiffness
@@ -20,10 +20,10 @@ pub fn joint_spring_force(q: f64, q_ref: f64, stiffness: f64) -> f64 {
 
 /// Joint damper force for a dof with a linear damping coefficient.
 ///
-/// Source: MuJoCo 3.17.0 `src/engine/engine_passive.c`, `mj_springdamper`,
-/// dof-level damper: `qfrc_damper = -v * mju_polyForce(damping, poly, v, mjNPOLY, 1)`.
-/// With the polynomial coefficients zero and `flg_odd = 1`, `mju_polyForce`
-/// returns `damping`, so the force is `-damping * v` (`mju_polyForce` in
+/// Formulation: `src/engine/engine_passive.c`, `springdamper`,
+/// dof-level damper: `qfrc_damper = -v * polyForce(damping, poly, v, NPOLY, 1)`.
+/// With the polynomial coefficients zero and `flg_odd = 1`, `polyForce`
+/// returns `damping`, so the force is `-damping * v` (`polyForce` in
 /// `src/engine/engine_util_misc.c`).
 pub fn joint_damper_force(qd: f64, damping: f64) -> f64 {
     -qd * damping
@@ -32,7 +32,7 @@ pub fn joint_damper_force(qd: f64, damping: f64) -> f64 {
 /// Affine actuator force `gain * input + bias`, with `gain` and `bias` both
 /// affine in length and velocity.
 ///
-/// Source: MuJoCo 3.17.0 `src/engine/engine_forward.c`, `mj_fwdActuation`:
+/// Formulation: `src/engine/engine_forward.c`, `fwdActuation`:
 /// `GAIN_AFFINE` gives `gain = prm[0] + prm[1]*length + prm[2]*velocity`,
 /// `BIAS_AFFINE` gives `bias = biasprm[0] + biasprm[1]*length +
 /// biasprm[2]*velocity`, and the output is `force = gain * ctrl + bias`
@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn position_servo_is_kp_times_error_minus_kv_times_velocity() {
-        // Hand derivation: MuJoCo position servo with kp = 10, kv = 2,
+        // Hand derivation: the reference simulator position servo with kp = 10, kv = 2,
         // gainprm = [10, 0, 0], biasprm = [0, -10, -2], ctrl (setpoint) = 0.5,
         // length = 0.2, velocity = 1.0.
         // force = 10*0.5 + (0 - 10*0.2 - 2*1.0) = 5 - 2 - 2 = 1.0.

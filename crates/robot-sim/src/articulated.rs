@@ -158,6 +158,12 @@ struct Body {
     position_width: usize,
     /// Row-major 6x6 spatial inertia about the link origin.
     inertia: [f64; 36],
+    /// Hard position limits `(lower, upper)` in the joint's own unit, for a
+    /// bounded hinge or slide; `None` for an unbounded or non-single-axis joint.
+    limit: Option<(f64, f64)>,
+    /// Index of this joint among the profile's actuated joints, the order of
+    /// the `qd`, `qdd` and `tau` vectors' single-DOF entries.
+    actuated: usize,
 }
 
 /// A profile's joint tree, preprocessed into the articulated structure
@@ -166,6 +172,7 @@ pub struct ArticulatedBody {
     bodies: Vec<Body>,
     n_dof: usize,
     n_position: usize,
+    n_actuated: usize,
     contact_spheres: Vec<ContactSphere>,
     unmodelled_collision_shapes: usize,
 }
@@ -411,6 +418,16 @@ impl ArticulatedBody {
                 .find(|(id, _)| *id == joint.id)
                 .map_or((0, 0), |(_, slot)| *slot);
 
+            let actuated = profile
+                .actuated_joints()
+                .position(|a| a.id == joint.id)
+                .unwrap_or(0);
+            let limit = match (joint.kind, joint.limits.position) {
+                (JointKind::Revolute | JointKind::Prismatic, Some(range)) => {
+                    Some((range.lo.value(), range.hi.value()))
+                }
+                _ => None,
+            };
             let q = joint.origin.rotation;
             let t = joint.origin.translation;
             let props = &link.mass;
@@ -433,6 +450,8 @@ impl ArticulatedBody {
                         i.ixx, i.ixy, i.ixz, i.ixy, i.iyy, i.iyz, i.ixz, i.iyz, i.izz,
                     ],
                 ),
+                limit,
+                actuated,
             });
             for shape in &link.collision {
                 match shape.geometry {
@@ -454,6 +473,7 @@ impl ArticulatedBody {
             bodies,
             n_dof: next_dof,
             n_position: next_position,
+            n_actuated: dof_slots.len(),
             contact_spheres,
             unmodelled_collision_shapes,
         }
@@ -729,6 +749,123 @@ impl ArticulatedBody {
         self.articulated_accelerations(q, qd, tau, gravity, Some(ground))
     }
 
+    /// Position of each bounded joint within its range, as a fraction in
+    /// `[0, 1]` (0 at the lower limit, 1 at the upper). Indexed by the
+    /// profile's actuated-joint order; `None` for joints without a limit.
+    pub fn limit_fractions(&self, q: &[f64]) -> Result<Vec<Option<f64>>, DynamicsError> {
+        self.check_width("q", q, self.n_position)?;
+        let mut out = vec![None; self.n_actuated];
+        for b in &self.bodies {
+            if let Some((lo, hi)) = b.limit {
+                let x = q[b.position_offset];
+                out[b.actuated] = Some(if hi > lo { (x - lo) / (hi - lo) } else { 0.5 });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Applies hard joint limits to the unconstrained accelerations `qdd`.
+    ///
+    /// A bounded joint that is at a limit and accelerating into it is locked by
+    /// a constraint torque chosen so that its acceleration becomes zero. The
+    /// constraint torques of all locked joints solve one small linear system,
+    /// `M⁻¹_SS c = -qdd_S`, with the columns `M⁻¹ e_j` taken from forward
+    /// dynamics at zero velocity and no gravity. A limit can only push: a
+    /// lower-limit torque must be non-negative and an upper-limit torque
+    /// non-positive. A joint whose torque has the wrong sign is released for
+    /// this step.
+    ///
+    /// Returns the constraint torque of every DOF, zero where no limit acted.
+    fn apply_hard_limits(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+        qdd: &mut [f64],
+    ) -> Result<Vec<f64>, DynamicsError> {
+        let _ = qd;
+        let n = self.n_dof;
+        let mut constraint = vec![0.0; n];
+        let candidates: Vec<(usize, usize, f64, f64)> = self
+            .bodies
+            .iter()
+            .filter_map(|b| {
+                b.limit
+                    .map(|(lo, hi)| (b.dof_offset, b.position_offset, lo, hi))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(constraint);
+        }
+        let zeros = vec![0.0; n];
+        let mut columns: Vec<Option<Vec<f64>>> = vec![None; n];
+        let mut blocked: Vec<usize> = Vec::new();
+        let tol = 1e-12;
+        for _pass in 0..=candidates.len() {
+            // Joints that must be locked now: at a limit, accelerating outward.
+            let mut active: Vec<(usize, f64)> = Vec::new();
+            for &(dof, pos, lo, hi) in &candidates {
+                if blocked.contains(&dof) {
+                    continue;
+                }
+                let x = q[pos];
+                if x <= lo + tol && qdd[dof] < 0.0 {
+                    active.push((dof, -1.0));
+                } else if x >= hi - tol && qdd[dof] > 0.0 {
+                    active.push((dof, 1.0));
+                }
+            }
+            if active.is_empty() {
+                break;
+            }
+            for &(dof, _) in &active {
+                if columns[dof].is_none() {
+                    let mut e = vec![0.0; n];
+                    e[dof] = 1.0;
+                    columns[dof] = Some(self.articulated_accelerations(
+                        q,
+                        &zeros,
+                        &e,
+                        Vec3::new(0.0, 0.0, 0.0),
+                        None,
+                    )?);
+                }
+            }
+            let k = active.len();
+            let mut a = vec![vec![0.0; k]; k];
+            let mut rhs = vec![0.0; k];
+            for (i, &(di, _)) in active.iter().enumerate() {
+                rhs[i] = -qdd[di];
+                for (j, &(dj, _)) in active.iter().enumerate() {
+                    a[i][j] = columns[dj].as_ref().map_or(0.0, |col| col[di]);
+                }
+            }
+            let Some(c) = solve_small_dense(a, rhs) else {
+                break;
+            };
+            let mut released = false;
+            for (i, &(dof, side)) in active.iter().enumerate() {
+                let wrong_sign = (side < 0.0 && c[i] < 0.0) || (side > 0.0 && c[i] > 0.0);
+                if wrong_sign {
+                    blocked.push(dof);
+                    released = true;
+                }
+            }
+            if released {
+                continue;
+            }
+            for (i, &(dof, _)) in active.iter().enumerate() {
+                constraint[dof] = c[i];
+                if let Some(col) = &columns[dof] {
+                    for (acc, v) in qdd.iter_mut().zip(col) {
+                        *acc += c[i] * v;
+                    }
+                }
+            }
+            break;
+        }
+        Ok(constraint)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn articulated_accelerations(
         &self,
@@ -990,7 +1127,7 @@ impl MultibodyState {
         gravity: Vec3,
         dt: robot_types::time::Duration,
     ) -> Result<(), DynamicsError> {
-        self.step_inner(body, tau, gravity, None, dt)
+        self.step_inner(body, tau, gravity, None, dt).map(|_| ())
     }
 
     /// As [`MultibodyState::step`], but with penalty ground contact on every
@@ -1005,6 +1142,21 @@ impl MultibodyState {
         dt: robot_types::time::Duration,
     ) -> Result<(), DynamicsError> {
         self.step_inner(body, tau, gravity, Some(ground), dt)
+            .map(|_| ())
+    }
+
+    /// As [`MultibodyState::step_with_ground`], and returns the constraint torque
+    /// of every DOF that the hard joint limits applied this step (zero where no
+    /// limit acted).
+    pub fn step_with_ground_recording(
+        &mut self,
+        body: &ArticulatedBody,
+        tau: &[f64],
+        gravity: Vec3,
+        ground: &GroundContact,
+        dt: robot_types::time::Duration,
+    ) -> Result<Vec<f64>, DynamicsError> {
+        self.step_inner(body, tau, gravity, Some(ground), dt)
     }
 
     fn step_inner(
@@ -1014,11 +1166,12 @@ impl MultibodyState {
         gravity: Vec3,
         ground: Option<&GroundContact>,
         dt: robot_types::time::Duration,
-    ) -> Result<(), DynamicsError> {
-        let qdd = match ground {
+    ) -> Result<Vec<f64>, DynamicsError> {
+        let mut qdd = match ground {
             Some(g) => body.forward_dynamics_with_ground(&self.q, &self.qd, tau, gravity, g)?,
             None => body.forward_dynamics(&self.q, &self.qd, tau, gravity)?,
         };
+        let constraint = body.apply_hard_limits(&self.q, &self.qd, &mut qdd)?;
         let dt_s = dt.as_secs_f64();
         for (v, a) in self.qd.iter_mut().zip(&qdd) {
             *v += a * dt_s;
@@ -1032,9 +1185,26 @@ impl MultibodyState {
                 );
             } else if b.dof_width > 0 {
                 self.q[b.position_offset] += self.qd[b.dof_offset] * dt_s;
+                // Hard limits: no overshoot. A joint that reaches a limit is held
+                // there, and its outward velocity is removed.
+                if let Some((lo, hi)) = b.limit {
+                    let x = &mut self.q[b.position_offset];
+                    let v = &mut self.qd[b.dof_offset];
+                    if *x < lo {
+                        *x = lo;
+                        if *v < 0.0 {
+                            *v = 0.0;
+                        }
+                    } else if *x > hi {
+                        *x = hi;
+                        if *v > 0.0 {
+                            *v = 0.0;
+                        }
+                    }
+                }
             }
         }
-        Ok(())
+        Ok(constraint)
     }
 
     /// Integrates a `Free` joint's own seven-number position slice
@@ -1089,6 +1259,37 @@ impl MultibodyState {
         position[5] = ny;
         position[6] = nz;
     }
+}
+
+/// Solves `a x = b` by Gaussian elimination with partial pivoting. Returns
+/// `None` if a pivot is numerically zero.
+fn solve_small_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for col in 0..n {
+        let pivot = (col..n).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
+        if a[pivot][col].abs() < 1e-14 {
+            return None;
+        }
+        a.swap(col, pivot);
+        b.swap(col, pivot);
+        for row in col + 1..n {
+            let f = a[row][col] / a[col][col];
+            let pivot_row = a[col].clone();
+            for (cell, p) in a[row][col..].iter_mut().zip(&pivot_row[col..]) {
+                *cell -= f * p;
+            }
+            b[row] -= f * b[col];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for row in (0..n).rev() {
+        let mut sum = b[row];
+        for k in row + 1..n {
+            sum -= a[row][k] * x[k];
+        }
+        x[row] = sum / a[row][row];
+    }
+    Some(x)
 }
 
 #[cfg(test)]
@@ -1457,6 +1658,136 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_hard_limit_holds_a_swinging_pendulum_inside_its_range() {
+        // Released from rest under gravity with a limit at ±0.3 rad, the joint
+        // must stay inside the range, reach the limit, and carry a constraint
+        // torque there. Without the limit the same pendulum swings past it.
+        let mut limited = point_mass_pendulum(1.0, 1.0);
+        limited.joints[0].limits = robot_model::joint::JointLimits::bounded(
+            robot_types::units::Range {
+                lo: robot_types::units::Radians(-0.3),
+                hi: robot_types::units::Radians(0.3),
+            },
+            robot_types::units::RadiansPerSecond(100.0),
+            robot_types::units::NewtonMetres(1.0e6),
+        );
+        let body = ArticulatedBody::from_profile(&limited);
+        let mut state = MultibodyState {
+            q: vec![0.0],
+            qd: vec![0.0],
+        };
+        let gravity = Vec3::new(0.0, 0.0, -9.81);
+        let dt = Duration::from_secs_f64(1e-3);
+        let tau = vec![0.0];
+        let ground = GroundContact {
+            stiffness: 1.0,
+            normal_damping: 0.0,
+            friction: 0.0,
+            friction_regularization: 1.0,
+            ground_height: -100.0,
+        };
+        let mut max_q: f64 = 0.0;
+        let mut max_constraint: f64 = 0.0;
+        for _ in 0..3000 {
+            let c = state
+                .step_with_ground_recording(&body, &tau, gravity, &ground, dt)
+                .unwrap();
+            max_q = max_q.max(state.q[0].abs());
+            max_constraint = max_constraint.max(c[0].abs());
+            assert!(
+                state.q[0] >= -0.3 - 1e-12 && state.q[0] <= 0.3 + 1e-12,
+                "{}",
+                state.q[0]
+            );
+        }
+        assert!(
+            (max_q - 0.3).abs() < 1e-9,
+            "the pendulum should reach the limit, reached {max_q}"
+        );
+        assert!(max_constraint > 0.0, "a limit must have acted");
+
+        let mut free = point_mass_pendulum(1.0, 1.0);
+        free.joints[0].limits = robot_model::joint::JointLimits::unbounded(
+            robot_types::units::RadiansPerSecond(100.0),
+            robot_types::units::NewtonMetres(0.0),
+        );
+        let free_body = ArticulatedBody::from_profile(&free);
+        let mut unlimited = MultibodyState {
+            q: vec![0.0],
+            qd: vec![0.0],
+        };
+        let mut max_free: f64 = 0.0;
+        for _ in 0..3000 {
+            unlimited
+                .step_with_ground_recording(&free_body, &tau, gravity, &ground, dt)
+                .unwrap();
+            max_free = max_free.max(unlimited.q[0].abs());
+        }
+        assert!(
+            max_free > 1.0,
+            "without a limit the pendulum swings past 0.3 rad, reached {max_free}"
+        );
+    }
+
+    #[test]
+    fn a_hard_limit_does_not_inject_energy_into_a_pendulum() {
+        // Without ground contact, total energy (kinetic plus potential) of a
+        // pendulum that hits a limit must not rise above its starting value.
+        let mut profile = point_mass_pendulum(1.0, 1.0);
+        profile.joints[0].limits = robot_model::joint::JointLimits::bounded(
+            robot_types::units::Range {
+                lo: robot_types::units::Radians(-0.3),
+                hi: robot_types::units::Radians(0.3),
+            },
+            robot_types::units::RadiansPerSecond(100.0),
+            robot_types::units::NewtonMetres(1.0e6),
+        );
+        let body = ArticulatedBody::from_profile(&profile);
+        let gravity = Vec3::new(0.0, 0.0, -9.81);
+        let energy = |state: &MultibodyState| {
+            // Bob at local +X, length 1, pivot at the origin: height = -cos(q) * ...
+            // The bob's world height is x sin? For axis +Y, a rotation by q moves
+            // +X to (cos q, 0, -sin q), so the bob's height is -sin(q).
+            let h = -state.q[0].sin();
+            body.kinetic_energy(&state.q, &state.qd).unwrap() + 9.81 * h
+        };
+        let mut state = MultibodyState {
+            q: vec![0.25],
+            qd: vec![0.0],
+        };
+        let e0 = energy(&state);
+        let tau = vec![0.0];
+        let dt = Duration::from_secs_f64(1e-4);
+        let mut worst = f64::NEG_INFINITY;
+        for _ in 0..20000 {
+            state.step(&body, &tau, gravity, dt).unwrap();
+            worst = worst.max(energy(&state) - e0);
+        }
+        assert!(
+            worst < 1e-3 * e0.abs().max(1.0),
+            "energy rose by {worst} above {e0}"
+        );
+    }
+
+    #[test]
+    fn limit_fraction_is_zero_at_the_lower_limit_and_one_at_the_upper() {
+        let mut profile = point_mass_pendulum(1.0, 1.0);
+        profile.joints[0].limits = robot_model::joint::JointLimits::bounded(
+            robot_types::units::Range {
+                lo: robot_types::units::Radians(-0.3),
+                hi: robot_types::units::Radians(0.3),
+            },
+            robot_types::units::RadiansPerSecond(100.0),
+            robot_types::units::NewtonMetres(1.0),
+        );
+        let body = ArticulatedBody::from_profile(&profile);
+        let at = |x: f64| body.limit_fractions(&[x]).unwrap()[0].unwrap();
+        assert!((at(-0.3) - 0.0).abs() < 1e-12);
+        assert!((at(0.3) - 1.0).abs() < 1e-12);
+        assert!((at(0.0) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
     fn prismatic_joint_with_zero_axis_has_no_translation() {
         let body = Body {
             kind: JointKind::Prismatic,
@@ -1469,6 +1800,8 @@ pub(crate) mod tests {
             position_offset: 0,
             position_width: 1,
             inertia: [0.0; 36],
+            limit: None,
+            actuated: 0,
         };
 
         assert_eq!(joint_transform(&body, &[2.5]), IDENTITY_POSE);
@@ -1766,7 +2099,7 @@ pub(crate) mod tests {
     }
 
     /// Known-limitation characterization, not a physical claim. The G1 has
-    /// only 8 sphere shapes (ankle rolls), and the pelvis and torso have no
+    /// only the ten sphere shapes of the USD ankles, and the pelvis and torso have no
     /// collision geometry at all. With zero torque the legs fold and the trunk
     /// reaches the plane through those unmodelled shapes. Adding contact
     /// proxies (see ADR 0010) is expected to change this result; update the

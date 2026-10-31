@@ -2,7 +2,7 @@
 //! checks.
 //!
 //! Everything here is `std` only and free of side effects. Reference values
-//! come from closed forms or conservation laws, never from a MuJoCo output,
+//! come from closed forms or conservation laws, never from a reference simulator output,
 //! so a pass shows agreement with the stated analytic reference only. It is
 //! not measured parity with any external simulator.
 

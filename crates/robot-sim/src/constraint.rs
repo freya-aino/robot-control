@@ -1,29 +1,29 @@
-//! Equality-constraint build and solve ported from MuJoCo 3.17.0 (commit
+//! Equality-constraint build and solve ported from the reference simulator 3.17.0 (commit
 //! `800a109a`, `src/engine/engine_core_constraint.c`).
 //!
 //! Pure algorithm module: `std` and plain `f64` slices and vectors only (FR-6).
-//! Each function names the pinned MuJoCo function it transfers. The scope is
-//! the scalar `mjEQ_JOINT` coupling, the soft-constraint impedance and
+//! Each function names the pinned reference-simulator function it transfers. The scope is
+//! the scalar `EQ_JOINT` coupling, the soft-constraint impedance and
 //! reference (`solref`/`solimp`), and the closed linear solve of an
-//! equality-only problem. Not ported: `mjEQ_CONNECT`, `mjEQ_WELD` and
-//! `mjEQ_TENDON` (they need body or tendon kinematics), `mj_Jdotv`,
+//! equality-only problem. Not ported: `EQ_CONNECT`, `EQ_WELD` and
+//! `EQ_TENDON` (they need body or tendon kinematics), `Jdotv`,
 //! friction, limit and contact rows, the iterative solvers in
 //! `engine_solver.c`, the discrete-integrator metric branch, and the default
-//! `mj_diagApprox` path (the port uses the exact diagonal, as the
-//! `mjENBL_DIAGEXACT` path does). Deviations are listed in
+//! `diagApprox` path (the port uses the exact diagonal, as the
+//! `ENBL_DIAGEXACT` path does). Deviations are listed in
 //! `crates/robot-sim/specs/06-equality-constraints-and-solver.md`.
 
 use crate::integrators::cholesky_solve;
 
-/// `mjMINVAL`, minimum value in any denominator (`mjtype.h`).
+/// `MINVAL`, minimum value in any denominator (the reference type header).
 pub const MINVAL: f64 = 1e-15;
-/// `mjMINIMP`, minimum constraint impedance (`mujoco/mjmodel.h`).
+/// `MINIMP`, minimum constraint impedance (the reference model header).
 pub const MINIMP: f64 = 0.0001;
-/// `mjMAXIMP`, maximum constraint impedance (`mujoco/mjmodel.h`).
+/// `MAXIMP`, maximum constraint impedance (the reference model header).
 pub const MAXIMP: f64 = 0.9999;
-/// Default `solref` from `mj_defaultSolRefImp` (`engine_init.c`).
+/// Default `solref` from `defaultSolRefImp` (`engine_init.c`).
 pub const DEFAULT_SOLREF: [f64; 2] = [0.02, 1.0];
-/// Default `solimp` from `mj_defaultSolRefImp` (`engine_init.c`).
+/// Default `solimp` from `defaultSolRefImp` (`engine_init.c`).
 pub const DEFAULT_SOLIMP: [f64; 5] = [0.9, 0.95, 0.001, 0.5, 2.0];
 
 /// Why a constraint build or solve was rejected. Rejected inputs never touch
@@ -34,7 +34,7 @@ pub enum ConstraintError {
     NonFinite,
     /// The timestep is zero or negative.
     NonPositiveTimestep,
-    /// `solref` mixes the standard (`timeconst > 0`) and direct formats. MuJoCo
+    /// `solref` mixes the standard (`timeconst > 0`) and direct formats. the reference simulator
     /// replaces it with the default and warns; this port refuses it instead.
     MixedSolrefFormat,
     /// A slice width does not match the number of degrees of freedom.
@@ -83,14 +83,14 @@ pub fn clamp_solimp(solimp: [f64; 5]) -> [f64; 5] {
 /// The integrator safety clamp of `getsolparam` (`engine_core_constraint.c`,
 /// line 1906): for the standard format (`solref[0] > 0`) the time constant is
 /// raised to `2 * timestep`, and the returned flag records that it was raised.
-/// The source applies this clamp only when `mj_isMetric` is false, that is,
-/// for every integrator except `mjINT_DISCRETE`; this port has no discrete
+/// The source applies this clamp only when `isMetric` is false, that is,
+/// for every integrator except `INT_DISCRETE`; this port has no discrete
 /// path, so the clamp is unconditional.
 ///
 /// Deviation: the source warns and replaces a mixed-format `solref` with
-/// `mj_defaultSolRefImp`. This port returns `MixedSolrefFormat` instead, so
+/// `defaultSolRefImp`. This port returns `MixedSolrefFormat` instead, so
 /// the caller decides. Deviation: the source skips this clamp when
-/// `mjDSBL_REFSAFE` is set (`getsolparam`, `engine_core_constraint.c` line
+/// `DSBL_REFSAFE` is set (`getsolparam`, `engine_core_constraint.c` line
 /// 1906); this port has no disable switch, so the clamp always applies. The
 /// direct format (`solref[0] <= 0` and `solref[1] <= 0`) is returned unchanged.
 pub fn effective_timeconst(
@@ -155,7 +155,7 @@ pub fn impedance(solimp: [f64; 5], pos: f64, margin: f64) -> (f64, f64) {
 }
 
 /// The stiffness `K` and damping `B` of a constraint row, from
-/// `mj_makeImpedance` in `engine_core_constraint.c`:
+/// `makeImpedance` in `engine_core_constraint.c`:
 /// standard `K = 1 / max(MINVAL, d_width^2 * timeconst^2 * dampratio^2)`,
 /// `B = 2 / max(MINVAL, d_width * timeconst)`; direct `K = -solref[0] /
 /// max(MINVAL, d_width^2)`, `B = -solref[1] / max(MINVAL, d_width)`. Here
@@ -178,8 +178,8 @@ pub fn stiffness_damping(solref: [f64; 2], solimp: [f64; 5]) -> (f64, f64) {
 
 /// One equality constraint row: a Jacobian row over the `nv` degrees of
 /// freedom, the residual `pos`, and its soft-constraint parameters. Equality
-/// rows have zero margin (`mj_addConstraint(..., 0, 0, ...)` in
-/// `mj_instantiateEquality`).
+/// rows have zero margin (`addConstraint(..., 0, 0, ...)` in
+/// `instantiateEquality`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct EqualityRow {
     /// Jacobian row, length `nv`.
@@ -192,7 +192,7 @@ pub struct EqualityRow {
     pub solimp: [f64; 5],
 }
 
-/// A scalar `mjEQ_JOINT` equality: one joint, or two joints coupled by the
+/// A scalar `EQ_JOINT` equality: one joint, or two joints coupled by the
 /// polynomial `q1 - q1_ref - c0 - (c1*d + c2*d^2 + c3*d^3 + c4*d^4)` with
 /// `d = q2 - q2_ref`. Scalar (hinge/slide) joints only, so the qpos and dof
 /// index of a joint coincide.
@@ -214,8 +214,8 @@ pub struct JointEquality {
     pub solimp: [f64; 5],
 }
 
-/// Builds the residual and Jacobian row of one `mjEQ_JOINT` equality, from
-/// `mj_instantiateEquality` in `engine_core_constraint.c` (the `mjEQ_JOINT`
+/// Builds the residual and Jacobian row of one `EQ_JOINT` equality, from
+/// `instantiateEquality` in `engine_core_constraint.c` (the `EQ_JOINT`
 /// case). Two joints: `cpos = q1 - ref1 - c0 - poly(d)` and the Jacobian
 /// `e1 - poly'(d) * e2`, with `poly'(d) = c1 + 2*c2*d + 3*c3*d^2 + 4*c4*d^3`.
 /// One joint: `cpos = q1 - ref1 - c0` and Jacobian `e1`.
@@ -263,30 +263,30 @@ pub struct EqualitySolution {
     /// Acceleration `qacc = qacc_smooth + M^-1 J^T f`.
     pub qacc: Vec<f64>,
     /// Indices of rows whose standard time constant was raised to `2*dt`.
-    /// Reported, not hidden: MuJoCo applies the same clamp silently.
+    /// Reported, not hidden: the reference simulator applies the same clamp silently.
     pub clamped_rows: Vec<usize>,
 }
 
 /// Solves an equality-only constraint problem in closed form.
 ///
-/// Source: MuJoCo 3.17.0 `engine_core_constraint.c`. With `A = J M^-1 J^T`,
-/// `R = max(MINVAL, (1 - imp) * A_ii / imp)` (`mj_makeImpedance`), and the
-/// reference `aref = -B * (J qvel) - K * imp * pos` (`mj_referenceConstraint`,
-/// line 3299; the `shift * vel` term is zero because `mj_isMetric` is false
-/// for every integrator except `mjINT_DISCRETE`, see `engine_core_util.c`
-/// line 1615; `mj_Jdotv` is applied only to connect and weld rows, so it is
+/// Formulation: `engine_core_constraint.c`. With `A = J M^-1 J^T`,
+/// `R = max(MINVAL, (1 - imp) * A_ii / imp)` (`makeImpedance`), and the
+/// reference `aref = -B * (J qvel) - K * imp * pos` (`referenceConstraint`,
+/// line 3299; the `shift * vel` term is zero because `isMetric` is false
+/// for every integrator except `INT_DISCRETE`, see `engine_core_util.c`
+/// line 1615; `Jdotv` is applied only to connect and weld rows, so it is
 /// absent here), the soft row acceleration must satisfy `J qacc - aref = -R f`.
 /// Substituting `qacc = qacc_smooth + M^-1 J^T f` gives
 /// `(A + diag(R)) f = aref - J qacc_smooth`. The matrix `A + diag(R)` is
-/// assembled as `AR` (`mj_makeARNumeric`, line 3063, `AR[diag] += R`).
+/// assembled as `AR` (`makeARNumeric`, line 3063, `AR[diag] += R`).
 /// Impedance depends only on `pos`, so this is one linear solve, not an
 /// iteration.
 ///
 /// Deviation: `A_ii` is the exact diagonal of `J M^-1 J^T`. This matches the
-/// `mjENBL_DIAGEXACT` path, which overwrites `efc_diagA` with the same
-/// quantity (`mj_makeYNumeric`, `mj_projectConstraint`). It does not match
-/// the default `mj_diagApprox` (`engine_core_constraint.c` line 1605). For
-/// `mjEQ_JOINT` rows that path sums `dof_invweight0` (the inverse inertia at
+/// `ENBL_DIAGEXACT` path, which overwrites `efc_diagA` with the same
+/// quantity (`makeYNumeric`, `projectConstraint`). It does not match
+/// the default `diagApprox` (`engine_core_constraint.c` line 1605). For
+/// `EQ_JOINT` rows that path sums `dof_invweight0` (the inverse inertia at
 /// `qpos0`) and has no `poly'(d)^2` coupling factor. So `R` differs whenever
 /// `|poly'(d)| != 1` or `M(q) != M(qpos0)`, even for a diagonal `M`.
 pub fn solve_equality(

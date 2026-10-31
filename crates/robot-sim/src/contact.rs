@@ -237,7 +237,7 @@ impl fmt::Display for PlaneSphereError {
 
 impl core::error::Error for PlaneSphereError {}
 
-/// A plane-sphere contact in MuJoCo's convention: `dist` is the signed
+/// A plane-sphere contact in the reference's convention: `dist` is the signed
 /// separation (negative when penetrating), `normal` points from the plane
 /// toward the sphere, and `pos` is the contact point midway between the
 /// plane and the sphere surface.
@@ -252,8 +252,8 @@ pub struct PlaneSphereContact {
 }
 
 /// Plane-sphere contact for a horizontal plane `z = plane_height` with normal
-/// `+z`. Source: `mjraw_PlaneSphere` (static) and its public wrapper
-/// `mjc_PlaneSphere`, MuJoCo 3.17.0 (commit `800a109a`),
+/// `+z`. Source: `PlaneSphere` (static) and its public wrapper
+/// `PlaneSphere`, the reference formulation,
 /// `src/engine/engine_collision_primitive.c`, lines 28-49 and 53-62.
 ///
 /// The source takes `normal` from the plane's rotation matrix column `mat1[2,5,8]`,

@@ -10,8 +10,8 @@
 //! Rust-native GPU-compute path, and a backend-agnostic boundary so
 //! every other crate depends on [`env::Environment`] and never on a
 //! physics-backend-specific type. That document is grounded in direct
-//! research against MuJoCo's own source/docs, MJX, Brax, CubeCL and
-//! `wgpu`, not a restatement of this module's existing scope.
+//! research against published GPU-batched simulators, CubeCL and `wgpu`, not a
+//! restatement of this module's existing scope.
 //!
 //! This revision delivers the two smallest qualification benchmarks Section
 //! 9.1 and Appendix B.4 name first — "pendulum, actuator step response" and
@@ -60,6 +60,7 @@
 
 pub mod articulated;
 pub mod backend;
+pub mod collision;
 pub mod constraint;
 pub mod contact;
 pub mod env;

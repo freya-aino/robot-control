@@ -1,17 +1,17 @@
-//! Time integrators ported from MuJoCo 3.17.0 (commit `800a109a`).
+//! Time integrators ported from the reference formulation.
 //!
 //! Pure algorithm module: `std` and plain `f64` slices only, no `robot_types`,
 //! `robot_model` or `HashMap` types (FR-6). Each function names the pinned
-//! MuJoCo source function it transfers. The scope is scalar (hinge/slide)
-//! joints: quaternion `Free`/`Ball` joints need MuJoCo's `mj_integratePos`
+//! the reference simulator source function it transfers. The scope is scalar (hinge/slide)
+//! joints: quaternion `Free`/`Ball` joints need the reference's `integratePos`
 //! and are not ported here. Deviations are listed in
 //! `crates/robot-sim/specs/03-integrators.md`.
 
 /// Semi-implicit (symplectic) Euler step for scalar joints, in place.
 ///
-/// Source: MuJoCo 3.17.0 `src/engine/engine_forward.c`, `mj_advance`
+/// Formulation: `src/engine/engine_forward.c`, `advance`
 /// (`qvel += h*qacc` first, then the position is integrated with the updated
-/// `qvel`). For scalar joints `mj_integratePos` reduces to `qpos += h*qvel`.
+/// `qvel`). For scalar joints `integratePos` reduces to `qpos += h*qvel`.
 ///
 /// # Panics
 ///
@@ -29,14 +29,14 @@ pub fn semi_implicit_euler_step(q: &mut [f64], qd: &mut [f64], qacc: &[f64], dt:
 
 /// Implicit-in-velocity Euler step with diagonal joint damping, in place.
 ///
-/// Source: MuJoCo 3.17.0 `src/engine/engine_forward.c`, `mj_EulerSkip`, damping
+/// Formulation: `src/engine/engine_forward.c`, `EulerSkip`, damping
 /// branch: `qH = M`, `qH[i,i] += h * B_i` (the damping derivative, see
-/// `mjd_xPolyForce` in `src/engine/engine_util_misc.c`; for a linear damper it is
+/// `xPolyForce` in `src/engine/engine_util_misc.c`; for a linear damper it is
 /// the damping coefficient), the solve `(M + h*B) * qacc = qfrc_smooth +
-/// qfrc_constraint`, then `mj_advance`.
+/// qfrc_constraint`, then `advance`.
 ///
 /// `mass` is the dense row-major `n x n` inertia `M`, `damping` the diagonal
-/// `B`, and `bias` is `qfrc_smooth + qfrc_constraint`. As in MuJoCo, `bias`
+/// `B`, and `bias` is `qfrc_smooth + qfrc_constraint`. As in the reference simulator, `bias`
 /// already contains the explicit damper force `-B * qd`, since `qfrc_smooth`
 /// includes `qfrc_passive`.
 ///
@@ -49,8 +49,8 @@ pub fn semi_implicit_euler_step(q: &mut [f64], qd: &mut [f64], qacc: &[f64], dt:
 ///   misread; it is refused instead.
 ///
 /// Returns `None` when any check fails or when `M + h*diag(B)` is not
-/// symmetric positive definite; the state is then left unchanged. MuJoCo
-/// instead clamps the pivot and emits a warning (`mj_factorI`); this port
+/// symmetric positive definite; the state is then left unchanged. the reference simulator
+/// instead clamps the pivot and emits a warning (`factorI`); this port
 /// reports it instead.
 ///
 /// # Panics
@@ -100,13 +100,13 @@ pub fn implicit_damping_euler_step(
 
 /// Classical fourth-order Runge-Kutta step for scalar joints, in place.
 ///
-/// Source: MuJoCo 3.17.0 `src/engine/engine_forward.c`, `mj_RungeKutta` with
+/// Formulation: `src/engine/engine_forward.c`, `RungeKutta` with
 /// `N = 4`, tableau `RK4_A` (`0.5, 0.5, 1`) and `RK4_B` (`1/6, 1/3, 1/3, 1/6`).
 /// Stage positions advance by `h` times the stage velocities, and stage
 /// velocities by `h` times the stage accelerations `F`, both weighted by `A`
-/// (`mj_integratePos` and `mju_addToScl` in MuJoCo). The final update uses `B`.
+/// (`integratePos` and `addToScl` in the reference simulator). The final update uses `B`.
 /// `accel(q, qd)` returns the accelerations at an arbitrary state, as
-/// `mj_forwardSkip` does per stage in MuJoCo. Stage times are not used,
+/// `forwardSkip` does per stage in the reference simulator. Stage times are not used,
 /// because no time-dependent input is modelled here.
 ///
 /// # Panics
@@ -206,7 +206,7 @@ mod tests {
     fn semi_implicit_euler_uses_the_updated_velocity_for_position() {
         // Hand derivation: qd1 = qd0 + h*qacc = 1 + 0.1*2 = 1.2;
         // q1 = q0 + h*qd1 = 0 + 0.1*1.2 = 0.12. Explicit Euler with the old
-        // velocity would give q1 = 0.1, so 0.12 identifies mj_advance's ordering.
+        // velocity would give q1 = 0.1, so 0.12 identifies advance's ordering.
         let mut q = [0.0];
         let mut qd = [1.0];
         semi_implicit_euler_step(&mut q, &mut qd, &[2.0], 0.1);
