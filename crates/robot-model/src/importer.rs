@@ -2,7 +2,7 @@
 //! document into [`ImportedKinematics`] can feed the model pipeline.
 //!
 //! [`UrdfImporter`] is the first implementor and wraps the existing
-//! [`crate::urdf`] loader without changing it. A new format (MJCF, a vendor
+//! [`crate::urdf`] loader without changing it. A new format (a vendor
 //! JSON description) is added as another implementor in its own crate, with no
 //! edit to this one.
 

@@ -23,6 +23,32 @@ use robot_types::ids::{JointId, LinkId, Name};
 use robot_types::schema::ExtensionTable;
 use robot_types::time::Duration;
 use robot_types::units::{NewtonMetres, RadiansPerSecond};
+use std::path::Path;
+
+/// The G1 of [`unitree_g1_29dof_usd_floating_base`] as Unitree describes it in
+/// its OpenUSD robot layer (ADR 0015): link masses and inertias, joint frames
+/// and limits, drive effort and gains, and the collision shapes. The root is
+/// the pelvis, attached to the world by nothing.
+///
+/// # Errors
+///
+/// Returns the importer's error if the layer cannot be read or does not match
+/// the subset the importer accepts.
+pub fn unitree_g1_29dof_usd() -> Result<RobotProfile, FixtureError> {
+    let (profile, _report) = crate::usd::import_fixed_base(Path::new(UNITREE_G1_29DOF_USD_ROOT))?;
+    Ok(profile)
+}
+
+/// [`unitree_g1_29dof_usd`] with a free base, which is how the simulator runs
+/// the robot. The free joint is first in the joint list.
+///
+/// # Errors
+///
+/// As [`unitree_g1_29dof_usd`].
+pub fn unitree_g1_29dof_usd_floating_base() -> Result<RobotProfile, FixtureError> {
+    let fixed = unitree_g1_29dof_usd()?;
+    Ok(crate::usd::with_floating_base(fixed)?)
+}
 
 /// Unitree G1 humanoid, 29-DOF, revision 1.0, vendored from
 /// `unitreerobotics/unitree_rl_gym`. See
@@ -30,10 +56,16 @@ use robot_types::units::{NewtonMetres, RadiansPerSecond};
 /// license and exactly what was and wasn't checked before vendoring —
 /// including why this is the same variant
 /// [RoboJuDo](https://github.com/HansZ8/RoboJuDo) uses as its default G1
-/// asset, even though RoboJuDo itself vendors the MJCF sibling of this
-/// file rather than a URDF.
+/// asset.
 const UNITREE_G1_29DOF_URDF: &str =
     include_str!("../../../assets/robots/unitree_g1/g1_29dof_rev_1_0.urdf");
+
+/// The official Unitree G1 OpenUSD robot layer (ADR 0015), read at build time
+/// from the vendored assets.
+pub const UNITREE_G1_29DOF_USD_ROOT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/robots/unitree_g1_usd/g1_29dof_rev_1_0.usd"
+);
 
 /// Why a vendored fixture could not be built into a usable profile.
 #[derive(Debug)]
@@ -42,6 +74,8 @@ pub enum FixtureError {
     Urdf(UrdfError),
     /// The assembled profile failed its own validation.
     Profile(ProfileError),
+    /// The vendored USD description could not be imported.
+    Usd(crate::usd::UsdImportError),
 }
 
 impl fmt::Display for FixtureError {
@@ -49,11 +83,18 @@ impl fmt::Display for FixtureError {
         match self {
             Self::Urdf(e) => write!(f, "{e}"),
             Self::Profile(e) => write!(f, "{e}"),
+            Self::Usd(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl core::error::Error for FixtureError {}
+
+impl From<crate::usd::UsdImportError> for FixtureError {
+    fn from(e: crate::usd::UsdImportError) -> Self {
+        Self::Usd(e)
+    }
+}
 
 impl From<UrdfError> for FixtureError {
     fn from(e: UrdfError) -> Self {
@@ -143,7 +184,7 @@ pub fn unitree_g1_29dof() -> Result<RobotProfile, FixtureError> {
 /// (storage) order, so this is what puts the floating joint's 7-wide
 /// position and 6-wide velocity/force slots at index 0 rather than
 /// scattered after the G1's own 29 — the conventional "free joint first"
-/// layout, matching MuJoCo's own `qpos`/`qvel` convention.
+/// layout, the same order as the free-joint convention of the simulators.
 pub fn unitree_g1_29dof_floating_base() -> Result<RobotProfile, FixtureError> {
     let mut profile = unitree_g1_29dof()?;
 

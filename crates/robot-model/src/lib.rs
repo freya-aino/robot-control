@@ -35,3 +35,4 @@ pub mod pose;
 pub mod profile;
 pub mod sensor;
 pub mod urdf;
+pub mod usd;
