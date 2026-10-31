@@ -16,7 +16,8 @@ profile of SPECS.md Section 7.1. Depends only on `robot-types`.
 | `kinematics` | §6 | `forward_kinematics`: one unambiguous computation over the validated tree |
 | `urdf` | §7.1 | A minimal authored XML reader plus the URDF kinematic/mass subset this project supports |
 | `importer` | — | `ModelImporter` trait (associated `Error`) as the plug-in seam for description formats; `UrdfImporter` wraps `urdf::import_from_str` without changing it |
-| `fixtures` | §3 | Vendored real-robot descriptions built into validated `RobotProfile`s — currently Unitree's G1 humanoid, 29-DOF rev 1.0 |
+| `usd` | §7.1, ADR 0015 | Builds a `RobotProfile` from an OpenUSD robot layer read with `robot-usd`: links and masses from `physics:*`, revolute joints with their frames, limits, drives and gains, and the collision shapes. Refuses anything outside that subset by name |
+| `fixtures` | §3 | Vendored real-robot descriptions built into validated `RobotProfile`s: Unitree's G1 humanoid, 29-DOF rev 1.0, from the URDF (`unitree_g1_29dof`), from the URDF with a floating base (`unitree_g1_29dof_floating_base`), and from the official the reference simulator scene description (`unitree_g1_29dof_mujoco`) |
 
 ## Why `RigidPose` instead of `robot_types::frames::Transform`
 
@@ -131,3 +132,38 @@ rejection case, and the vendored G1 fixture in both its fixed-base form
 activation refusal above, forward kinematics at the zero posture) and its
 floating-base form (the added `world` link and `Free` joint, the 35-DOF
 count, the same activation refusal); and the URDF importer trait wrapper.
+
+## The G1 model source (ADR 0015)
+
+The G1 is the official Unitree OpenUSD asset, which Unitree publishes for Isaac
+Sim. `fixtures::unitree_g1_29dof_usd()` imports the vendored root layer
+(`assets/robots/unitree_g1_usd/`, provenance in its `PROVENANCE.md`) and
+`fixtures::unitree_g1_29dof_usd_floating_base()` adds the free base the
+simulator uses. The simulator loads the floating variant.
+
+What the import reads, and where:
+
+- links and masses: prims under the default prim with `physics:mass`, with
+  `physics:centerOfMass`, `physics:diagonalInertia` and `physics:principalAxes`;
+- joints: `PhysicsRevoluteJoint` prims under `joints/`, with `physics:body0` and
+  `physics:body1`, the joint frame in each body (`localPos`/`localRot`), the
+  axis, the limits in degrees, the drive force limit, the drive stiffness and
+  damping, and `physxJoint:maxJointVelocity`;
+- collision: `Sphere`, `Cube`, `Cylinder` and `Mesh` prims under each link's
+  `collisions` scope, with their poses from their `xformOp`s. Meshes are kept
+  as references. Visual meshes are counted and not used.
+
+The import is all or nothing, and each count is in `usd::ImportReport`. The
+G1 layer gives 30 links, 29 revolute joints, 29 actuators, 10 collision
+spheres, 2 boxes, 6 cylinders and 15 collision mesh references.
+
+Measured against the URDF of the same revision: joint limits agree to 1e-4 rad,
+effort and velocity limits agree, and zero-pose link positions relative to the
+pelvis agree to 1.5e-8 m. The MJCF-era disagreements are gone with its import
+path (ADR 0014 is withdrawn).
+
+Not in the model: the actuator thermal and latency values are placeholders
+from `urdf::placeholder_actuator`, and the firmware contract declares no
+independent e-stop, so the profile cannot be activated on a hardware path.
+Forward kinematics on a `Free` joint is not defined; kinematic checks use the
+fixed-base copy.

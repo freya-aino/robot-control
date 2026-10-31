@@ -2,17 +2,17 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md) · [Appendix B](appendix-b-open-questions.md)
 
-**Status**: Partially implemented in plan Step 4 and Step 5. `crates/robot-sim/src/oracle.rs` provides `pendulum_closed_form`, `energy_drift` and `compare_series` (std only, unit-tested). The archival battery in `crates/robot-sim/src/fidelity.rs` uses schema v7 (`shared-analytic-v7`): its seven analytic checks include the 1-rad pendulum trajectory; rows carry real sample indices; v5 and v6 reports are refused. Schema v7 adds the measured G1 zero-torque probe rows (section 2.6), which are recorded as `fail` when they fail and do not change `all_pass`. Scalar tolerances retain their original meanings, and the trajectory's pointwise absolute/relative tolerances are recorded by tier (section 2.5). No MuJoCo output, trace, binding or profile exists in this repository, and none is part of this spec.
+**Status**: Partially implemented in plan Step 4 and Step 5. `crates/robot-sim/src/oracle.rs` provides `pendulum_closed_form`, `energy_drift` and `compare_series` (std only, unit-tested). The archival battery in `crates/robot-sim/src/fidelity.rs` uses schema v7 (`shared-analytic-v7`): its seven analytic checks include the 1-rad pendulum trajectory; rows carry real sample indices; v5 and v6 reports are refused. Schema v7 adds the measured G1 zero-torque probe rows (section 2.6), which are recorded as `fail` when they fail and do not change `all_pass`. Scalar tolerances retain their original meanings, and the trajectory's pointwise absolute/relative tolerances are recorded by tier (section 2.5). No the reference simulator output, trace, binding or profile exists in this repository, and none is part of this spec.
 
 **Numbering in this file.** "plan Step N" refers to the implementation plan (Steps 1 to 7). "spec NN" refers to the step file `NN-*.md` in this directory. Section numbers (1 to 5) refer to this file.
 
-**Goal**: Define the oracle plan that checks the source-faithful ports (plan Steps 3 to 7) without running MuJoCo. The oracles are (a) closed forms, (b) conservation laws, and (c) reference values derived by hand from MuJoCo's documented equations and the pinned source, with the derivation written in the test. This spec records the v5 battery as implemented, specifies the v6 oracle definitions, and gives the derivation rules. It does not claim measured parity with MuJoCo.
+**Goal**: Define the oracle plan that checks the source-faithful ports (plan Steps 3 to 7) without running the reference simulator. The oracles are (a) closed forms, (b) conservation laws, and (c) reference values derived by hand from the reference's documented equations and the pinned source, with the derivation written in the test. This spec records the v5 battery as implemented, specifies the v6 oracle definitions, and gives the derivation rules. It does not claim measured parity with the reference simulator.
 
 **Depends on**: [spec 02](02-pure-dynamics-core.md), [spec 03](03-integrators.md). The oracles check the dynamics and integrators pinned there.
 
-**MuJoCo baseline**: MuJoCo 3.17.0 at commit `800a109a4bdd02cb60404d565db4ae16fb04a53b` (Appendix A). MuJoCo is a source reference only. This spec defines no algorithm and pins no engine function. Function pins are inherited from [spec 02](02-pure-dynamics-core.md), [spec 03](03-integrators.md), [spec 05](05-passive-forces-and-actuators.md), [spec 06](06-equality-constraints-and-solver.md) and [spec 07](07-collision-pipeline.md). Evidence per `SPECS.md` section 3: `code_inspected` for the existence and location of those functions at the pin (Appendix A); specs 03 and 05 record `code_inspected` bodies for their ported functions. This spec itself inspected no function bodies; bodies not read remain `unverified` in specs 02, 06 and 07.
+**Reference formulation**: reference formulation at commit `800a109a4bdd02cb60404d565db4ae16fb04a53b` (Appendix A). the reference simulator is a source reference only. This spec defines no algorithm and pins no engine function. Function pins are inherited from [spec 02](02-pure-dynamics-core.md), [spec 03](03-integrators.md), [spec 05](05-passive-forces-and-actuators.md), [spec 06](06-equality-constraints-and-solver.md) and [spec 07](07-collision-pipeline.md). Evidence per `SPECS.md` section 3: `code_inspected` for the existence and location of those functions at the pin (Appendix A); specs 03 and 05 record `code_inspected` bodies for their ported functions. This spec itself inspected no function bodies; bodies not read remain `unverified` in specs 02, 06 and 07.
 
-**Purity contract**: The oracle module (`crates/robot-sim/src/oracle.rs`, plan Step 4) uses `std` only, with plain `f64` slices. It contains no `Matrix`, `RigidPose` or `HashMap`, and no MuJoCo runtime, binding, trace reader or fixture.
+**Purity contract**: The oracle module (`crates/robot-sim/src/oracle.rs`, plan Step 4) uses `std` only, with plain `f64` slices. It contains no `Matrix`, `RigidPose` or `HashMap`, and no the reference simulator runtime, binding, trace reader or fixture.
 
 **Inputs/outputs**: Input: the candidate series produced by the CPU port (and, after plan Step 7, the GPU backend), plus the closed-form or conservation reference computed inside the oracle. Output: an `OracleReport` for the pendulum trajectory (max error, index, pass), written as a v6 `fidelity.toml` check row with `measured`, `sample`, `tolerance_abs` and `tolerance_rel`. Other checks retain scalar `tolerance` fields.
 
@@ -50,7 +50,7 @@ Each oracle is a pure function of plain `f64` data. The reference is never read 
 | Energy drift | `E(0)` of the conservative system | max over samples of `\|E(t_i) − E(0)\| / \|E(0)\|`, subject to the guard in section 2.2 | plan Step 4 (standalone pendulum); additional systems pending |
 | Momentum conservation | Initial linear and angular momentum of a free body with no external force | max over samples of `\|p(t_i) − p(0)\|` (kg·m/s) and of `\|L(t_i) − L(0)\|` (kg·m²/s), reported separately | pending |
 | ABA/RNE round trip | `tau = RNE(q, qd, qdd)`, then `qdd' = ABA(q, qd, tau)` | max over samples of `\|qdd' − qdd\|` (rad/s²) | pending future work; not a v6 battery row |
-| Hand-derived value | Number derived by hand from a stated MuJoCo equation (section 3) | `compare_series` or scalar comparison with the tolerance in section 2.4 | plan Steps 5, 6, 7 |
+| Hand-derived value | Number derived by hand from a stated the reference simulator equation (section 3) | `compare_series` or scalar comparison with the tolerance in section 2.4 | plan Steps 5, 6, 7 |
 
 ### 2.2 Zero and near-zero energy
 
@@ -76,7 +76,7 @@ Each oracle is a pure function of plain `f64` data. The reference is never read 
 
 ### 2.5 Tolerances for the new oracles (status after plan Step 4)
 
-Step 4 runs the pendulum trajectory oracle at both declared tiers. Its v6 check row records `tolerance_abs`, `tolerance_rel`, the maximum error in radians and its sample index. Measured maxima for the current semi-implicit Euler path over four seconds are 1.5018532e-4 rad at sample 37435 (100 µs) and 1.5040877e-3 rad at sample 3744 (1 ms). The bounds allow roughly 3.3 times those errors and scale with the first-order global error: tenfold larger timestep receives a tenfold larger absolute allowance. These are tests of the Rust integrator against an analytic oracle, not evidence of MuJoCo parity. The trajectory uses `rel = 0`, as every v6 series row must, because only its maximum raw error and index are persisted; the runner requires exactly zero relative tolerance for both built-in and plug-in series checks. Scalar checks keep `tolerance` and their previous semantics. The reader rejects noncanonical tier tolerances and contradictory pass flags. A row marked `pending` has no battery tolerance yet.
+Step 4 runs the pendulum trajectory oracle at both declared tiers. Its v6 check row records `tolerance_abs`, `tolerance_rel`, the maximum error in radians and its sample index. Measured maxima for the current semi-implicit Euler path over four seconds are 1.5018532e-4 rad at sample 37435 (100 µs) and 1.5040877e-3 rad at sample 3744 (1 ms). The bounds allow roughly 3.3 times those errors and scale with the first-order global error: tenfold larger timestep receives a tenfold larger absolute allowance. These are tests of the Rust integrator against an analytic oracle, not evidence of the reference simulator parity. The trajectory uses `rel = 0`, as every v6 series row must, because only its maximum raw error and index are persisted; the runner requires exactly zero relative tolerance for both built-in and plug-in series checks. Scalar checks keep `tolerance` and their previous semantics. The reader rejects noncanonical tier tolerances and contradictory pass flags. A row marked `pending` has no battery tolerance yet.
 
 | Scenario | Tier | Oracle | Metric and unit | Tolerance | Status |
 | --- | --- | --- | --- | --- | --- |
@@ -96,22 +96,22 @@ Step 4 runs the pendulum trajectory oracle at both declared tiers. Its v6 check 
 - Reporting: one `[[probe]]` row with keys `scenario`, `system`, `status`, `step`, `error`, `reason`. `status = "fail"` carries `step` and an `error` that names a `DynamicsError` variant, with `step` below 4000. `status = "pass"` carries neither. `reason` must equal the canonical text (`G1_PROBE_REASON`).
 - Reader contract (ADR 0008 section 8): the strict reader validates the probe row structurally and never simulates. `reproduce(max_steps)` re-runs the probe, counts its 4000 steps against `max_steps` before running, and refuses a stored row that differs from the fresh measurement. The row is not a battery check and does not change `all_pass`.
 - Attribution: the failure is not attributed to the integrator alone. The pelvis and torso have no collision geometry, so once the legs fold the trunk reaches the plane through unmodelled shapes (ADR 0010). The row records this model-coverage limit; the integrator's share is not isolated here.
-- This is a measured probe, not parity with MuJoCo.
+- This is a measured probe, not parity with the reference simulator.
 
 ## 3. Derivation rules for hand-derived values
 
-1. A hand-derived reference value MUST come from a closed form, or from a MuJoCo equation whose function, file and commit (`800a109a`) are named.
+1. A hand-derived reference value MUST come from a closed form, or from a the reference simulator equation whose function, file and commit (`800a109a`) are named.
 2. The derivation MUST be written as comments in the test, one step per line, and the final number MUST be reproduced to at least the tolerance precision.
 3. Each value MUST be cross-checked by a second derivation in the same test (for example, the closed form and a numerical integral of the same equation). If they disagree, the test fails and the derivation is corrected. The test is never relaxed.
 4. A hand-derived value MUST NOT be taken from a simulator run of this code. A value produced by the port under test is never its own reference.
-5. Evidence state of a hand-derived value (`SPECS.md` section 3): it is `unverified` with respect to MuJoCo behaviour, because no MuJoCo output is compared. Before the second derivation in rule 3 agrees, the value MUST NOT be used as a test reference. After agreement it MAY be used as a test reference, which is a test-internal check of the port. That use licenses no implementation claim about MuJoCo, and agreement of two derivations does not promote any MuJoCo claim.
-6. Evidence state of a pinned MuJoCo function: `code_inspected` only for what was read at the pin (existence, location, and what the function does). Per `SPECS.md` section 3, `code_inspected` does not license statements about numerical correctness. Functions whose bodies have not been read stay `unverified`, as in Appendix A.
+5. Evidence state of a hand-derived value (`SPECS.md` section 3): it is `unverified` with respect to the reference simulator behaviour, because no the reference simulator output is compared. Before the second derivation in rule 3 agrees, the value MUST NOT be used as a test reference. After agreement it MAY be used as a test reference, which is a test-internal check of the port. That use licenses no implementation claim about the reference simulator, and agreement of two derivations does not promote any the reference simulator claim.
+6. Evidence state of a pinned the reference simulator function: `code_inspected` only for what was read at the pin (existence, location, and what the function does). Per `SPECS.md` section 3, `code_inspected` does not license statements about numerical correctness. Functions whose bodies have not been read stay `unverified`, as in Appendix A.
 
 ## 4. Evidence and reporting
 
-- Every result is described as a **source-faithful port with oracle checks**. No report, ADR, ledger entry or test name claims measured parity with MuJoCo.
-- Passing a tolerance establishes that the oracle check passes within that tolerance. It does not establish parity with MuJoCo.
-- A passing oracle does not promote a claim about MuJoCo behaviour. A MuJoCo citation does not promote a claim about this code (see [spec 12](12-cpu-gpu-agreement.md)).
+- Every result is described as a **source-faithful port with oracle checks**. No report, ADR, ledger entry or test name claims measured parity with the reference simulator.
+- Passing a tolerance establishes that the oracle check passes within that tolerance. It does not establish parity with the reference simulator.
+- A passing oracle does not promote a claim about the reference simulator behaviour. A the reference simulator citation does not promote a claim about this code (see [spec 12](12-cpu-gpu-agreement.md)).
 - Each step that adds an oracle records in the evidence ledger which functions are source-faithful and which oracles they passed.
 
 ## 5. Scenarios and refresh
@@ -123,4 +123,4 @@ Step 4 runs the pendulum trajectory oracle at both declared tiers. Its v6 check 
 
 - Resolved in Step 4: no `E_floor` constant was added (section 2.2). Only exact zero and non-finite `E(0)` are guarded, and they return NaN. The standalone pendulum energy metric changed to maximum drift; the articulated energy and free-fall final-step metrics remain. Battery tolerances for the `pending` rows of section 2.5 remain for later steps.
 - Resolved in Step 4: `sn` is the Landen recursion in `oracle.rs`, checked against an RK4 integration and a hand-derived power series of `K(m)`. The linear regime of section 2.3 was not used and has no tolerance.
-- No cross-engine comparison against MuJoCo itself is requested here. Any such comparison is subject to the `SPECS.md` Section 2.1 exception procedure.
+- No cross-engine comparison against the reference simulator itself is requested here. Any such comparison is subject to the `SPECS.md` Section 2.1 exception procedure.

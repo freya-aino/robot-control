@@ -42,7 +42,7 @@ Status legend: `[x]` implemented, `[~]` partial, `[ ]` not implemented, `[?]` no
 
 - [x] C-01 Python `training/` and `unitree/` code removed from the working tree — Evidence: no such directories (see 1.1, 1.2); the table row records the resolution date 2026-10-26.
 - [ ] C-02 Reference robot model and first hardware target — Evidence: `assets/robots/unitree_g1/` is vendored, but no decision record names a target. Note: record the reference embodiment decision.
-- [~] C-03 Rust-only physics stack meets contact and throughput requirements — Evidence: `docs/decisions/0005-mujoco-caliber-gpu-batched-simulation-target.md`, `0012-cubecl-b6-qualification-gpu-backend.md`. Note: throughput is measured only for the RK4 and equality batches; the humanoid contact requirement is not met.
+- [~] C-03 Rust-only physics stack meets contact and throughput requirements — Evidence: `docs/decisions/0005-gpu-batched-simulation-target.md`, `0012-cubecl-b6-qualification-gpu-backend.md`. Note: throughput is measured only for the RK4 and equality batches; the humanoid contact requirement is not met.
 - [x] C-04 Canonical frames and conventions — Evidence: `docs/decisions/0002-canonical-frames-deferred.md` records the deferral; transforms name frames in `crates/robot-model`. Note: the deferral is the recorded decision; no frame convention is fixed yet.
 - [ ] C-05 Learning backend selection (Burn, Candle or authored) — Evidence: no record selects one; `robot-learn` is authored. Note: run the B.6 workload comparison and record the decision.
 - [ ] C-06 Observation and action schema and actuator command interface — Evidence: no decision record matches this item; schemas are versioned (see 7.1.1). Note: write the decision record after C-02.

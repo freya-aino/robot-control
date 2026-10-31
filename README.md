@@ -14,7 +14,7 @@ for its disposition.
 ## Implementation
 
 This repository is a devenv-managed Rust workspace implementing SPECS.md and
-PLAN.md. The default dependency policy is std-only (ADR 0003), and no MuJoCo or
+PLAN.md. The default dependency policy is std-only (ADR 0003), and no reference simulator, scene description, or
 other foreign simulator is in the default closure. The CubeCL GPU dependency is
 optional, behind `--features cubecl`, and off by default (ADR 0012). Enter the
 environment and run the full gate with:
@@ -72,9 +72,10 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`motion-retarget`](crates/motion-retarget/README.md) | §8.3 | Damped-least-squares task-space IK |
 | [`motion-validate`](crates/motion-validate/README.md) | §8.3 | Retargeting validation reports and acceptance thresholds |
 | [`robot-nn`](crates/robot-nn/README.md) | gap-filling, §9/§10 | A small MLP with zero-allocation inference, kept isolated from training code |
-| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Pure-array CPU core: pendulum benchmarks, ABA/RNE multi-body solver with a floating base, ports of MuJoCo 3.17.0 integrator, passive-force, actuator, equality-constraint and plane-sphere functions (each cited by source function), an oracle module, and a schema-v7 fidelity harness. The per-step spec index is [`specs/README.md`](crates/robot-sim/specs/README.md) |
+| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Pure-array CPU core: pendulum benchmarks, ABA/RNE multi-body solver with a floating base, formula modules for the integrator, passive forces, actuators, equality constraints and plane-sphere contact, an oracle module, and a schema-v7 fidelity harness. The per-step spec index is [`specs/README.md`](crates/robot-sim/specs/README.md) |
 | [`robot-sim-gpu`](crates/robot-sim-gpu) | §9.1, PLAN.md Phase 3 | Feature-gated CubeCL f32 backend (`--features cubecl`, off by default) for a subset of the `robot-sim` functions, with CPU-vs-GPU agreement tests and `tolerances.toml`. Not part of the default build |
 | [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Reward registry and a balance/stabilization task |
+| [`robot-usd`](crates/robot-usd/README.md) | §7.1, ADR 0015 | Std-only OpenUSD reader (USDC and USDA) with layer composition, and the USD replay writer |
 | [`robot-learn`](crates/robot-learn/README.md) | §§7.6, 9.2, 9.5 | Backprop, Adam, GAE, a diagonal Gaussian policy, rollout buffers, PPO |
 | [`robot-skills`](crates/robot-skills/README.md) | §10.6 | The R1 working set and the R2 in-loop router over an exact-search index; R0 offline corpus selection is not implemented |
 | [`robot-adapt`](crates/robot-adapt/README.md) | §11.3 | System identification (first, mandatory row of the adaptation-method table) |
@@ -97,22 +98,23 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
   not a known implementation bug. Recorded as an honest negative result per
   `robot-learn`'s README and SPECS.md Section 3's evidence discipline,
   rather than hidden behind a passing-looking assertion.
-- **`robot-sim` is a partial port, not a MuJoCo-caliber engine.** The CPU
+- **`robot-sim` is a partial implementation, not a high-fidelity engine.** The CPU
   formula modules (integrators, passive forces, actuators, equality constraints,
   plane-sphere contact) are not yet wired into the multibody stepper. The GPU
   backend covers only the subset listed in `crates/robot-sim-gpu/src/lib.rs`;
   the general closure-based RK4, batched G1/ABA, and the contact, limit and
   friction solver are not ported. Contact in the multibody path is modelled for
-  only the eight ankle-roll spheres; box, cylinder and mesh shapes are not
+  only the ten ankle spheres of the USD model (five per ankle); the foot boxes,
+  knee and shoulder cylinders and mesh shapes are captured but not modelled, and
   modelled, and the pelvis and torso have no collision geometry. At `dt=1e-4`, a clamped-PD
   supported-stance hold keeps the vendored G1 pelvis above the plane for 2 s
   (minimum 0.787 m); this is not a balance result. With zero torque, the pelvis
   falls to −0.77 m below the plane. The fidelity harness reports an analytic
   subset: G1 contact is `not_measured` at the reference tier and
   `not_applicable` at coarse; neither status qualifies G1 contact. The
-  GPU-batched, variable-fidelity target, on par with MuJoCo, is specified in
+  GPU-batched, variable-fidelity target, built on the OpenUSD / Isaac Sim model (ADR 0015), is specified in
   `crates/robot-sim/SIMULATION_SPECS.md` and informed by research against
-  MuJoCo's own source, MJX, Brax, CubeCL and `wgpu`. CubeCL passed the Appendix B.6
+  published GPU-batched simulators, CubeCL and `wgpu`. CubeCL passed the Appendix B.6
   qualification for the implemented subset only (ADR 0012); it is not a default
   dependency.
 - **No GUI/rendering or constrained-QP-solver dependency is qualified**, so

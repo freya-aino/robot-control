@@ -19,7 +19,7 @@ any other shipping crate depends on it.
 
 `cargo run -q -p robot-devtools --bin exclusion-gate` exits 1 if any of
 these holds, printing each violation: an excluded runtime (Python
-bindings, PyTorch, JAX, MuJoCo, CycloneDDS crate names or prefixes) is in
+bindings, PyTorch, JAX, the reference simulator, CycloneDDS crate names or prefixes) is in
 `Cargo.lock` under any feature; the feature-off default closure reported
 by `cargo tree --workspace -e normal` contains a package that is not a
 workspace path package; or a crate other than this one lists

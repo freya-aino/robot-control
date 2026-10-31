@@ -71,7 +71,7 @@ cargo test -p <crate-name>      # a single crate
   going through the qualification gates in SPECS.md Section 2.1 and Appendix
   B.6, and without an ADR. Candidates in Appendix B are `unverified` until
   qualified.
-- Do not add Python, PyTorch, JAX, MuJoCo, CycloneDDS, or other excluded
+- Do not add Python, PyTorch, JAX, CycloneDDS, or other excluded
   runtimes to the Cargo dependency closure or the devenv environment.
 - Add native build inputs to `devenv.nix` only when a qualified dependency
   requires them.

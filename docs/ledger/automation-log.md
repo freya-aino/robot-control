@@ -456,3 +456,137 @@ live once written.
 - **Documentation changes:** `crates/robot-sim/src/lib.rs` and `env.rs` (ground contact exists; batching does not), `crates/robot-tasks` lib and README (balance task only), `crates/motion-process`, `crates/motion-retarget`, `crates/robot-adapt` README headers (scope stated as implemented), `crates/robot-learn/src/ppo.rs` header (action bounding not in the policy), `crates/robot-skills/src/descriptor.rs` (stale module reference), `crates/robot-control` module doc and README (no router held; empty temperature/contact inputs; shadow behaviour; 36 tests), `crates/motion-io/README.md` (root pose, limits, 8 tests), `crates/robot-devtools/README.md` (gate; 9 tests), new `crates/robot-sim-gpu/README.md`, new `fixtures/motion/README.md` (the `fixture-internal` license the tests cite), `README.md` robot-skills row (R0 not implemented), `AGENT.md` (23 crates), `SPECS.md` header version `0.7.4-draft`, `docs/ledger/evidence-ledger.md` (canonical `EvidenceState` identifiers in every project-artifact row; row 72 split into its five cells), and the checklist items 0.4, 2.3, 2.1.4, 2.2.3, 2.2.6, 2.3.1-U1, 3.3, 4.10, 4.11, 8.1.1, 12.2.3, A-22, A-25 with their summary lines.
 - **Not changed:** the `hw-supported` reduced envelope (checklist 4.12, 12.1.2) and the residual-command clamp (11.3.5) are safety-case changes that need a per-robot profile and a decision record first; no CI service exists (2.2.4); the fidelity battery still has no contact check (ADR 0008 scope). No commit was made in this pass.
 - **Verification (all exit 0, 2026-10-30):** `cargo fmt --all`; `cargo clippy --workspace --all-targets --offline -- -D warnings`; `cargo run -q -p robot-devtools --bin exclusion-gate --offline` ("ok: 87 default-closure entries, all workspace paths; 472 lockfile packages, none an excluded runtime; 23 manifests, none reach robot-devtools"); `cargo test -p motion-io -p robot-control -p robot-devtools -p robot-sim --offline` 253 passed, 0 failed; `devenv test` (fmt check, clippy, exclusion gate, `cargo test --workspace`) exit 0.
+
+## Entry 2026-10-30 — MuJoCo G1 profile from the official MJCF (implementation)
+
+- **Tool:** Claude Code (Anthropic CLI), project working directory, file-edit and shell access. No subagents in this pass.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified. Earlier entries in this log name Claude Fable 5.1 for work done under that model.
+- **Request:** Add the MuJoCo G1 as a robot, based on the specifications for creating a robot (SPECS.md Section 7.1) and the official G1 USD file.
+- **Artifacts produced:**
+  - `assets/robots/unitree_g1_mujoco/` (`g1_29dof.xml`, `LICENSE`, `PROVENANCE.md`): the official MJCF at `unitreerobotics/unitree_mujoco` commit `1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d`, SHA-256 checked against the pinned commit.
+  - `assets/robots/unitree_g1_usd/` (four USD layers, `LICENSE`, `PROVENANCE.md`): the official USD at `unitreerobotics/unitree_model` commit `b6a8942b0803b6c137e58cef12beb4b03e4a2fa7`, retrieved through the Git LFS batch API and checked against each object ID. The base layer is 28 MB.
+  - `crates/robot-model/src/mjcf.rs` (new): a MJCF importer for the G1's subset, with 21 tests.
+  - `crates/robot-model/src/fixtures.rs`: `unitree_g1_29dof_mujoco()`, `unitree_g1_29dof_mujoco_source_disagreements()`, the fixed-base comparison helpers, and 5 fixture tests (one of them pins the list of 18 disagreements).
+  - `crates/robot-model/README.md`, `docs/decisions/0014-mujoco-g1-import-path.md`.
+- **Verification:** `cargo test --workspace --offline` passed (932 tests, 0 failed); `cargo clippy --workspace --all-targets --offline -- -D warnings` clean; the exclusion gate passed. The unit-test MJCF cases cover refusal by name for each unsupported construct. The official G1's element counts were checked with a standard-library XML parse, not with a USD tool.
+- **Not verified:** the USD layers were not parsed. An attempt to install a USD reader into a scratch environment was refused by the permission policy and not retried. The joint names in the USD could not be read with `strings` because the USDC tokens are compressed. The 18 disagreements between the MJCF and the URDF are recorded, not resolved.
+- **Not changed:** no commit was made in this pass.
+
+## Entry 2026-10-30 — USD model, replay writer and MuJoCo reference removal
+
+- **Tool:** Claude Code (Anthropic CLI), project working directory, file-edit and shell access, and one general-purpose subagent for the `robot-usd` reader (its brief is in the session scratchpad, not the repository).
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`) for the session; the subagent ran on the same configured model. Neither identity is independently verified.
+- **Request:** Remove every reference to the MuJoCo simulator; make the OpenUSD description used by Isaac Sim the simulation model, with complete capture of collision and primitive shapes from the official Unitree G1 USD; update the Markdown to match.
+- **Artifacts produced:**
+  - `crates/robot-usd/` (new, std-only): USDC crate reader with LZ4 and integer codecs, composition of sublayers, variant selections, payloads and references, USDA reader and writer, the replay writer `robot_usd::replay`, the example `usd_dump`. Byte layouts follow OpenUSD commit `84d8ed1ae0337ce30dca8d91a3fbe7f04eebc358`.
+  - `crates/robot-model/src/usd.rs` (new): builds the G1 profile from the USD layer, with an import report, the floating-base variant and 9 tests on the vendored layers.
+  - `crates/robot-cli/src/commands/usd_replay.rs` (new), and `sim multibody` now loads the USD model and writes `replay.usda` into the output folder.
+  - `ADR 0015` (accepted), `ADR 0014` (withdrawn tombstone), `ADR 0005` and `0011` (superseded banners), `SPECS.md` revision 0.8.0-draft.
+  - `outputs/g1-zero-torque-usd-replay/` (replay, run log, README).
+- **Removed:** the MJCF importer, the MuJoCo G1 fixture and its asset directory, and the MuJoCo wording in the Rust crates, the live Markdown, the devenv comments and `.gitignore`.
+- **Kept on purpose:** the exclusion gate's deny list (a guard against foreign runtimes entering the build, ADR 0013); the evidence ledger, the automation log and the audit checklists, which record past work; and the vendored Unitree URDF and its provenance, whose upstream file contains a `<mujoco>` element that the provenance quotes.
+- **Verification:** `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test --workspace` passed; the exclusion gate passed. The reader decodes all four G1 layers (spec counts root 13, base 1181, physics 850, sensor 2). The zero-pose kinematics from the USD agree with the URDF to 1.5e-8 m. The replay was read back with `robot-usd`, which parses its time samples.
+- **Not verified:** Blender and OpenUSD tools were not run; the attempt to install a USD library was refused by the permission policy and not retried. The contact forces are not exposed by `robot-sim` and are not in the replay.
+- **Open:** deletion of the robot-sim spec pages and restoration of the scrubbed audit records were refused by the permission policy and not done. The 53 formula identifiers inherited from the removed simulator remain in doc comments.
+- **Not changed:** no commit was made in this pass.
+
+## Entry 2026-10-30 — openusd in the devenv, shader warnings, Blender import check
+
+- **Tool:** Claude Code (Anthropic CLI), project working directory, file-edit and shell access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Add OpenUSD to the devenv; make loading the USD warn, rather than fail, about Omniverse-only shaders.
+- **Artifacts produced:** `devenv.nix` (`openusd` in `packages`, nixpkgs attribute confirmed with `nix eval`); `crates/robot-usd/src/diagnostics.rs` (`shader_warnings`); `robot_model::usd::import_fixed_base_with_warnings` and its test; `robot sim multibody` prints the warnings and continues; ADR 0015 and the READMEs.
+- **Verification:** `nix-instantiate --parse devenv.nix` ok; `cargo fmt --check`, clippy with `-D warnings`, and `cargo test --workspace` (951 passed) pass; the exclusion gate passes; `usdchecker` accepts the replay; Blender (headless) imports it with 66 objects, frames 0 to 19999, and a pelvis track matching the simulator output.
+- **Not verified:** `devenv shell` was not run in this environment, so the package is confirmed to resolve but not to build in a fresh shell.
+- **Not changed:** no commit was made in this pass.
+
+## Entry 2026-10-30 — SPECS 0.8.1-draft: USD source of truth and contact coverage
+
+- **Tool:** Claude Code (Anthropic CLI), project working directory, file-edit and shell access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Update SPECS for the USD collision model and the physics gap.
+- **Artifacts produced:** `SPECS.md` revision 0.8.1-draft: Section 2.2 (OpenUSD as a development tool, not a dependency), Section 7.1 (USD as the reference embodiment and the import requirements), Section 7.3 (replays as USD time samples; contact to be recorded once exposed), Section 9.1 (contact for every declared collision shape; the zero-torque collapse as a limitation until then), Section 14 rows A-40 to A-42.
+- **Verification:** the SPECS diff was read back; the G1 pelvis collision is a mesh prim (`pelvis_contour_link`) confirmed with `usd_dump`. The per-link collision inventory probe did not complete in this pass and its numbers are not recorded.
+- **Not done:** the contact implementation for box, cylinder and mesh-vertex shapes is not written. Section 9.1 states that it is required and not yet implemented.
+- **Not changed:** no commit was made in this pass.
+
+## Entry 2026-10-30 — G1 USD runs and OpenUSD validation
+
+- **Tool:** Claude Code (Anthropic CLI), project working directory, file-edit and shell access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Run the G1 USD simulation and export under `outputs/`, now that OpenUSD is installed.
+- **Runs:** `robot sim multibody --floating` (PD stance) and `--zero-torque`, both from the USD model, writing `replay.usda` and the frame dump under `outputs/`.
+- **Verification:** the PD stance passes its supported-stance checks; the zero-torque run fails as expected. Both `replay.usda` files pass `usdchecker` (OpenUSD from the system path) and `usdcat` reads them. Blender imports the stance replay: 66 objects, frames 0 to 19999, pelvis track animated.
+- **Artifacts:** `outputs/g1-stance-usd-replay/`, `outputs/g1-zero-torque-usd-replay/` (READMEs, runs, warnings, replays); `outputs/README.md` index.
+- **Not changed:** no code or spec changes; no commit was made.
+
+## Entry 2026-10-30 — Blender replay: visual meshes and playback rate
+
+- **Tool:** Claude Code (Anthropic CLI), project working directory, file-edit and shell access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Fix two problems in the Blender import of the replay: the G1 mesh did not appear, and playback did not move.
+- **Cause (mesh):** the replay wrote only references to the visual meshes. **Cause (playback):** Blender keeps its 24 fps rate and maps each time code to a frame; the full replay of 20000 frames would take about 14 minutes to play, and the stance hold barely moves in the first seconds.
+- **Changes:** `robot_usd::replay` writes `Mesh` prims with points and faces; `robot_model::usd::import_visual_meshes` reads the G1 visual meshes; `sim multibody --out` writes `replay_playback.usda` (100 time codes per second) next to `replay.usda`; the READMEs and ADR 0015 explain the frame rate.
+- **Verification:** `usdchecker` passes on all four replays. Blender (headless) imports the playback replays with 36 mesh objects, frames 0 to 199, and the pelvis track moves as the simulator reports.
+- **Also found:** `outputs/` was empty when checked in this session. The runs were regenerated from the simulator; the earlier replays are not recoverable from the repository.
+- **Not changed:** no commit was made in this pass.
+
+## Entry 2026-10-30 — SPECS 0.8.2-draft: hard limits, contact modes, self-collision
+
+- **Tool:** Claude Code (Anthropic CLI), file-edit access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Plan the fixes for joint limits and self-collision, asking for decisions; then record the decisions in SPECS.
+- **Findings (code, 2026-10-30):** `robot-sim` has no joint-limit constraint and no link-to-link collision. Only sphere shapes take part in ground contact; every other shape is counted as unmodelled. The USD importer reads the limits correctly (they match the URDF to 1e-4 rad), so the defect is in the dynamics.
+- **Changes:** `SPECS.md` 0.8.2-draft: Section 7.1 (authored pelvis and torso proxies), Section 9.1 (hard limits with a proximity signal, primitive and convex-hull contact modes, all-pairs self-collision with adjacency rules, performance deferred to a GPU machine), acceptance rows A-43 to A-46.
+- **Open:** the proximity margin band, the allowed overlap depth at joints, and the source of the pelvis and torso proxy dimensions are awaiting the user's decision.
+- **Not changed:** no simulator code; no commit was made.
+
+## Entry 2026-10-30 — SPECS decisions: limit proximity band, joint overlap, proxies
+
+- **Tool:** Claude Code (Anthropic CLI), file-edit access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Decisions recorded in SPECS 9.1 and 7.1 (0.8.2-draft):** the proximity signal uses the lowest 5 % and highest 95 % of each hinge's total range; the initial joint overlap is 3 mm, marked as a placeholder that may need a per-joint balancing algorithm; pelvis and torso proxies are fitted to the bounding boxes of their USD collision meshes, with the fitting method recorded.
+- **Not changed:** no simulator code; no commit was made.
+
+## Entry 2026-10-30 — Hard joint limits in the simulator (plan step 1)
+
+- **Tool:** Claude Code (Anthropic CLI), file-edit and shell access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Start implementing the plan: hard joint limits with a proximity signal.
+- **Changes:** `robot-sim` articulated body: each bounded hinge's USD range is a hard limit (active-set constraint torques solved from `M⁻¹` columns, positions clamped with outward velocity removed), plus `limit_fractions`, `step_with_ground_recording`. `robot-usd` replay: `robot:limitTorque`, `robot:limitFraction`, `robot:limitProximity`. `robot-cli`: captures the limit channels and prints the worst excursion. The fidelity probe tests now assert the measured `pass`; the ledger records the change.
+- **Verification:** a pendulum released against a ±0.3 rad limit stays in range, reaches it, and carries a constraint torque; without the limit it swings past 1 rad; without ground contact a limited pendulum adds no energy. The workspace passed (954 tests). The G1 zero-torque and PD stance runs have zero steps outside any range; both replays pass `usdchecker`.
+- **Found, not resolved:** the zero-torque G1 kinetic energy peak rises to about 660 J, above the roughly 550 J released by the drop, so about 110 J is injected. A limit-only pendulum injects none, so the suspect is the existing penalty ground contact under explicit integration. Not investigated in this pass.
+- **Not done:** convex-hull and primitive contact for every shape, pelvis and torso proxies, joint-adjacent overlap, self-collision (plan steps 2 to 4).
+- **Not changed:** no commit was made.
+
+## Entry 2026-10-30 — Ground plane collider in a scene layer
+
+- **Tool:** Claude Code (Anthropic CLI), file-edit and shell access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Give the ground plane a collider in the USD, and document that it was added to the original USD.
+- **Changes:** `assets/scenes/g1_ground.usda` (new scene layer: sublayers the unmodified G1 layer, adds the `Plane` collider) and `assets/scenes/README.md`; `robot_model::usd::import_ground_plane`; the simulator reads the ground from the scene (the `FLOATING_GROUND` constant is removed); the replay writes `/replay/ground`; SPECS 0.8.3-draft; ADR 0015 and the output READMEs.
+- **Decision:** the ground was not written into the vendored Unitree layer. Its SHA-256 is pinned in PROVENANCE.md, so a change would break provenance. The provenance record states this.
+- **Verification:** the Unitree layers' SHA-256 values are unchanged. The scene composes with the reader. The PD stance run output is identical to the printed precision. The zero-torque run differs slightly from about 0.4 s on, because the friction is stored as float32. Both replays pass `usdchecker`, and the replay contains the ground prim.
+- **Not changed:** no commit was made.
+
+## Entry 2026-10-30 — Universal environment tags
+
+- **Tool:** Claude Code (Anthropic CLI), file-edit and shell access. No subagents.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Make collision universal across scenes through the tags `environment` and `collider`.
+- **Changes:** `robot_model::usd::import_environment` (tag-based, any scene, any depth), `TAG_ENVIRONMENT`/`TAG_COLLIDER`; the simulator reads the environment from `--scene` (default the G1 ground scene), refuses tagged shapes it cannot contact, places the robot on the plane height; the replay writes the plane with its tags; `assets/scenes/examples/` (tagging example, raised plane); SPECS 0.8.4-draft; ADR 0015 and the scene README.
+- **Found and fixed:** the stance was placed relative to z = 0, not the environment plane.
+- **Verification:** the importer tests cover the tag rules on the example scene; the raised plane stands the robot at its height with the same 5 mm sphere penetration as the default ground; the G1 PD stance passes and the zero-torque run fails as before; both replays pass `usdchecker`. Workspace: 957 tests, clippy and formatting clean.
+- **Not done:** contact for boxes, spheres, cylinders and meshes tagged as environment (refused by name for now); self-collision.
+- **Not changed:** no commit was made.
+
+
+## Entry 2026-10-31 — Attached-agent robot discovery requirements
+
+- **Tool:** Claude Code (Anthropic CLI), file-edit and shell access.
+- **Model identity/version:** Claude Haiku 5.5 (`claude-haiku-5-5`), as selected in the session; not independently verified.
+- **Request:** Add to the specification the requirements for a method by which an agent attaches to a robot and learns its motion, ranges, inertia and tests, and gathers external information through web search.
+- **Changes:** SPECS 0.8.5-draft: Section 7.7 (sources and ranking, motion and range, bounded commissioning probe, inertial parameters, tests, web research as proposals, conflicts, activation refusal, reproducibility, offline degradation, staleness, feature gating); acceptance rows A-47 to A-50; open question C-29 on whether the method is an admissible use beyond U1 to U3.
+- **Decision:** The method is development tooling. Its hardware probe is not admissible until C-29 is decided. No agent may activate a profile.
+- **Verification:** Specification text only; no code changed, no tests run.
+- **Not changed:** no commit was made; no decision record written yet (tracked as C-29).

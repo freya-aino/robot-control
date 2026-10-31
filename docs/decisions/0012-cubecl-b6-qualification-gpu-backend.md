@@ -93,18 +93,18 @@ Candidate: `cubecl` 0.11.3 (crates.io), with the `wgpu` feature only, built with
    - Compared against `robot_sim` functions: `integrators::semi_implicit_euler_step`, `passive::joint_spring_force`,
      `passive::joint_damper_force`, `passive::affine_actuator_force`, `constraint::joint_equality_row`,
      `constraint::impedance`, `contact::plane_sphere_contact`.
-   - Also compared: `integrators::implicit_damping_euler_step` (MuJoCo 3.17.0 `engine_forward.c`,
+   - Also compared: `integrators::implicit_damping_euler_step` (reference formulation `engine_forward.c`,
      `mj_EulerSkip` damping branch). It is a real per-environment dense solve: one GPU thread per
      environment builds `M + dt*diag(B)` in a per-thread `6 x 6` local array, runs the CPU's Cholesky
      loop order and applies semi-implicit Euler. It is limited to `nv <= 6` (`MAX_DOF`); larger systems
      are rejected with a typed error. Layout is row-major `n_env x nv` (`q`, `qd`, `damping`, `bias`)
      and `n_env x nv x nv` (`mass`). A non-SPD environment (non-positive or non-finite pivot in `f32`)
-     keeps its state and reports `status = 0`; MuJoCo clamps the pivot (`mj_factorI`) instead. Host
+     keeps its state and reports `status = 0`; the reference simulator clamps the pivot (`mj_factorI`) instead. Host
      checks mirror the CPU contract (finite inputs, `dt >= 0`, `damping >= 0`, symmetric `M`), except
      that symmetry uses `1e-6 * max|M|` in `f32` where the CPU uses `1e-12` in `f64`.
    - Equality-only `constraint::solve_equality` is also ported: per-environment `nv,nrow <= 6`,
      exact `DIAGEXACT` diagonal, zero equality margin, `getsolparam`, `getimpedance`,
-     `mj_makeImpedance`, `mj_referenceConstraint` and `mj_makeARNumeric` from MuJoCo 3.17.0
+     `mj_makeImpedance`, `mj_referenceConstraint` and `mj_makeARNumeric` from the reference simulator 3.17.0
      `engine_core_constraint.c` (commit `800a109a`). One thread performs per-row `M^-1 J^T`
      and an `(A+R)` solve; three packed storage buffers avoid the 8-binding default limit.
      A non-SPD environment retains force, acceleration and clamp outputs, and reports status 0.
@@ -147,7 +147,7 @@ or be excluded from the workspace.
 1. **Accept CubeCL 0.11.3 as an optional GPU backend** in `crates/robot-sim-gpu` under feature `cubecl`.
 2. **Qualify measured capability only:** f32 elementwise and per-environment dense Cholesky kernels
    on Intel Vulkan and Mesa Lavapipe, checked against the f64 CPU core. Both dense kernels use an
-   `n_env × nv` layout; equality also uses `n_env × nrow × nv` Jacobians. Timing and count-only resources are measured for the RK4 and equality batches only. Determinism is measured within one process on one device. Cross-device determinism is not claimed. No batch throughput or MuJoCo parity is claimed.
+   `n_env × nv` layout; equality also uses `n_env × nrow × nv` Jacobians. Timing and count-only resources are measured for the RK4 and equality batches only. Determinism is measured within one process on one device. Cross-device determinism is not claimed. No batch throughput or the reference simulator parity is claimed.
 3. **Keep `robot-sim` pure:** `robot-sim` retains `#![forbid(unsafe_code)]` and zero external dependencies.
 
 ## Test Commands
@@ -184,7 +184,7 @@ or be excluded from the workspace.
 | Pendulum RK4 (`gpu_rk4_pendulum_step`), 4097 envs, 1000 steps, `dt = 1e-3`, `g/L = 9.81` | trajectory | abs `1e-4` on theta and omega | measured max error vs CPU f64 `rk4_step` with the same closure: theta 1.12e-5 at env 4091 (Intel), 1.13e-5 at env 4091 (Lavapipe); omega 2.42e-5 at env 3404 (Intel), 1.13e-5 at env 4009 (Lavapipe). Asserted by `rk4_pendulum_4097_envs_1000_steps_match_cpu_within_recorded_tolerance`; recorded in `crates/robot-sim-gpu/tolerances.toml`. |
 | Constraint impedance `d` and `impP`, 4097 rows | single_launch | abs `1e-5` on `d`, abs `1e-4` on `impP` | measured max error vs CPU f64 `impedance`: `d` 3.0e-8 at row 1923 (Intel), 3.1e-8 at row 1972 (Lavapipe); `impP` 3.1e-6 at row 2009 (Intel), 4.5e-6 at row 1982 (Lavapipe). Asserted by `constraint_impedance_4097_rows_match_cpu_within_recorded_tolerance`; the tolerances are read from `tolerances.toml`, which is authoritative. |
 
-`crates/robot-sim-gpu/tolerances.toml` is authoritative for scenario names, tier labels (`trajectory`, `single_launch`) and tolerance values where this table disagrees with it. The feature-gated GPU tests read `tolerance_abs` and the dimensions from that file through `tests/common/mod.rs`, so the file is the source of the bound they assert. `tests/tolerance_records.rs` parses the file in the default (feature-off) build and checks each recorded measured value against its tolerance and that the index fields are present. These are GPU-vs-CPU agreement records only; no `fidelity.toml` row or MuJoCo parity is claimed. The random-SPD implicit and equality batch rows are recorded in `tolerances.toml`. The hand-derived unit tolerances (implicit 1, 2 and 3 DOF, equality scalar and coupled) and the elementwise rows are still ADR prose and are not yet rows there.
+`crates/robot-sim-gpu/tolerances.toml` is authoritative for scenario names, tier labels (`trajectory`, `single_launch`) and tolerance values where this table disagrees with it. The feature-gated GPU tests read `tolerance_abs` and the dimensions from that file through `tests/common/mod.rs`, so the file is the source of the bound they assert. `tests/tolerance_records.rs` parses the file in the default (feature-off) build and checks each recorded measured value against its tolerance and that the index fields are present. These are GPU-vs-CPU agreement records only; no `fidelity.toml` row or the reference simulator parity is claimed. The random-SPD implicit and equality batch rows are recorded in `tolerances.toml`. The hand-derived unit tolerances (implicit 1, 2 and 3 DOF, equality scalar and coupled) and the elementwise rows are still ADR prose and are not yet rows there.
 
 ## Consequences of this revision
 
@@ -198,4 +198,4 @@ or be excluded from the workspace.
 
 - The default `devenv test` gate remains green. The default build of `robot-sim` has no `unsafe` and no CubeCL dependency; `robot-sim-gpu` compiles CubeCL only with `--features cubecl`.
 - CPU-vs-GPU agreement is verified against the CPU core within the scenario-specific tolerances above on two Vulkan devices (Lavapipe and Intel), for implemented functions only.
-- Determinism (gate 4) is measured within one process on one device for the RK4 and equality batches, on two devices; it is not cross-device. Timing (gate 3) is measured for the RK4 and equality batches only, with count-only resource formulas and no throughput claim. The GPU stage is partial: the general closure-based RK4, full contact/friction/limit solving and the general G1/ABA batched dynamics are not ported; dense solves do not exceed six DOF or equality rows. No MuJoCo runtime, parity or throughput claim is made.
+- Determinism (gate 4) is measured within one process on one device for the RK4 and equality batches, on two devices; it is not cross-device. Timing (gate 3) is measured for the RK4 and equality batches only, with count-only resource formulas and no throughput claim. The GPU stage is partial: the general closure-based RK4, full contact/friction/limit solving and the general G1/ABA batched dynamics are not ported; dense solves do not exceed six DOF or equality rows. No the reference simulator runtime, parity or throughput claim is made.

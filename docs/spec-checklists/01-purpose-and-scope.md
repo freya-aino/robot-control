@@ -17,7 +17,7 @@ Deliverables include reusable crates, command-line tools, declarative experiment
 
 ### 1.1 Relationship to prior repository contents
 
-This repository previously contained a Python stack: `training/` (PyTorch, JAX, MuJoCo MJX, Warp, Hydra, MLflow, ONNX export), `unitree/` (CycloneDDS configuration and a Unitree SDK connector) and `test.ipynb`. That code was removed from the working tree on 2026-10-26, which closes the divergence from Section 2 that [C-01](#appendix-c--open-questions-and-unresolved-decisions) tracked. The working tree now contains documentation only, and the Rust workspace of Section 6 is unwritten; the specification states the disposition of the retired assets because they remain reachable in version control and are still cited as prior art.
+This repository previously contained a Python stack: `training/` (PyTorch, JAX, the reference simulator batched backend, Warp, Hydra, MLflow, ONNX export), `unitree/` (CycloneDDS configuration and a Unitree SDK connector) and `test.ipynb`. That code was removed from the working tree on 2026-10-26, which closes the divergence from Section 2 that [C-01](#appendix-c--open-questions-and-unresolved-decisions) tracked. The working tree now contains documentation only, and the Rust workspace of Section 6 is unwritten; the specification states the disposition of the retired assets because they remain reachable in version control and are still cited as prior art.
 
 | Retired asset | Disposition after removal |
 | --- | --- |

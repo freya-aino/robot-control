@@ -26,7 +26,7 @@ This README does not restate them.
 Batched articulated (G1/ABA) dynamics, any contact, friction or limit
 solver, the contact-slot budget and its exhaustion counter, the general
 closure-based RK4, dense solves above six DOF, and cross-device
-determinism. No throughput or MuJoCo-parity claim is made; the fidelity
+determinism. No throughput claim and no simulator-parity claim is made; the fidelity
 battery of `robot-sim` does not run on this crate.
 
 ## Testing

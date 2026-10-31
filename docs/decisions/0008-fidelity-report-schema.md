@@ -36,7 +36,7 @@ rejected rather than silently interpreted as a complete production report. The
 v6 series rows are abs-only: `tolerance_rel` must be exactly zero, because a
 stored maximum raw error and its index cannot reconstruct a pointwise relative
 pass decision. These results are source-faithful checks against an analytic
-oracle; they are not measured parity with MuJoCo.
+oracle; they are not measured parity with the reference simulator.
 
 ## Context
 
@@ -161,7 +161,7 @@ until a GPU backend exists and must still appear in the report.
      and its `sample` index. The archival reader does not re-run the series, so
      `reproduce` is the only path that checks the stored `measured` and `sample`
      bit-for-bit against a fresh run. This is a source-faithful
-     check against an analytic oracle, not measured MuJoCo parity.
+     check against an analytic oracle, not measured the reference simulator parity.
    - `pd_equilibrium`: `|theta_end - theta_target|` for a gravity-compensated PD
      pendulum after 20 s, tolerance 1e-4 rad.
    - `aba_rne_closed_form`: max absolute error of the articulated point-mass pendulum

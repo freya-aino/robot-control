@@ -9,7 +9,7 @@ going: GPU-bound, batched execution across thousands of environments,
 variable fidelity as a first-class interface, a Rust-native GPU-compute
 path, and a backend-agnostic boundary so every other crate depends on
 `Environment` and never on a physics-backend-specific type. It is grounded
-in direct research against MuJoCo's own source/docs, MJX, Brax, CubeCL,
+in direct research against published GPU-batched simulators, CubeCL,
 `wgpu` and Candle — read `SIMULATION_SPECS.md` before extending anything
 below; this README describes what exists today, that document describes
 what it's becoming.
@@ -19,21 +19,21 @@ what it's becoming.
 | Module | Contents |
 | --- | --- |
 | `pendulum` | `Pendulum`: a damped, actuated pendulum integrated by semi-implicit Euler — the first qualification benchmark Appendix B.4 names |
-| `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names. `GroundContact`: the per-sphere penalty law (regularised Coulomb friction, separation clamp) used by articulated bodies; see ADR 0010. `plane_sphere_contact`: pure `+z` plane-sphere geometry from MuJoCo 3.17.0 `mjraw_PlaneSphere` (signed distance, normal, contact point, margin); the penalty force stays in `GroundContact` |
+| `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names. `GroundContact`: the per-sphere penalty law (regularised Coulomb friction, separation clamp) used by articulated bodies; see ADR 0010. `plane_sphere_contact`: pure `+z` plane-sphere geometry from the standard formulation (signed distance, normal, contact point, margin); the penalty force stays in `GroundContact` |
 | `env` | `Environment` trait (reset/step/seeded randomization) and `PendulumEnv`, a trainable RL environment wrapping `pendulum` |
 | `backend` | `Backend: Environment` adds `backend_name()`; implemented for `PendulumEnv` (`cpu-pendulum`) |
 | `multibody_env` | `MultibodyEnv`: `Environment` and `Backend` over `ArticulatedBody`. Without `with_ground` it steps `MultibodyState::step` (`cpu-multibody`, a floating base falls). With a `GroundContact` attached it steps `step_with_ground` (`cpu-multibody-ground`). Rejects a wrong-length `q_home` with `WidthMismatch` |
 | `spatial` | Spatial-vector algebra on plain arrays (`[f64; 3]` vectors, row-major `[f64; 9]` rotations, `[f64; 6]` motion/force vectors, `[f64; 36]` spatial inertia) — the 6D motion/force representation the multi-body solver is built on. Uses `std` only; no `robot_types` or `robot_model` types |
 | `fidelity` | Fidelity harness (ADR 0008, schema v7): `FidelityCheck` plug-in trait, `run_checks`, the archival seven-check analytic battery (the v6 seventh check `pendulum_trajectory` compares the 1 rad angle series with `oracle::pendulum_closed_form` through `oracle::compare_series`, abs-only, with a per-check `sample` index) at the `reference` (100 µs) and `coarse` (1 ms) tiers, per-check `system` attribution, `[[contact]]` G1 applicability per tier, GPU checks recorded as not applicable, the measured G1 zero-torque `[[probe]]` row (v7, scenario runner `g1_zero_torque_probe`), and a strict TOML report reader/writer through `robot-artifacts`. Scope is the analytic subset plus one measured probe; it does not qualify G1 ground contact |
 | `oracle` | Pure `std` oracle module, no `robot_types`, `robot-model` or `HashMap` types: `pendulum_closed_form` (exact pendulum angle for any release angle, Landen/AGM `sn`, domain `\|theta0\| < pi`, complementary modulus from `cos`), `pendulum_period`, `energy_drift` (zero and non-finite `E(0)` guarded only), `compare_series` (explicit `LengthMismatch`, `EmptySeries`, `InvalidTolerance` errors; pass per sample `\|r - c\| <= abs + rel*\|r\|`) returning `OracleReport` |
-| `integrators` | Pure `std` integrators ported from MuJoCo 3.17.0 `engine_forward.c`: `semi_implicit_euler_step` (`mj_advance` order), `implicit_damping_euler_step` (`mj_EulerSkip` damping branch, Cholesky solve, `None` and unchanged state on a non-SPD system or non-finite inputs), `rk4_step` (`mj_RungeKutta`, N=4). Scalar joints only; not wired into `MultibodyState::step` |
-| `passive` | Pure `std` passive and actuator forces from MuJoCo 3.17.0: `joint_spring_force` and `joint_damper_force` (`mj_springdamper`, linear case), `affine_actuator_force` (`mj_fwdActuation`, `GAIN_AFFINE`/`BIAS_AFFINE`). Polynomial, muscle, tendon, flex and gravity-compensation terms are not ported |
-| `constraint` | Pure `std` equality-constraint subset from MuJoCo 3.17.0 `engine_core_constraint.c`: `joint_equality_row` (`mjEQ_JOINT`, one or two scalar joints with the quartic coupling), `impedance`, `stiffness_damping`, `effective_timeconst` (`2*dt` clamp, mixed-format refusal), and `solve_equality`, a closed-form solve of an equality-only problem returning forces, `qacc` and clamped rows. Not wired into `MultibodyState::step`. Not ported: connect, weld and tendon rows, friction, limit and contact rows, the iterative solvers |
+| `integrators` | Pure `std` integrators implemented from the standard formulation: `semi_implicit_euler_step` (`mj_advance` order), `implicit_damping_euler_step` (`mj_EulerSkip` damping branch, Cholesky solve, `None` and unchanged state on a non-SPD system or non-finite inputs), `rk4_step` (`mj_RungeKutta`, N=4). Scalar joints only; not wired into `MultibodyState::step` |
+| `passive` | Pure `std` passive and actuator forces from the standard formulation: `joint_spring_force` and `joint_damper_force` (`mj_springdamper`, linear case), `affine_actuator_force` (`mj_fwdActuation`, `GAIN_AFFINE`/`BIAS_AFFINE`). Polynomial, muscle, tendon, flex and gravity-compensation terms are not ported |
+| `constraint` | Pure `std` equality-constraint subset implemented from the standard formulation: `joint_equality_row` (`mjEQ_JOINT`, one or two scalar joints with the quartic coupling), `impedance`, `stiffness_damping`, `effective_timeconst` (`2*dt` clamp, mixed-format refusal), and `solve_equality`, a closed-form solve of an equality-only problem returning forces, `qacc` and clamped rows. Not wired into `MultibodyState::step`. Not ported: connect, weld and tendon rows, friction, limit and contact rows, the iterative solvers |
 | `articulated` | `ArticulatedBody`: multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, including a floating base. Sphere ground contact (`forward_dynamics_with_ground`, `step_with_ground`, `lowest_contact_height`), a clamped PD `stance_torques` hold, plus `MultibodyState`, a semi-implicit-Euler stepper. Box, cylinder and mesh shapes are counted, not modelled (ADR 0010) |
 
 ## What this crate has and does not yet have
 
-Steps 5 and 6 (MuJoCo 3.17.0 source-faithful ports, pure `std`: `integrators`,
+Steps 5 and 6 (standard-formulation ports, pure `std`: `integrators`,
 `passive`, `constraint`, and the plane-sphere geometry in `contact`) are
 implemented as standalone functions with hand-derived tests. Not yet
 implemented: wiring them into `MultibodyState::step`; free and ball
@@ -47,7 +47,7 @@ collision pairs.
 `spatial`/`articulated` are a real, validated multi-body dynamics solver
 (see their own doc comments and `SIMULATION_SPECS.md` §4 item 1: their
 RNE core is a research-pass implementation, informed by direct comparison
-against MuJoCo's own source, not a re-derived parity proof), and it now handles
+against a textbook derivation, not a parity proof), and it now handles
 a floating base:
 `robot_model::joint::JointKind::Free` gives a profile's root six
 unconstrained degrees of freedom against an explicit `world` link, and
@@ -97,8 +97,8 @@ through the stepper surfaced a genuine, now-documented instability. With zero
 applied torque on the floating G1 and sphere ground contact, semi-implicit Euler
 at `dt = 5e-4` s hits a singular joint inertia matrix at step 2236 (about 1.12
 simulated seconds), recorded as a measured `[[probe]]` row (`status = "fail"`, `error = "SingularJointInertia"`, owned by `fidelity.rs`); the row does not change `all_pass`. The failure is also a model-coverage limit: the pelvis and torso carry no collision geometry, so the trunk reaches the plane through unmodelled shapes once the legs fold, and the row does not isolate the integrator's share. The clamped PD stance hold stays finite over 2 s at the same `dt`. `SIMULATION_SPECS.md` §4 item 3 ties this directly to a
-textbook cause confirmed by reading MuJoCo's own integrator
-documentation: even MuJoCo's "simple" default integrator already folds
+textbook cause, confirmed by the integrator's own
+documentation: even the simple default integrator already folds
 joint-damping derivatives into an implicit solve, specifically because
 plain explicit/semi-implicit integration isn't stable at a usable
 timestep on a system with small distal masses and large effective

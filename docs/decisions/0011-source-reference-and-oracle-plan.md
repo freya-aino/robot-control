@@ -1,4 +1,6 @@
-# 0011. MuJoCo as a source reference: oracle plan, pure CPU core, CubeCL gate
+# 0011. the reference simulator as a source reference: oracle plan, pure CPU core, CubeCL gate
+
+> Superseded by ADR 0015. Kept as history.
 
 Status: accepted for the source-reference decision, the oracle approach, the
 pure-core rule and the gating of the GPU stage. The CubeCL GPU backend is not
@@ -8,37 +10,37 @@ No GPU dependency is added by this decision.
 ## Context
 
 `crates/robot-sim/SIMULATION_SPECS.md` (263 lines) set the target of a
-GPU-batched simulator "on par with MuJoCo" and named MuJoCo 3.17.0 at commit
+GPU-batched simulator "on par with the reference simulator" and named reference formulation at commit
 `800a109a4bdd02cb60404d565db4ae16fb04a53b` as the research reference
-(Appendix A). An earlier draft of step 04 proposed running MuJoCo in a
-non-default `mujoco-baseline` devenv profile and committing its trace files
-under `fixtures/robot-sim/mujoco/`, with the Rust gate replaying them. That
+(Appendix A). An earlier draft of step 04 proposed running the reference simulator in a
+non-default `reference-baseline` devenv profile and committing its trace files
+under `fixtures/robot-sim/reference/`, with the Rust gate replaying them. That
 draft was superseded. It would have put a foreign runtime and generated data
 into the repository, against `SPECS.md` Section 2 and ADR 0005, which keeps
-MuJoCo as a design reference, not a dependency.
+the reference simulator as a design reference, not a dependency.
 
-The user's direction is to transfer MuJoCo's simulation algorithms into
+The user's direction is to transfer the reference's simulation algorithms into
 native Rust, check them with analytic oracles and conservation laws, and
-port the same algorithms to a GPU backend later. MuJoCo must not enter the
+port the same algorithms to a GPU backend later. the reference simulator must not enter the
 repository in any form.
 
 ## Decision
 
-1. **MuJoCo is a source reference, not a runtime.** Each ported function
-   cites the pinned MuJoCo 3.17.0 file and function (commit `800a109a`).
-   No MuJoCo binding, FFI, Python sidecar, trace file, fixture, profile or
-   devenv package is added. An uncommitted `profiles.mujoco-baseline` block
+1. **the reference simulator is a source reference, not a runtime.** Each ported function
+   cites the pinned reference formulation file and function (commit `800a109a`).
+   No the reference simulator binding, FFI, Python sidecar, trace file, fixture, profile or
+   devenv package is added. An uncommitted `profiles.reference-baseline` block
    in `devenv.nix` was removed; `devenv.nix` matches the commit again.
 
 2. **Fidelity is checked by an oracle plan, not by parity.** The checks are
    (a) analytic closed forms (pendulum), (b) conservation laws (energy,
-   momentum), and (c) reference values derived by hand from MuJoCo's
+   momentum), and (c) reference values derived by hand from the reference's
    documented equations, with the derivation written in the test. Each
    tolerance is recorded with its scenario and tier. Every report describes
    the result as a **source-faithful port with oracle checks**. No report
-   claims measured parity with MuJoCo, because no MuJoCo output is in the
+   claims measured parity with the reference simulator, because no the reference simulator output is in the
    loop. The oracle plan and the tolerance table are in
-   `crates/robot-sim/specs/04-mujoco-fidelity-loop.md`.
+   `crates/robot-sim/specs/04-fidelity-loop.md`.
 
 3. **Strict pure core.** Algorithm modules (`spatial`, `articulated`,
    integrators, passive forces, constraints, the oracle module) use `std`
@@ -59,13 +61,13 @@ repository in any form.
 
 ## Consequences
 
-- Passing oracle checks does not prove MuJoCo parity. Any document that
+- Passing oracle checks does not prove the reference simulator parity. Any document that
   states otherwise is wrong and must be corrected.
 - Hand-derived reference values may be wrong. Each one needs a second
   derivation in its test before it is relied on.
 - The G1 floating-base fall at `dt = 5e-4` (outside the ADR 0010 range) is a
   failing fidelity row once measured. It is not `#[ignore]`d.
-- Any binding-based cross-engine comparison against MuJoCo itself stays
+- Any binding-based cross-engine comparison against the reference simulator itself stays
   under the `SPECS.md` Section 2.1 exception procedure. This decision does not
   request it.
 - The specs under `crates/robot-sim/specs/` and `SIMULATION_SPECS.md` (now a

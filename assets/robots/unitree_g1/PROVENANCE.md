@@ -13,23 +13,12 @@
 ## Why this exact variant
 
 The user asked for "the same version [...] used by
-[HansZ8/RoboJuDo](https://github.com/HansZ8/RoboJuDo)". RoboJuDo does not
-vendor a URDF at all — it vendors the MuJoCo MJCF sibling,
-`assets/robots/g1/g1_29dof_rev_1_0.xml`, and
-`robojudo/config/g1/env/g1_env_cfg.py`'s `G1EnvCfg` (the active/default
-config in `robojudo/config/g1/g1_cfg.py` — the 23-DOF and 12-DOF configs
-are present but commented out) sets:
-
-```python
-xml: str = (ASSETS_DIR / "robots/g1/g1_29dof_rev_1_0.xml").as_posix()
-```
-
-i.e. the same `g1_29dof_rev_1_0` name and DOF count (29: 2×6 leg joints,
-3 waist joints, 2×7 arm joints) this project's URDF importer needs an
-actual URDF for, not MJCF. `unitree_rl_gym` carries the identically-named
-URDF and MJCF side by side in the same directory (same joint names, same
-`_rev_1_0` revision tag), which is the standard pairing Unitree publishes
-for this robot — this URDF is that pairing's URDF half.
+[HansZ8/RoboJuDo](https://github.com/HansZ8/RoboJuDo)". RoboJuDo's G1 default
+is the 29-DOF revision 1.0 robot, the same name and joint set as this URDF.
+Unitree publishes the URDF and the matching scene description side by side in
+`unitree_rl_gym`, and this file is the URDF half of that pair. The scene
+description was removed from the repository by ADR 0015; the G1 model is now
+the OpenUSD asset in `assets/robots/unitree_g1_usd/`.
 
 ## What was and wasn't checked before vendoring
 
