@@ -35,6 +35,8 @@ Formula-level claims for the ported functions are `code_inspected`. The unported
 
 **Open questions**: none blocking. Tendon deferral is a scope choice recorded in old §7 item 4 below, not an open question. Per-tier actuator settings belong to [09](09-fidelity-tiers.md).
 
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) confirms `joint_spring_force`, `joint_damper_force` and `affine_actuator_force` correct as written (section 1.1). M-17 (**gap**): none of the three is reachable from a simulation run. The only actuation path that executes is `ArticulatedBody::stance_torques` — one global `kp`, a per-DOF `kd`, clamped to the joint's effort limit — which does not go through the affine gain/bias formula and does not consult `robot_model`'s `ActuatorSpec` or `PdGains` at all. So item 1's factoring is implemented as an unreachable function while the running code is the ad-hoc path item 1 asks to replace, and the re-examination item 1 calls for has nothing exercising it. M-03 (**defect**, owned by [02](02-pure-dynamics-core.md)) bears directly on item 2: `InertiaTensor::is_physically_plausible`, the pattern this item names for the spring-damper sign-preservation check, accepts an indefinite tensor, so it is a weaker precedent than this item assumes.
+
 ---
 
 ## 7. Actuators, tendons, equality constraints

@@ -124,3 +124,15 @@ Step 4 runs the pendulum trajectory oracle at both declared tiers. Its v6 check 
 - Resolved in Step 4: no `E_floor` constant was added (section 2.2). Only exact zero and non-finite `E(0)` are guarded, and they return NaN. The standalone pendulum energy metric changed to maximum drift; the articulated energy and free-fall final-step metrics remain. Battery tolerances for the `pending` rows of section 2.5 remain for later steps.
 - Resolved in Step 4: `sn` is the Landen recursion in `oracle.rs`, checked against an RK4 integration and a hand-derived power series of `K(m)`. The linear regime of section 2.3 was not used and has no tolerance.
 - No cross-engine comparison against the reference simulator itself is requested here. Any such comparison is subject to the `SPECS.md` Section 2.1 exception procedure.
+
+## Challenges
+
+[Appendix D](appendix-d-mathematical-challenges.md) M-20 (**gap**) is owned here, and Appendix D section 3.1 argues it is the entry that matters most of the twenty-four.
+
+The battery's seven checks — `aba_rne_closed_form`, `articulated_energy_drift`, `energy_drift`, `free_fall`, `pd_equilibrium`, `pendulum_period`, `pendulum_trajectory` — plus the G1 zero-torque probe rows of section 2.6 all exercise a one-degree-of-freedom pendulum, a single free body, or a PD equilibrium. None exercises a contact force, a collision routine, the joint-limit solve, the equality solver, or a multi-degree-of-freedom tree with coupled inertia. Those subsystems have unit tests, but unit tests are not the battery: they carry no tier-indexed tolerance and do not appear in the report this step defines as the record.
+
+That matters because eleven of Appendix D's twenty-four entries, plus the pipeline feeding them, are in the contact and collision path — exactly the region with no archival oracle. The two facts are related: an uncovered subsystem is where divergence accumulates unnoticed. The ordering Appendix D suggests is to extend the battery before or alongside fixing those entries, so each fix is measured rather than asserted.
+
+Nothing new is needed in the oracle *kinds* to do it. This step's three kinds all apply: analytic rest penetration under a declared penalty stiffness is a closed form, and would have failed immediately on Appendix D M-04; frictionless sliding at penalty equilibrium is a conservation law; an analytic sphere-sphere or plane-box penetration depth is a hand-derived reference value for the narrow phase. Two of the three already exist as unit tests in `articulated.rs` and `collision.rs` and would need tier tolerances and a battery entry rather than new derivations.
+
+Appendix D also records, as candidate additions in the same spirit, the derivative-against-finite-difference check of `docs/example-system-mapping.md` §2.8 (`11` §10.3, §10.5) and the quaternion-integration check of §2.2 (`11` §1.7) — the latter being the measurement Appendix D M-01 and M-19 both turn on.

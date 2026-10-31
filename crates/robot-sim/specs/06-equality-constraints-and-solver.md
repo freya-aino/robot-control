@@ -34,6 +34,18 @@ Evidence tags: `code_inspected` for the bodies of the ported functions (read at 
 
 **Open questions**: none blocking for the CPU solver. Appendix B S-02 (CubeCL control flow for an iterative solver) concerns the GPU backend and is owned by [11](11-gpu-batched-backend.md).
 
+**Challenges**: this step owns more of [Appendix D](appendix-d-mathematical-challenges.md) than any other. The ported equality algebra is confirmed correct — the impedance sigmoid and its derivative, the stiffness/damping map, the `2*timestep` clamp, and the substitution giving `(A + diag(R)) f = aref - J qacc_smooth` (Appendix D section 1.1). The challenges are in the **contact** path, which shares none of it:
+
+- M-09 (**divergence**): contact impedance is referred to the constant `CONTACT_REFERENCE_MASS = 1.0` instead of the row's own `A_ii`, the form item 2 requires and the form `solve_equality` already implements for equality rows. The G1's effective masses span about five orders of magnitude (Appendix D M-22), so one constant cannot stand in across them. The matrix `contact_externals` already builds has `A_ii` on its diagonal, so this is a one-line correction.
+- M-10 (**divergence**): friction is applied *after* the normal solve from the solved normal force, so there is no friction cone of either kind and no `condim` — items 1 and 4. Link-against-link rows are frictionless outright, and the tangent plane is hard-coded to `z`.
+- M-11 (**divergence**): the unconstrained acceleration `a_u` omits the `Jdot qd` term (recorded in the code) **and** the spatial-to-classical acceleration conversion (not recorded). The matrix is unaffected; the right-hand side is biased at `O(|qd|^2)`.
+- M-12 (**divergence**): `apply_hard_limits` builds its response matrix with the ground argument `None`, so when a limit and a contact are active in the same step neither force accounts for the other — the concrete cost of the two-solver architecture item 1 rules out.
+- M-08 (**divergence**): hard limits are an acceleration-level active set (sound) plus a position clamp that zeroes outward velocity, discarding kinetic energy with no accounting and admitting no restitution — against item 2, which explicitly motivates the direct stiffness/damping case by elastic restitution.
+- M-13 (**divergence**): `stiffness_damping` selects the `solref` format with `solref[0] > 0` for the stiffness and `solref[1] > 0` for the damping. Latent, because `effective_timeconst` refuses mixed formats on the only path through the crate, but the function is `pub` and validates nothing.
+- M-23 (**cost**): `solve_equality` copies and refactorises `M` once per row, `O(m nv^3)` where `O(nv^3 + m nv^2)` suffices.
+
+Warm-starting (item 7) remains unimplemented, and nothing in the crate searches for the term.
+
 ---
 
 ## 5. Contact and constraint solver

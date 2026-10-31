@@ -6,8 +6,9 @@ Status: proposed architecture for `robot-sim`'s physics layer. Not ratified; no 
 
 | Field | Value |
 | --- | --- |
-| Document version | 0.1.1-draft |
-| Last revised | 2026-10-29 |
+| Document version | 0.1.2-draft |
+| Last revised | 2026-10-31 |
+| Change in 0.1.2-draft | Adds [Appendix D](appendix-d-mathematical-challenges.md), the record of a full implementation audit against these step files and against the non-normative `docs/example-system-specs/`, and adds a **Challenges** field to the steps it found entries against (01–07, 09, 11, 12). Opens Appendix B **S-07** to **S-09** for the three entries needing a specification decision. No requirement, acceptance row or deviations list is changed by this revision; the audit records where the code does not meet the text already here |
 | Companion documents | `SPECS.md` (platform specification; this document inherits its normative-language and evidence-state conventions without restating them), `PLAN.md` Phase 3, `docs/decisions/0005-gpu-batched-simulation-target.md`, `crates/robot-sim/README.md` |
 | Scope | `robot-sim`'s physics engine only: dynamics, contact, collision, actuation, integration and their GPU-batched execution. Motion capture, retargeting, learning algorithms and hardware are out of scope and unaffected |
 | Normative language | MUST/SHOULD/MAY are used exactly as defined in `SPECS.md`'s "Normative language" section (RFC 2119/8174) |
@@ -25,6 +26,7 @@ Every step file uses the same header fields:
 - **Inputs/outputs** — the data the step consumes and produces.
 - **Done when** — the observable completion criteria.
 - **Open questions** — Appendix B entries that block the step, or `none blocking`. Non-blocking items are not listed here.
+- **Challenges** — present only on a step the implementation audit of [Appendix D](appendix-d-mathematical-challenges.md) found something in. It names the Appendix D entries that step owns, with their severity, and is a statement about the code, never a change to the requirement above it. A step with no such field had nothing found against it; `08` and `10` are in that position, and `00` states the target rather than an algorithm.
 
 Each step file links back to this index in its first line. Cross-references to other steps and to appendices are Markdown links. The old spec's requirements and content are mapped below into step files and appendices; wording is adjusted where implementation status or superseded history requires clarification. Step 04 adds the source-faithful oracle plan.
 
@@ -33,18 +35,18 @@ Each step file links back to this index in its first line. Cross-references to o
 | Step file | Step | Status | Depends on |
 | --- | --- | --- | --- |
 | [00-target-and-constraints.md](00-target-and-constraints.md) | Target, constraints, evidence base | Specification only | — |
-| [01-state-and-coordinates.md](01-state-and-coordinates.md) | Generalized coordinates, `Free` / `Ball` joints | Partially implemented (`Free` done; `Ball` deferred) | 00 |
-| [02-pure-dynamics-core.md](02-pure-dynamics-core.md) | Mass matrix (CRBA), bias forces (RNE), frame convention | Partially implemented (spatial and ABA/RNE paths use plain arrays; CRBA / M(q) not implemented) | 01 |
-| [03-integrators.md](03-integrators.md) | Integrator family (`implicitfast`, `implicit`, RK4) | Partially implemented (semi-implicit Euler, implicit-damping Euler and RK4 CPU subsets) | 02 |
-| [04-fidelity-loop.md](04-fidelity-loop.md) | Source-faithful oracle plan: oracle definitions, tolerance table per tier, derivation rules | Partially implemented (`oracle.rs` and fidelity schema v7) | 02, 03 |
-| [05-passive-forces-and-actuators.md](05-passive-forces-and-actuators.md) | Passive forces, actuators, tendons (deferred) | Partially implemented (linear scalar-joint spring/damper and affine direct-joint actuator subset) | 02, 03 |
-| [06-equality-constraints-and-solver.md](06-equality-constraints-and-solver.md) | Contact and equality constraint solver | Partially implemented (`mjEQ_JOINT` equality-only solve and plane-sphere geometry; no shared contact solver) | 03, 05 |
-| [07-collision-pipeline.md](07-collision-pipeline.md) | Broad, mid and narrow phase collision | Partially implemented (standalone plane-sphere primitive; collision pipeline not implemented) | 01 |
+| [01-state-and-coordinates.md](01-state-and-coordinates.md) | Generalized coordinates, `Free` / `Ball` joints | Partially implemented (`Free` done; `Ball` deferred). Two audit defects: the `Free` velocity convention is body-local against item 3's MUST (D/M-01, B/S-07), and a non-unit joint axis breaks `v = S qdot` (D/M-02) | 00 |
+| [02-pure-dynamics-core.md](02-pure-dynamics-core.md) | Mass matrix (CRBA), bias forces (RNE), frame convention | Partially implemented (spatial and ABA/RNE paths use plain arrays; CRBA / M(q) not implemented). Audit: both recursions re-derived and correct; the absent `M(q)` blocks step 03 (D/M-18) | 01 |
+| [03-integrators.md](03-integrators.md) | Integrator family (`implicitfast`, `implicit`, RK4) | Partially implemented (semi-implicit Euler, implicit-damping Euler and RK4 CPU subsets), all three correct as written but none reachable from a run (D/M-17). The implicit step needs an `M(q)` that does not exist (D/M-18) and RK4 cannot take a `Free` joint (D/M-19) | 02 |
+| [04-fidelity-loop.md](04-fidelity-loop.md) | Source-faithful oracle plan: oracle definitions, tolerance table per tier, derivation rules | Partially implemented (`oracle.rs` and fidelity schema v7). The battery has no contact, collision or constraint row, which is where most audit entries are (D/M-20) | 02, 03 |
+| [05-passive-forces-and-actuators.md](05-passive-forces-and-actuators.md) | Passive forces, actuators, tendons (deferred) | Partially implemented (linear scalar-joint spring/damper and affine direct-joint actuator subset), correct but unreachable: the actuation that runs is `stance_torques`, which bypasses the gain/bias factoring and `ActuatorSpec` entirely (D/M-17) | 02, 03 |
+| [06-equality-constraints-and-solver.md](06-equality-constraints-and-solver.md) | Contact and equality constraint solver | Partially implemented (`mjEQ_JOINT` equality-only solve and plane-sphere geometry; no shared contact solver). Owns seven audit entries, all in the contact path, which shares none of the ported equality algebra (D/M-08 to M-13, M-23; B/S-09) | 03, 05 |
+| [07-collision-pipeline.md](07-collision-pipeline.md) | Broad, mid and narrow phase collision | Partially implemented (standalone plane-sphere primitive; pipeline is a single all-pairs narrow phase). Four audit defects: contact stiffness scales with sampled point count, and three GJK/EPA/SAT degeneracies (D/M-04 to M-07, M-15, M-16) | 01 |
 | [08-model-compilation-and-sensors.md](08-model-compilation-and-sensors.md) | Model compilation, asset import, sensors | Not started | 01, 02 |
-| [09-fidelity-tiers.md](09-fidelity-tiers.md) | Enumerated fidelity knobs and named tiers | Not started | 03, 06, 07 |
+| [09-fidelity-tiers.md](09-fidelity-tiers.md) | Enumerated fidelity knobs and named tiers | Not started. Four of the seven required knobs are compile-time constants or absent, so a tier is currently distinguished by timestep alone (D/M-21) | 03, 06, 07 |
 | [10-cpu-reference-backend.md](10-cpu-reference-backend.md) | CPU reference backend and backend-agnostic interface | Partially implemented (single-instance backend, `Environment`) | 02, 03 |
-| [11-gpu-batched-backend.md](11-gpu-batched-backend.md) | GPU-batched execution architecture | Partial: CubeCL f32 kernel subset in `crates/robot-sim-gpu` (`cubecl` feature; ADR 0012); G1/ABA and full contact solver not ported | 10 |
-| [12-cpu-gpu-agreement.md](12-cpu-gpu-agreement.md) | Validation, evidence and cross-backend agreement | Partial: feature-gated CubeCL f32 CPU/GPU agreement subset (ADR 0012); no full G1/ABA agreement | 10, 11 |
+| [11-gpu-batched-backend.md](11-gpu-batched-backend.md) | GPU-batched execution architecture | Partial: CubeCL f32 kernel subset in `crates/robot-sim-gpu` (`cubecl` feature; ADR 0012); G1/ABA and full contact solver not ported. Audit: `MAX_DOF = 6` against the G1's 35, and `cond(M) >~ 1e5` against f32 (D/M-22), both measured arguments bearing on S-01 | 10 |
+| [12-cpu-gpu-agreement.md](12-cpu-gpu-agreement.md) | Validation, evidence and cross-backend agreement | Partial: feature-gated CubeCL f32 CPU/GPU agreement subset (ADR 0012); no full G1/ABA agreement. Audit: the measured G1 conditioning sets what an f32 tolerance can be (D/M-22), and the CPU reference is itself unoracled for contact (D/M-20) | 10, 11 |
 
 Dependencies are derived from the cross-references in the old spec; they are a starting point to be confirmed at each step's review.
 
@@ -55,6 +57,7 @@ Appendices:
 | [appendix-a-citations.md](appendix-a-citations.md) | Appendix A — Citation ledger |
 | [appendix-b-open-questions.md](appendix-b-open-questions.md) | Appendix B — Open questions (S-01 to S-06) |
 | [appendix-c-existing-code.md](appendix-c-existing-code.md) | Appendix C — Relationship to existing `robot-sim` code |
+| [appendix-d-mathematical-challenges.md](appendix-d-mathematical-challenges.md) | Appendix D — Mathematical and algorithmic challenges to the current implementation (M-01 to M-24) |
 
 ## Old-to-new section map
 
@@ -82,6 +85,8 @@ Every top-level section and appendix of the old spec appears in exactly one prim
 | Appendix A | Citation ledger | [appendix-a-citations.md](appendix-a-citations.md) |
 | Appendix B | Open questions | [appendix-b-open-questions.md](appendix-b-open-questions.md) |
 | Appendix C | Relationship to existing code | [appendix-c-existing-code.md](appendix-c-existing-code.md) |
+
+Appendix D (`appendix-d-mathematical-challenges.md`) has no old-spec section either; it is the record of the 2026-10-31 implementation audit against the step files and against `docs/example-system-specs/`.
 
 Step 04 (`04-fidelity-loop.md`) has no old-spec section; it is new content owned by Step 2 of the plan.
 

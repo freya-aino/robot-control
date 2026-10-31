@@ -20,7 +20,9 @@ Evidence tag: `code_inspected` for the existence and names of `mj_rne` and `mj_c
 
 **Done when**: The pure recursions reproduce the existing ABA/RNE closed-form, round-trip and energy tests with unchanged expected values (Step 3 of the plan).
 
-**Open questions**: none blocking.
+**Open questions**: none blocking for the recursions themselves. The "none blocking" above does **not** extend to step 03: [Appendix D](appendix-d-mathematical-challenges.md) M-18 records that the absent `M(q)` blocks step 03's implicit integrator, a dependency neither step stated.
+
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) confirms both recursions correct term for term against Featherstone, including the `a_0 = -g` gravity trick (section 1.1). The challenges are around them: M-03 (**defect**) — `InertiaTensor::is_physically_plausible` tests the triangle inequality on the diagonal entries only, so it accepts an indefinite tensor (measured counterexample with eigenvalue `-1`), which matters because step 05 item 2 and [Appendix C](appendix-c-existing-code.md) both cite that function as the validation pattern to follow; decision routed to [Appendix B](appendix-b-open-questions.md) **S-08**. M-14 (**divergence**) — `solve_small_dense` uses an absolute pivot tolerance where `solve_dense` uses a relative one. M-18 and M-24 (**gap**, **cost**) — the missing `M(q)` blocks the implicit integrator and forces `inverse_inertia_diagonal` to spend `nv` forward-dynamics passes (35 on the G1) to recover one diagonal.
 
 ---
 

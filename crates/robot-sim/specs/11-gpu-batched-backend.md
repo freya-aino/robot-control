@@ -18,6 +18,14 @@
 
 **Open questions**: Appendix B S-01 (strategy (b) against strategy (a) on our fixtures) and S-02 (CubeCL control-flow maturity for an iterative solver), both [Appendix B](appendix-b-open-questions.md) items that block this step's "Done when".
 
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) M-22 (**gap**) supplies the first two concrete numbers against S-01, measured on the vendored G1 fixture rather than argued.
+
+*Size.* `ArticulatedBody::from_profile` on `fixtures::unitree_g1_29dof_floating_base` gives `dof = 35`, `nq = 36`. The dense GPU kernels are capped at `MAX_DOF = 6` because each thread holds its Cholesky workspace in a per-thread 36-float local array. One thread per environment at 35 degrees of freedom needs a `35 x 35` workspace — 1225 floats, 4.9 KiB per thread against the present 144 bytes. Raising `MAX_DOF` is therefore not the change: either the factorisation becomes sparse over the kinematic tree, as the example's `qLD` does (`02` §2.10–§2.11), or the work assignment stops being one-thread-per-environment. That is the substance of S-01, and this is a measured argument that strategy (b) does not reach the real fixture in its current form.
+
+*Conditioning.* Measured on the same fixture: link diagonal inertias span 1.00e-7 to 5.91e-2 kg m^2 (ratio 5.9e5) and link masses 1.00e-3 to 6.78 kg (ratio 6.8e3), both coming from the vendored Unitree URDF itself and not from any importer clamp. Through `inverse_inertia_diagonal` at the home configuration, `(M^-1)_jj` spans 3.30e-2 to 3.16e3, so `cond(M) >~ 1e5`. `f32` carries about 1.2e-7 relative precision and a Cholesky solve loses roughly `cond(M)`, leaving on the order of two significant digits before any accumulation over a rollout. A dense `f32` factorisation of this robot's mass matrix is therefore not merely less accurate than the `f64` CPU path but structurally unsuitable, which is a sizing input to this step rather than a tolerance question for [12](12-cpu-gpu-agreement.md).
+
+Scope reminder, not a new challenge: what the backend implements today is elementwise and small-dense kernels (semi-implicit Euler, implicit-damping Euler, an equality-only dense solve, spring/damper and affine actuator forces, a pendulum-specific RK4, plane-sphere contact). No ABA, no RNE, no collision pipeline, no contact solver — so [00](00-target-and-constraints.md) section 1.2's "primary execution mode" is not yet reachable for any articulated model.
+
 ---
 
 ## 11. GPU-batched execution architecture

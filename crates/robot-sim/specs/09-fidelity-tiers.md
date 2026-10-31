@@ -18,6 +18,10 @@
 
 **Open questions**: Appendix B S-03 (exact tier names and settings, grounded in a CPU fidelity sweep) is blocking for the named-tier item of this step. The knob enumeration is not blocked.
 
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) M-21 (**gap**). Section 12.1 requires each of seven knobs to be "an explicit, per-run, queryable parameter ... never a compile-time constant". Today only the timestep is one. Integrator and solver exist as `Tier` fields but are `String`s validated to accept a single value each; the solver iteration/tolerance budget is the private constants `CONTACT_PGS_SWEEPS = 500` and `CONTACT_PGS_TOLERANCE = 1e-10`; `condim`, the contact-slot budget and collision margin/gap do not exist on the CPU path at all. Appendix D adds three further constants that belong on the enumeration because they change the physics and not only the cost: `RIM_SAMPLES = 8` (it scales contact stiffness — M-04), `ADJACENT_OVERLAP_ALLOWANCE = 0.003` (M-16) and `CONTACT_REFERENCE_MASS = 1.0` (M-09).
+
+So `Tier` currently distinguishes runs by timestep alone, and this step's closing requirement — every tier expressible purely as a named bundle of the 12.1 knobs — has four of seven knobs with nothing to bundle. This does not block the design work S-03 owns, but it does mean a tier cannot yet be *recorded* faithfully with a run, which is what makes a fidelity claim auditable at all.
+
 ---
 
 ## 12. Variable fidelity as a first-class interface

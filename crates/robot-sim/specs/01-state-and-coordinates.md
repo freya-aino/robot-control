@@ -18,6 +18,8 @@
 
 **Open questions**: none blocking. `Ball` is optional under S-04 and does not gate this step. C-04 (canonical frame and quaternion ordering, `docs/decisions/0002`) is an existing project-level question and is not owned here.
 
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) M-01 and M-02, both **defect**. M-01: the implemented `Free` joint stores its linear velocity in the **body** frame, contradicting item 3's MUST and this step's own "Done when"; a force-free spinning free body consequently gains 0.39 % world linear velocity and 0.14 % kinetic energy per simulated second at `dt = 1e-4` (measured, with controls isolating the convention as the cause). The decision — change the representation or amend item 3 and record the deviation — is [Appendix B](appendix-b-open-questions.md) **S-07**. M-02: a declared joint axis that is not unit length makes the motion subspace disagree with the pose map, because `joint_transform` normalises and `motion_subspace_basis` does not; profile validation accepts it and the resulting trajectory is wrong rather than rescaled (measured on the point-mass pendulum).
+
 ---
 
 ## 3. State representation and coordinates

@@ -28,6 +28,8 @@ Documentation: `doc/computation.rst` §Numerical integration (location only, not
 
 **Open questions**: none blocking. The integrator-per-tier mapping is owned by [09](09-fidelity-tiers.md) (Appendix B S-03).
 
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) confirms `semi_implicit_euler_step`, `implicit_damping_euler_step`, `rk4_step` and `cholesky_solve` all correct as written (section 1.1), including that RK4's position update uses the `B`-weighted mean velocity. The challenges are about reach, not formulation. M-18 (**gap**): `implicit_damping_euler_step` needs a dense `M`, nothing in the workspace produces one, so this step's "Done when" and its item 4 MUST are blocked on step 02's unimplemented CRBA — a dependency neither step stated. Appendix D names three routes and notes that forming `M` from `nv` inverse-dynamics passes would unblock the *measurement* without the CRBA work. M-19 (**gap**): `rk4_step` asserts `q.len() == qd.len()` and advances stage positions by `q + h*v`, so it cannot integrate a `Free` joint — the one configuration item 4 specifies RK4 *for*. The 1.9 % energy gain Appendix D measures on an anisotropic spinning free body is the quantity RK4 was wanted for and cannot currently be taken with it. M-17 (**gap**): none of the three ported functions is reachable from `MultibodyState::step`, which runs its own inline semi-implicit Euler.
+
 ---
 
 ## 4. Dynamics: mass matrix, bias forces, integration

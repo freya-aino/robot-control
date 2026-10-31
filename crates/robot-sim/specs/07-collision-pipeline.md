@@ -21,6 +21,17 @@ Evidence tag: `unverified` for every stage-level and dispatch-level claim in thi
 
 **Open questions**: none blocking. SDF collision is a non-goal ([00](00-target-and-constraints.md), Section 1.6).
 
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) confirms the support maps of all four primitives, Ericson's closest-point-on-triangle, and the plane-sphere rule correct as written (section 1.1). Six challenges sit above them:
+
+- M-04 (**defect**): `plane_contact_points` samples a shape into points (eight box corners, `2 * RIM_SAMPLES` cylinder rim points) and the penalty law is applied to each independently, so a body resting on `n` co-planar points carries `n` springs in parallel. Its rest penetration is `m g / (n k)`, its contact stiffness is `n k`, and changing `RIM_SAMPLES` changes the physics with no parameter change. The coupled model does not remove the `1/n`. The exact bounded manifolds of the example (`04` §1.3, §1.4), already listed as candidate work in `docs/example-system-mapping.md` §2.6, are the fix; this entry supplies the reason it is a correctness matter rather than an accuracy one.
+- M-05 (**defect**): `complete_simplex` grows the EPA seed simplex to affine independence but never to origin **enclosure**, so face distances can be negative, the closest-face selection picks the wrong face, and `depth.max(0.0)` turns the failure into a zero depth with an arbitrary normal. `epa` also exhausts its 128-iteration budget without a convergence flag.
+- M-06 (**defect**): `reduce`'s containment test is `s_origin * s_opp < 0.0`, so a zero product leaves `inside` at `true`. A flat tetrahedron zeroes all four products and is reported as containing the origin — a false overlap, reachable by construction in the symmetric face-parallel configurations a humanoid on a plane produces constantly. M-05 and M-06 are two halves of one weakness.
+- M-07 (**defect**): `box_box_contacts`' edge-edge fallback places the contact at the deepest **corner** of each box rather than on the crossing edges, so the depth is right and the moment arm is wrong.
+- M-15 (**gap**): item 1 is a MUST for three separate stages; `contact_rows` has one. Every shape pair goes straight to `collision::proximity` (full GJK, EPA on overlap) with no bounding test. `Placed::bounding_sphere` is written, exact for all four primitives, and called from nowhere in the workspace — so the mid-phase test this item requires already exists and is merely unwired.
+- M-16 (**gap**): item 3's exclusion mechanism is stood in for by `ADJACENT_OVERLAP_ALLOWANCE = 0.003` m subtracted from parent-child depths. One global length, no per-pair or per-shape mask, and no allowance at all for the sibling and grandparent pairs a shoulder or hip produces.
+
+Appendix D section 3.2 also records that `complete_simplex`, `box_sat` and `box_box_contacts` set their degeneracy thresholds as absolute lengths, squared lengths and volumes, which embeds a metre-scale assumption.
+
 ---
 
 ## 6. Collision detection pipeline

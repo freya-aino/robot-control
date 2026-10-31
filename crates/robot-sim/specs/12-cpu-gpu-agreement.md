@@ -19,6 +19,10 @@
 
 **Open questions**: Appendix B S-01 and S-02 are blocking for this step's agreement and tolerance items, since this step is where their results are recorded. See [Appendix B](appendix-b-open-questions.md).
 
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) M-22 (**gap**) is shared with [11](11-gpu-batched-backend.md) and bears on this step's tolerances specifically. The G1's joint-space conditioning is measured at `cond(M) >~ 1e5` (via `(M^-1)_jj` spanning 3.30e-2 to 3.16e3 at the home configuration), against `f32`'s ~1.2e-7 relative precision. An agreement tolerance for a dense `f32` factorisation of that matrix has to be set against roughly two surviving significant digits — a number worth deriving here rather than discovering as a test failure. The example sets per-stage tolerances for its single-precision port separately from its double-precision reference (`15` §11), which `docs/example-system-mapping.md` §2.8 lists as candidate work; the conditioning figure above is what such a per-stage tolerance has to be justified against.
+
+Appendix D M-20 is also relevant to this step's evidence chain: the CPU reference the GPU backend is checked against has no archival oracle coverage for contact, collision or constraint, so cross-backend agreement in those subsystems would establish that the two backends agree, not that either is right.
+
 ---
 
 ## 14. Validation and evidence requirements

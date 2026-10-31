@@ -78,6 +78,71 @@ dissipation check (symplectic-integrator energy drift bounded over
 contact model strictly losing energy on impact; friction that damps
 without ever reversing a slide).
 
+## What a full audit of the maths found (2026-10-31)
+
+Every algorithm module in this crate, in `robot-sim-gpu`, and the mass-property
+and joint layers of `robot-model` they depend on were read against two
+references at once: the step files in `specs/`, which say what the subsystem must
+do, and `docs/example-system-specs/` — a non-normative, 17-document description
+of a complete working rigid-body and contact simulator, read as the mathematics
+of a system known to work. The result is `specs/appendix-d-mathematical-challenges.md`,
+24 numbered entries (M-01 to M-24). Read it before changing anything in
+`collision`, `contact`, `constraint` or the contact path of `articulated`.
+
+**What the audit confirmed.** The dynamics core is sound. `spatial`'s
+motion/force duality, its `ad`/`ad*` operators and its parallel-axis spatial
+inertia; `articulated`'s RNE (including the `a_0 = -g` gravity trick) and its
+three-pass ABA; `integrators`' three steppers and its Cholesky; `constraint`'s
+impedance sigmoid and its equality algebra; `collision`'s four support maps and
+Ericson's closest-point-on-triangle; `contact`'s plane-sphere rule; and all of
+`passive` were independently re-derived and agree term for term. Appendix D
+section 1.1 lists each with what it was checked against. That is a derivation and
+a code reading, not measured parity with any other engine.
+
+**Two defects reachable through the public API, both measured.** A `Free` joint
+stores its linear velocity in the **body** frame, where `specs/01` item 3 requires
+the world frame; a force-free spinning free body therefore gains 0.39 % world
+linear velocity and 0.14 % kinetic energy per simulated second at `dt = 1e-4`,
+and controls at zero spin and at isotropic inertia isolate the convention as the
+cause rather than the integrator (M-01). And a declared joint `axis` that is not
+unit length makes the velocity map disagree with the pose map, because
+`joint_transform` normalises and `motion_subspace_basis` does not: scaling a
+pendulum's declared axis from `(0,1,0)` to `(0,2,0)` — the same physical axis —
+halves its acceleration and quadruples its kinetic energy, and profile
+validation accepts both (M-02). Separately, `robot_model`'s
+`InertiaTensor::is_physically_plausible` tests the triangle inequality on the
+diagonal entries only, so it accepts an indefinite tensor (M-03).
+
+**Where the divergence concentrates.** Eleven of the 24 entries are in the
+contact and collision path, plus one more for the pipeline feeding it. Contact
+compliance scales with the number of sampled contact points, so a box resting on
+a face settles four times shallower than a sphere of the same mass and changing
+`RIM_SAMPLES` changes the physics (M-04); the EPA seed tetrahedron is not
+required to enclose the origin and a flat tetrahedron is reported as containing
+it (M-05, M-06); box-box edge-edge contact is placed at a corner, giving the
+right depth with the wrong moment arm (M-07); contact impedance is referred to a
+fixed 1 kg mass rather than the row's own effective mass, across a robot whose
+effective masses span five orders of magnitude (M-09); friction sits outside the
+solve, and pair contacts have none (M-10). That same region has no row in the
+archival fidelity battery (M-20), which is not a coincidence worth leaving
+unstated: it is where divergence accumulates without being noticed.
+
+**The three "implemented but unreachable" modules.** `integrators`, `passive`
+and `constraint` are correct and are not called from `MultibodyState::step`,
+which runs its own inline Euler, its own clamped-PD actuation and its own
+penalty contact. So integration, actuation and soft-constraint handling each
+exist twice in this crate, and the version the step files describe is not the
+version that executes (M-17). One consequence worth knowing: the `2*timestep`
+time-constant check — the safety check `specs/06` item 3 calls the mechanism that
+prevents exactly the timestep divergence measured on the G1 — exists, is tested,
+and never runs against the contact stiffness the simulator actually uses.
+
+Three entries need a specification decision rather than a fix and are open as
+`specs/appendix-b-open-questions.md` **S-07** (the `Free` velocity convention),
+**S-08** (which inertia-validity condition to adopt) and **S-09** (whether
+contact takes the `A_ii`-proportional impedance, which subsumes M-04 and M-09).
+The rest are implementation tasks against their owning step.
+
 ## A test that needed a second look
 
 The first version of `a_pd_actuator_drives_the_pendulum_toward_a_target_angle`

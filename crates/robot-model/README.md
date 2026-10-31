@@ -119,6 +119,56 @@ numerically identical to the old behavior for every profile without a
 `Free` joint (i.e. every profile that existed before this change) and
 correct for the ones that do.
 
+## Two defects this crate owns, found by the simulation audit (2026-10-31)
+
+The mathematical audit recorded in
+`crates/robot-sim/specs/appendix-d-mathematical-challenges.md` read this crate's
+mass-property and joint layers alongside `robot-sim`, because the solver
+consumes them directly. Two entries are owned here, both measured, both
+reachable through a profile that `validate()` accepts.
+
+**M-02 — a declared joint `axis` that is not unit length is accepted, and
+breaks `v = S qdot`.** `JointSpec::validate` requires only that the axis have a
+usable direction (`axis.normalized(1e-12).is_none()` is the rejection test), and
+`urdf::parse_joint` stores `<axis xyz="...">` verbatim. But `transform_at` — and
+`robot_sim::articulated::joint_transform` with it — **normalises** the axis,
+while `robot_sim::articulated::motion_subspace_basis` uses the **raw** axis. The
+pose map therefore reads the coordinate as radians about the unit axis while the
+velocity map makes the body's angular velocity `|axis| * qdot`, and the two
+contradict each other for any non-unit axis. Measured on a 1 kg point mass 1 m
+from the pivot: scaling the declared axis from `(0,1,0)` to `(0,2,0)` — the same
+physical axis — changes `qdd` from 9.80665 to 4.903325, kinetic energy at
+`qdot = 1` from 0.5 to 2.0, and `tau` for `qdd = 1` from 1.0 to 4.0, against
+analytic values of 9.80665, 0.5 and 1.0. Both profiles validate. The trajectory
+is wrong, not merely rescaled, because the stepper adds `qdot * dt` to a `q` that
+`transform_at` reads as radians. A non-unit axis is common in exported URDF —
+the URDF specification says the axis *should* be normalised without requiring it,
+and the worked example's own model compiler normalises joint axes at compile
+time. This crate has no such step. The fix is one decision: reject a non-unit
+axis in `validate` (matching this importer's "reject unsupported constructs
+explicitly" ethos) or normalise it once at the boundary in both `transform_at`
+and the solver's adapter.
+
+**M-03 — `InertiaTensor::is_physically_plausible` accepts an indefinite
+tensor.** It checks finiteness, non-negative diagonals, and the three triangle
+inequalities on the **diagonal entries**; the products of inertia `ixy`, `ixz`,
+`iyz` are not used. That is equivalent to the physical condition only for an
+already-diagonal tensor. `ixx = iyy = izz = 1` with `ixy = 2` returns **true**,
+and its eigenvalues are 3, **-1** and 1 — so a body carrying it has negative
+kinetic energy about one axis, which can make `robot_sim`'s energy oracles
+meaningless and the articulated-body joint inertia non-positive, surfacing as a
+`SingularJointInertia` far from its cause. The physical condition is the triangle
+inequality on the **principal moments** (the eigenvalues), which is a closed form
+or a short Jacobi sweep. Which condition to adopt — that, or the stronger
+pseudo-inertia realisability test over mass, centre of mass and tensor jointly —
+is open as **S-08** in `crates/robot-sim/specs/appendix-b-open-questions.md`,
+because the two reject different inputs. Note that `robot-sim`'s step 05 names
+this function as the pattern a future spring-damper sign-preservation check
+should follow, so it is a weaker precedent than that reference assumes.
+
+Neither defect is fixed by that audit; both want a reproducing test alongside
+the fix, per the testing policy in `AGENT.md`.
+
 ## Testing
 
 `cargo test -p robot-model` — 79 tests: joint/link/actuator/sensor validation
