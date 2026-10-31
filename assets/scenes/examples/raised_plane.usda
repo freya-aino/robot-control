@@ -1,0 +1,23 @@
+#usda 1.0
+(
+    defaultPrim = "scene"
+    metersPerUnit = 1
+    upAxis = "Z"
+    doc = "Example: one tagged plane raised to 0.25 m. The simulator must stand the robot on it, not on z = 0."
+)
+
+def Xform "scene"
+{
+    def Plane "raised_plane" (
+        apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        uniform token axis = "Z"
+        double3 xformOp:translate = (0, 0, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        uniform token[] sim:tags = ["environment", "collider"]
+        float physics:dynamicFriction = 0.8
+        double sim:contactStiffness = 20000
+        double sim:contactDamping = 200
+    }
+}
