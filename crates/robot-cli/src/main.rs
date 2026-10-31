@@ -115,7 +115,18 @@ fn run_multibody(flags: &[String]) -> i32 {
         Ok(out) => out,
         Err(message) => return invalid_flag(&message),
     };
-    commands::sim::multibody_to(steps, dt_seconds, floating, zero_torque, out.as_deref())
+    let scene = match parse_flag::<PathBuf>(flags, "--scene") {
+        Ok(scene) => scene,
+        Err(message) => return invalid_flag(&message),
+    };
+    commands::sim::multibody_scene_to(
+        steps,
+        dt_seconds,
+        floating,
+        zero_torque,
+        out.as_deref(),
+        scene.as_deref(),
+    )
 }
 
 fn run_eval(args: &[String]) -> i32 {

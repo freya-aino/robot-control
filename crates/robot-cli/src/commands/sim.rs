@@ -77,16 +77,16 @@ pub fn qualify(steps: u32, dt_seconds: f64) -> i32 {
     }
 }
 
-/// Ground plane used by `multibody --floating`: a penalty model whose
-/// stiffness and damping were chosen for the G1's ~35 kg, with sphere
-/// collision shapes only (see `robot_sim::contact`). Not tuned for balance.
-const FLOATING_GROUND: GroundContact = GroundContact {
-    stiffness: 2.0e4,
-    normal_damping: 200.0,
-    friction: 0.8,
-    friction_regularization: 1e-3,
-    ground_height: 0.0,
-};
+/// The scene the floating-base run takes its ground from (ADR 0015). The ground
+/// collider and its contact parameters are read from its `Plane` prim.
+const GROUND_SCENE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/scenes/g1_ground.usda"
+);
+
+/// Regularisation of the friction law (`robot_sim::contact`). Solver setting,
+/// not a property of the scene.
+const FRICTION_REGULARIZATION: f64 = 1e-3;
 
 /// PD gains for the `multibody --floating` stance: a hold toward the zero
 /// posture with the torque clamped to each joint's effort limit. This is a
@@ -187,10 +187,11 @@ pub fn default_steps(dt_seconds: f64) -> Result<u32, String> {
 /// `finish` leaves the directory's earlier committed run intact.
 #[cfg(test)]
 fn multibody(steps: u32, dt_seconds: f64, floating: bool, zero_torque: bool) -> i32 {
-    multibody_to(steps, dt_seconds, floating, zero_torque, None)
+    multibody_scene_to(steps, dt_seconds, floating, zero_torque, None, None)
 }
 
 /// [`multibody`] with an optional frame directory.
+#[cfg(test)]
 pub fn multibody_to(
     steps: u32,
     dt_seconds: f64,
@@ -198,6 +199,22 @@ pub fn multibody_to(
     zero_torque: bool,
     out: Option<&Path>,
 ) -> i32 {
+    multibody_scene_to(steps, dt_seconds, floating, zero_torque, out, None)
+}
+
+/// As [`multibody_to`], with the environment read from `scene` (a USD layer)
+/// instead of the default G1 ground scene. Every environment collider of the
+/// scene is simulated, or the run is refused.
+pub fn multibody_scene_to(
+    steps: u32,
+    dt_seconds: f64,
+    floating: bool,
+    zero_torque: bool,
+    out: Option<&Path>,
+    scene: Option<&Path>,
+) -> i32 {
+    let scene_path: std::path::PathBuf =
+        scene.map_or_else(|| std::path::PathBuf::from(GROUND_SCENE), Path::to_path_buf);
     if out.is_some_and(|dir| dir.as_os_str().is_empty()) {
         eprintln!("error: --out needs a directory path, not an empty string");
         return EXIT_USAGE;
@@ -233,10 +250,28 @@ pub fn multibody_to(
             return EXIT_USAGE;
         }
     }
+    // The G1 is the official OpenUSD description (ADR 0015): link masses,
+    // joint frames and limits, drives, and collision shapes all come from it.
+    let (fixed, _report, warnings) = match robot_model::usd::import_fixed_base_with_warnings(
+        Path::new(robot_model::fixtures::UNITREE_G1_29DOF_USD_ROOT),
+    ) {
+        Ok(imported) => imported,
+        Err(e) => {
+            eprintln!("error: could not import the G1 USD model: {e}");
+            return EXIT_FAILURE;
+        }
+    };
+    // Non-fatal: the layer references Omniverse-only materials. Loading continues.
+    for warning in &warnings {
+        eprintln!("warning: {}: {}", warning.path, warning.message);
+    }
     let profile = if floating {
-        robot_model::fixtures::unitree_g1_29dof_floating_base()
+        match robot_model::usd::with_floating_base(fixed) {
+            Ok(p) => Ok(p),
+            Err(e) => Err(e.to_string()),
+        }
     } else {
-        robot_model::fixtures::unitree_g1_29dof()
+        Ok(fixed)
     };
     let profile = match profile {
         Ok(p) => p,
@@ -261,6 +296,44 @@ pub fn multibody_to(
     };
     let out_dir = out.map(Path::to_path_buf);
 
+    // Every environment collider of the scene is simulated, or the run is refused:
+    // the simulator has one contact law, for planes. Other tagged shapes are named.
+    let environment = match robot_model::usd::import_environment(&scene_path) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!(
+                "error: could not read the environment of {}: {e}",
+                scene_path.display()
+            );
+            return EXIT_FAILURE;
+        }
+    };
+    if !environment.unsupported.is_empty() {
+        for path in &environment.unsupported {
+            eprintln!("error: {path} is tagged environment and collider, but this simulator cannot contact that shape yet");
+        }
+        return EXIT_FAILURE;
+    }
+    let scene_ground = match environment.planes.as_slice() {
+        [one] => *one,
+        [] => {
+            eprintln!("error: the scene has no environment plane to stand on");
+            return EXIT_FAILURE;
+        }
+        _ => {
+            eprintln!(
+                "error: the scene has several environment planes; the simulator supports one"
+            );
+            return EXIT_FAILURE;
+        }
+    };
+    let ground = GroundContact {
+        stiffness: scene_ground.stiffness,
+        normal_damping: scene_ground.normal_damping,
+        friction: scene_ground.friction,
+        friction_regularization: FRICTION_REGULARIZATION,
+        ground_height: scene_ground.height,
+    };
     // A small displacement from the zero posture, not a claim about any
     // real G1 standing pose: this is a demonstration of the solver, not
     // a balance controller. The floating base starts at an identity
@@ -286,7 +359,8 @@ pub fn multibody_to(
                 return EXIT_FAILURE;
             }
         };
-        q[2] = STANCE_CLEARANCE - lowest_at_origin;
+        // The stance starts above the environment plane, not above z = 0.
+        q[2] = ground.ground_height + STANCE_CLEARANCE - lowest_at_origin;
     }
     let mut state = MultibodyState {
         q,
@@ -318,6 +392,7 @@ pub fn multibody_to(
     }
 
     let report_every = (steps / 10).max(1);
+    let mut captured: Vec<super::usd_replay::CapturedStep> = Vec::new();
     let mut min_pelvis = f64::INFINITY;
     let mut min_pelvis_time = 0.0;
     let mut min_contact = f64::INFINITY;
@@ -331,14 +406,36 @@ pub fn multibody_to(
                 return EXIT_FAILURE;
             }
         }
-        let stepped = if floating {
-            state.step_with_ground(&body, &tau, gravity, &FLOATING_GROUND, dt)
+        let limit_torque = if floating {
+            match state.step_with_ground_recording(&body, &tau, gravity, &ground, dt) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: step {step}: {e}");
+                    return EXIT_FAILURE;
+                }
+            }
         } else {
-            state.step(&body, &tau, gravity, dt)
+            if let Err(e) = state.step(&body, &tau, gravity, dt) {
+                eprintln!("error: step {step}: {e}");
+                return EXIT_FAILURE;
+            }
+            vec![0.0; body.dof()]
         };
-        if let Err(e) = stepped {
-            eprintln!("error: step {step}: {e}");
-            return EXIT_FAILURE;
+        if out.is_some() {
+            let limit_fraction = match body.limit_fractions(&state.q) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("error: step {step}: {e}");
+                    return EXIT_FAILURE;
+                }
+            };
+            captured.push(super::usd_replay::CapturedStep {
+                q: state.q.clone(),
+                qd: state.qd.clone(),
+                tau: tau.clone(),
+                limit_torque,
+                limit_fraction,
+            });
         }
         if let Some((dump, layout)) = frames.as_mut() {
             let time_ns = dt_nanos * (i64::from(step) + 1);
@@ -414,6 +511,68 @@ pub fn multibody_to(
             "  frames:                  {written} steps committed to {}",
             dir.display()
         );
+        // Two replays of the same run. The full one has a time code per step.
+        // Blender plays time codes as frames at its own rate (24 fps by default),
+        // so the playback one has a time code per 1/100 s instead.
+        let visuals = match robot_model::usd::import_visual_meshes(std::path::Path::new(
+            robot_model::fixtures::UNITREE_G1_29DOF_USD_ROOT,
+        )) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: could not read the visual meshes: {e}");
+                return EXIT_FAILURE;
+            }
+        };
+        let stride = ((0.01 / dt_seconds).round() as usize).max(1);
+        let playback: Vec<super::usd_replay::CapturedStep> = captured
+            .iter()
+            .step_by(stride)
+            .map(|c| super::usd_replay::CapturedStep {
+                q: c.q.clone(),
+                qd: c.qd.clone(),
+                tau: c.tau.clone(),
+                limit_torque: c.limit_torque.clone(),
+                limit_fraction: c.limit_fraction.clone(),
+            })
+            .collect();
+        let full_rate = 1.0 / dt_seconds;
+        let playback_rate = full_rate / stride as f64;
+        for (name, steps, rate) in [
+            ("replay.usda", &captured, full_rate),
+            ("replay_playback.usda", &playback, playback_rate),
+        ] {
+            let replay_ground = robot_usd::replay::ReplayGround {
+                height: scene_ground.height,
+                stiffness: scene_ground.stiffness,
+                normal_damping: scene_ground.normal_damping,
+                friction: scene_ground.friction,
+            };
+            let usd =
+                match super::usd_replay::usda(&profile, steps, rate, &visuals, Some(replay_ground))
+                {
+                    Ok(text) => text,
+                    Err(message) => {
+                        eprintln!("error: could not build {name}: {message}");
+                        return EXIT_FAILURE;
+                    }
+                };
+            let path = dir.join(name);
+            if let Err(e) = std::fs::write(&path, usd) {
+                eprintln!("error: could not write {}: {e}", path.display());
+                return EXIT_FAILURE;
+            }
+            println!(
+                "  usd replay:              {} ({} frames at {rate} per second)",
+                path.display(),
+                steps.len()
+            );
+        }
+    }
+    if out.is_some() {
+        let (excess, steps_outside) = super::usd_replay::limit_excursion(&profile, &captured);
+        println!(
+            "  joint limits:            worst excursion {excess:.3e} rad, {steps_outside} steps outside a range"
+        );
     }
     judge_stance(&StanceTrace {
         duration: steps as f64 * dt_seconds,
@@ -422,6 +581,7 @@ pub fn multibody_to(
         min_pelvis_time,
         min_contact,
         max_settled_energy,
+        ground_height: ground.ground_height,
     })
 }
 
@@ -504,6 +664,7 @@ struct StanceTrace {
     min_pelvis_time: f64,
     min_contact: f64,
     max_settled_energy: Option<f64>,
+    ground_height: f64,
 }
 
 /// Prints the floating-base checks and returns the exit code. A supported
@@ -548,7 +709,7 @@ fn judge_stance(trace: &StanceTrace) -> i32 {
     if pelvis_held && contact_held && energy_bounded {
         println!("  result:                  PASS (supported stance within tolerances; no balance claim)");
         0
-    } else if trace.min_pelvis < FLOATING_GROUND.ground_height {
+    } else if trace.min_pelvis < trace.ground_height {
         println!("  result:                  FAIL (pelvis fell below the ground plane)");
         EXIT_FAILURE
     } else {
@@ -596,6 +757,7 @@ mod tests {
             start_pelvis: 0.8,
             min_pelvis,
             min_pelvis_time: 0.06,
+            ground_height: 0.0,
             min_contact,
             max_settled_energy: energy,
         }
