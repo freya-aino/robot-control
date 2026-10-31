@@ -1,4 +1,4 @@
-//! GPU equality constraints and soft constraint impedance mirroring MuJoCo 3.17.0.
+//! GPU equality constraints and soft constraint impedance mirroring the reference simulator 3.17.0.
 //!
 //! Mirrors [`robot_sim::constraint`].
 
@@ -6,10 +6,10 @@ use crate::error::GpuSimError;
 use crate::launch::{backend, check_batch_size, check_equality_batch, check_lengths};
 
 /// Batched, equality-only dense solve mirroring
-/// [`robot_sim::constraint::solve_equality`] (MuJoCo 3.17.0 commit `800a109a`,
+/// [`robot_sim::constraint::solve_equality`] (the reference formulation,
 /// `engine_core_constraint.c`: `getsolparam`, `getimpedance`,
-/// `mj_makeImpedance`, `mj_referenceConstraint`, `mj_makeARNumeric`).
-/// The `DIAGEXACT` diagonal, not MuJoCo's default approximate diagonal, is
+/// `makeImpedance`, `referenceConstraint`, `makeARNumeric`).
+/// The `DIAGEXACT` diagonal, not the reference's default approximate diagonal, is
 /// used; there is no contact/limit/friction solve or CPU fallback.
 ///
 /// `n_env = status.len()`, `1 <= nv,nrow <= 6`. Per environment, `mass` is

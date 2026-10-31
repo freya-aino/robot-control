@@ -130,7 +130,7 @@ mod device {
 
     #[test]
     fn scalar_derived_and_clamped_timeconst() {
-        // From `mj_makeImpedance`: imp=.5, K=1/(.5²*.02²)=10000,
+        // From `makeImpedance`: imp=.5, K=1/(.5²*.02²)=10000,
         // B=2/(.5*.02)=200; pos=.001, J=M=1, vel=0:
         // aref=-5, A=1, R=(1-imp)*A/imp=1, force=-5/2=-2.5.
         let mut b = Batch::new(2, 1, 1);

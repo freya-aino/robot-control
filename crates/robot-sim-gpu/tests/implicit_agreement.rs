@@ -1,8 +1,8 @@
 //! CPU-vs-GPU agreement for the implicit-damping Euler step
-//! (`robot_sim::integrators::implicit_damping_euler_step`, MuJoCo 3.17.0
-//! `engine_forward.c`, `mj_EulerSkip`). The CPU reference is `f64`; the GPU
+//! (`robot_sim::integrators::implicit_damping_euler_step`, the reference simulator 3.17.0
+//! `engine_forward.c`, `EulerSkip`). The CPU reference is `f64`; the GPU
 //! runs `f32`. Source-faithful port with oracle checks; not measured parity
-//! with MuJoCo.
+//! with the reference simulator.
 
 use robot_sim_gpu::*;
 

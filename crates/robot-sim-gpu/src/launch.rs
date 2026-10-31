@@ -445,9 +445,9 @@ pub(crate) mod backend {
         }
     }
 
-    /// Equality-only `solve_equality`, MuJoCo 3.17.0 `engine_core_constraint.c`
-    /// `getsolparam`, `getimpedance`, `mj_makeImpedance`,
-    /// `mj_referenceConstraint`, `mj_makeARNumeric` (DIAGEXACT diagonal).
+    /// Equality-only `solve_equality`, the reference simulator 3.17.0 `engine_core_constraint.c`
+    /// `getsolparam`, `getimpedance`, `makeImpedance`,
+    /// `referenceConstraint`, `makeARNumeric` (DIAGEXACT diagonal).
     /// Mirrors the CPU row order and two Cholesky solve stages. Each thread
     /// owns one environment; a failed pivot leaves its outputs unchanged.
     #[cube(launch)]

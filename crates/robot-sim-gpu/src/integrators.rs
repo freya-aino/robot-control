@@ -115,8 +115,8 @@ const SYMMETRY_TOLERANCE_F32: f32 = 1e-6;
 /// `n_env = status.len()` independent systems of `nv` degrees of freedom each.
 ///
 /// Mirrors [`robot_sim::integrators::implicit_damping_euler_step`], whose
-/// source is MuJoCo 3.17.0 (commit `800a109a`) `engine_forward.c`,
-/// `mj_EulerSkip` damping branch: solve `(M + dt*diag(B)) qacc = bias`, then
+/// source is the reference formulation `engine_forward.c`,
+/// `EulerSkip` damping branch: solve `(M + dt*diag(B)) qacc = bias`, then
 /// `qd += dt*qacc`, `q += dt*qd`. One GPU thread handles one environment and
 /// runs the CPU Cholesky loop order on a per-thread `6 x 6` local array, so
 /// `nv` is limited to [`crate::MAX_DOF`]; larger systems are rejected.
@@ -129,7 +129,7 @@ const SYMMETRY_TOLERANCE_F32: f32 = 1e-6;
 /// `status[env]` is `1` if the environment was stepped, `0` if its
 /// `M + dt*diag(B)` was not symmetric positive definite in `f32`; that
 /// environment's `q` and `qd` are then left unchanged. This is the per-env
-/// counterpart of the CPU `None`. MuJoCo clamps the pivot instead (`mj_factorI`).
+/// counterpart of the CPU `None`. the reference simulator clamps the pivot instead (`factorI`).
 ///
 /// The CPU function checks symmetry at `1e-12` in `f64`; here the batch is
 /// rejected if any `mass` is asymmetric by more than `1e-6 * max|M|` (that

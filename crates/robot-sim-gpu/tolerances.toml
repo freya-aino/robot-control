@@ -14,7 +14,7 @@
 # `measured_*` values come from the named tests run with `--nocapture` on Intel
 # iGPU (Vulkan) and Mesa Lavapipe, and from `cargo run -p robot-sim-gpu
 # --features cubecl --example gpu_latency` for the RK4 and impedance rows. They
-# are agreement facts against the CPU f64 reference, not MuJoCo parity. The
+# are agreement facts against the CPU f64 reference, not a simulator parity claim. The
 # feature-off test `tolerance_records_are_complete_and_hold` parses this file
 # and checks every measured value against its bound.
 

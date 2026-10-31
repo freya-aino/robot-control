@@ -1,4 +1,4 @@
-//! GPU passive joint forces and affine actuators mirroring MuJoCo 3.17.0.
+//! GPU passive joint forces and affine actuators mirroring the reference simulator 3.17.0.
 //!
 //! Mirrors [`robot_sim::passive`].
 

@@ -1,4 +1,4 @@
-//! GPU plane-sphere collision contact detection mirroring MuJoCo 3.17.0.
+//! GPU plane-sphere collision contact detection mirroring the reference simulator 3.17.0.
 //!
 //! Mirrors [`robot_sim::contact::plane_sphere_contact`].
 
