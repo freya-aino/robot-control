@@ -10,8 +10,8 @@
 #      local and CI enforcement share one definition (item 3).
 #   3. Development-only services (viewer, telemetry collector, replay device)
 #      live under `processes`, never as a deployment dependency (item 5).
-#   4. The excluded runtimes of Section 2 / Section 1.1 (PyTorch, JAX, MuJoCo
-#      MJX, CycloneDDS) do not appear in this environment at all: the
+#   4. The excluded runtimes of Section 2 / Section 1.1 (PyTorch, JAX,
+#      batched backend, CycloneDDS) do not appear in this environment at all: the
 #      exclusion gate (robot-devtools `exclusion-gate`, run from enterTest
 #      and as a git hook) fails the build on any excluded runtime in the
 #      *Cargo* closure, and this file simply never introduces a Python or
@@ -35,6 +35,10 @@
   # actually requires them, never speculatively.
   packages = with pkgs; [
     pkg-config
+    # OpenUSD tools (usdcat, usdchecker, usdview, ...) and Python bindings. The
+    # Rust reader in crates/robot-usd does not need them; they validate the
+    # replays and layers the project writes (ADR 0015).
+    openusd
   ];
 
   # Thin aliases over cargo/robot-cli invocations only (Section 2.2 item 6):
