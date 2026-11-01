@@ -169,6 +169,8 @@ repository.
 | [M-24](#m-24) | `inverse_inertia_diagonal` costs `nv` forward-dynamics passes and runs inside the stance loop | cost | [02](02-pure-dynamics-core.md) |
 | [M-25](#m-25) | The model's declared actuators are not simulated; the stepper applies invented gains | defect | [05](05-passive-forces-and-actuators.md) |
 | [M-26](#m-26) | A USD angular drive's stiffness and damping are per degree and were read as per radian | defect | [05](05-passive-forces-and-actuators.md) |
+| [M-27](#m-27) | 15 of the G1's 33 colliders are dropped, and two boxes the model does not declare are fabricated | divergence | [07](07-collision-pipeline.md) |
+| [M-28](#m-28) | The model's declared drive gains are generated defaults, and holding a posture with them says nothing about the robot | divergence | [05](05-passive-forces-and-actuators.md) |
 
 ### 1.5 Status after the 2026-11-01 corrections
 
@@ -1474,6 +1476,80 @@ pelvis settles at 0.790 m and the kinetic energy reads 0.0000 J from t = 0.8 s.
 
 **Resolved**, with the test written as the raw attribute times 180/π rather than
 as a constant, so it states the claim it is making.
+
+### M-27
+
+**15 of the G1's 33 colliders are dropped, and two boxes the model does not
+declare are fabricated.** Severity: divergence. Owning step:
+[07](07-collision-pipeline.md).
+
+Audited by flattening the layer and counting colliders through the instance
+prototypes, since the G1 instances its collision geometry and a naive count
+reads prototypes rather than instances. Every prototype is instanced exactly
+once, so the scene has **33 colliders: 15 Mesh, 10 Sphere, 6 Cylinder, 2 Cube**,
+and the two cubes are the feet, on `left_ankle_roll_link` and
+`right_ankle_roll_link`.
+
+The import produces 35 shapes:
+
+- the 18 primitives, all correct;
+- the 15 meshes, kept as references and **not collided at all** — so the arms,
+  the head, the thighs and the shins have no contact geometry;
+- **2 axis-aligned bounding boxes that the model does not declare**, on `pelvis`
+  and `torso_link`, fitted to those links' collision-mesh vertices by
+  `usd::PROXY_LINKS`.
+
+The proxies are deliberate and documented rather than accidental: the narrow
+phase has no mesh support, so a link described only by mesh would otherwise have
+no collision. But a bounding box is not the shape. It encloses the mesh, so it is
+strictly larger than the geometry it stands for, where every other simulator
+reading this layer collides the mesh's convex hull. A torso modelled as its own
+AABB is a different robot from the waist up, and it is the reason the pelvis has
+contact geometry at all in these runs.
+
+The fix is convex-hull collision for mesh colliders, which is tractable rather
+than open-ended: `collision::gjk_epa` already works against any shape that can
+answer a support query, so a hull needs a vertex cloud and
+`argmax_i (v_i . d)`. That removes both halves of this entry at once — the 15
+dropped meshes become real geometry and the 2 fabricated proxies become
+unnecessary.
+
+Everything else about the load was checked against the layer and is correct:
+30 links with identical masses (total 33.341142 kg to the digit), all 30 inertia
+tensors matching `diagonalInertia` rotated by `principalAxes` to within 1e-6,
+and all 29 joints matching on kind, lower and upper limit, maximum velocity,
+effort and axis, with zero mismatches.
+
+### M-28
+
+**The model's declared drive gains are generated defaults, and holding a posture
+with them says nothing about the robot.** Severity: divergence. Owning step:
+[05](05-passive-forces-and-actuators.md).
+
+[M-25](#m-25) wired the model's actuators in and [M-26](#m-26) fixed their units.
+What then became visible is that the gains themselves are not the robot's.
+
+All 29 drives have `damping = 0.0004 × stiffness` to float precision, and
+`targetPosition = 0` on every one. A tuned set cannot look like that: critical
+damping is `kd = 2√(kp·I)`, so `kd/kp = 2√(I/kp)` varies with each joint's own
+inertia and stiffness. A single ratio across twenty-nine joints is a default
+somebody wrote once. Converted to per-radian the gains span 132 to
+13183 N·m/rad at a damping ratio of 0.003 to 0.03 — a very stiff, almost
+undamped servo — where the real G1's published joint gains are nearer
+150 N·m/rad.
+
+Applying them is still the faithful thing to do, because it is what a simulator
+reading `PhysicsDriveAPI` applies, and it is the only actuation the asset
+declares. The defect is in treating it as *the* behaviour. `ActuationMode` makes
+it a choice — `Drives`, `Damping` (the declared damping with the stiffness
+dropped) or `Zero` (no actuator force, which is what loading into MuJoCo gives
+before anything is commanded) — and `World::drive_gains_look_generated` reports
+the uniform ratio so a reader is not left attributing the rigidity to the
+robot's own tuning.
+
+Measured over one second, floating base: `drives` holds the pelvis at 0.7882 m
+with 0.0114 J settled; `damping` folds to 0.5638 m with 54.2 J; `zero` collapses
+to 0.1227 m with 126.0 J.
 
 ## 3. Cross-cutting observations
 

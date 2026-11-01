@@ -749,3 +749,32 @@ New run in `outputs/g1-stance-newton-replay/`: PASS, residual kinetic energy
 -5.1 mm. usdchecker clean on both replays.
 
 Gate: 1069 tests, fmt and clippy clean.
+
+## 2026-11-01 — the G1 load audited against the layer; actuation made a choice
+
+Prompted by two objections: the robot was completely rigid, and a simulator's
+default should not be to switch a model's motors on.
+
+The unit conversion of the previous entry is right -- OpenUSD and Omniverse both
+document angular drive stiffness as mass*DIST^2/degree/s^2, and Isaac Lab's
+writer converts N m/rad to N m/deg on the way out. What it exposed is that the
+declared gains are not the robot's: all 29 have damping = 0.0004 * stiffness to
+float precision with targetPosition = 0, giving a damping ratio of 0.003 to 0.03
+at up to 13183 N m/rad. Recorded as M-28. `ActuationMode` {Drives, Damping, Zero}
+and `--actuation` make it a choice, and the command warns about the uniform
+ratio.
+
+The load itself was audited against the flattened layer, counting colliders
+through the instance prototypes. Correct: 30 links with identical masses (total
+33.341142 kg), all 30 inertia tensors matching diagonalInertia rotated by
+principalAxes to 1e-6, and all 29 joints matching on kind, limits, velocity,
+effort and axis with zero mismatches.
+
+Not correct, recorded as M-27: of the 33 declared colliders (15 Mesh, 10 Sphere,
+6 Cylinder, 2 Cube) the 15 meshes are not collided at all, and two axis-aligned
+bounding boxes the model does not declare are fabricated on pelvis and
+torso_link by `usd::PROXY_LINKS`. The fix is convex-hull collision, which is
+tractable because `gjk_epa` already works against anything that answers a
+support query.
+
+Gate: 1072 tests, fmt and clippy clean.
