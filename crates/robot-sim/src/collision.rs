@@ -1257,8 +1257,18 @@ mod fuzz_tests {
     #[test]
     fn a_box_resting_flat_on_a_box_gives_its_four_bottom_corners() {
         // Lower box top at z = 0.1; upper box bottom 0.01 below it.
-        let lower = at(Primitive::Box { half: [0.5, 0.5, 0.1] }, [0.0, 0.0, 0.0]);
-        let upper = at(Primitive::Box { half: [0.5, 0.5, 0.1] }, [0.0, 0.0, 0.19]);
+        let lower = at(
+            Primitive::Box {
+                half: [0.5, 0.5, 0.1],
+            },
+            [0.0, 0.0, 0.0],
+        );
+        let upper = at(
+            Primitive::Box {
+                half: [0.5, 0.5, 0.1],
+            },
+            [0.0, 0.0, 0.19],
+        );
         let contacts = box_box_contacts(&upper, &lower).expect("overlapping");
         assert_eq!(contacts.len(), 4, "{contacts:?}");
         for c in &contacts {
@@ -1271,9 +1281,16 @@ mod fuzz_tests {
 
     #[test]
     fn a_tilted_box_on_a_box_still_gets_contacts_pushing_up() {
-        let lower = at(Primitive::Box { half: [0.5, 0.5, 0.1] }, [0.0, 0.0, 0.0]);
+        let lower = at(
+            Primitive::Box {
+                half: [0.5, 0.5, 0.1],
+            },
+            [0.0, 0.0, 0.0],
+        );
         let upper = Placed {
-            shape: Primitive::Box { half: [0.3, 0.3, 0.1] },
+            shape: Primitive::Box {
+                half: [0.3, 0.3, 0.1],
+            },
             rotation: rot_z(0.4),
             translation: [0.05, 0.0, 0.19],
         };
@@ -1285,8 +1302,18 @@ mod fuzz_tests {
 
     #[test]
     fn separated_boxes_give_no_manifold() {
-        let a = at(Primitive::Box { half: [0.5, 0.5, 0.5] }, [0.0, 0.0, 0.0]);
-        let b = at(Primitive::Box { half: [0.5, 0.5, 0.5] }, [0.0, 0.0, 1.2]);
+        let a = at(
+            Primitive::Box {
+                half: [0.5, 0.5, 0.5],
+            },
+            [0.0, 0.0, 0.0],
+        );
+        let b = at(
+            Primitive::Box {
+                half: [0.5, 0.5, 0.5],
+            },
+            [0.0, 0.0, 1.2],
+        );
         assert!(box_box_contacts(&a, &b).is_none());
         assert!(box_sat(&a, &b).is_none());
     }
@@ -1297,12 +1324,28 @@ mod fuzz_tests {
         let mut checked = 0;
         for case in 0..300 {
             let a = Placed {
-                shape: Primitive::Box { half: [rng.range(0.1, 0.6), rng.range(0.1, 0.6), rng.range(0.1, 0.6)] },
+                shape: Primitive::Box {
+                    half: [
+                        rng.range(0.1, 0.6),
+                        rng.range(0.1, 0.6),
+                        rng.range(0.1, 0.6),
+                    ],
+                },
                 rotation: rng.rotation(),
-                translation: [rng.range(-0.6, 0.6), rng.range(-0.6, 0.6), rng.range(-0.6, 0.6)],
+                translation: [
+                    rng.range(-0.6, 0.6),
+                    rng.range(-0.6, 0.6),
+                    rng.range(-0.6, 0.6),
+                ],
             };
             let b = Placed {
-                shape: Primitive::Box { half: [rng.range(0.1, 0.6), rng.range(0.1, 0.6), rng.range(0.1, 0.6)] },
+                shape: Primitive::Box {
+                    half: [
+                        rng.range(0.1, 0.6),
+                        rng.range(0.1, 0.6),
+                        rng.range(0.1, 0.6),
+                    ],
+                },
                 rotation: rng.rotation(),
                 translation: [0.0, 0.0, 0.0],
             };
@@ -1318,7 +1361,10 @@ mod fuzz_tests {
                     }
                     checked += 1;
                 }
-                None => assert!(exact <= 1e-9, "case {case}: separated but SAT overlaps {exact}"),
+                None => assert!(
+                    exact <= 1e-9,
+                    "case {case}: separated but SAT overlaps {exact}"
+                ),
             }
         }
         assert!(checked > 50, "{checked} overlapping cases");

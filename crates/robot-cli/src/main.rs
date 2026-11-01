@@ -119,7 +119,11 @@ fn run_multibody(flags: &[String]) -> i32 {
         Ok(scene) => scene,
         Err(message) => return invalid_flag(&message),
     };
-    let contact = match flags.iter().position(|a| a == "--contact").map(|i| flags.get(i + 1)) {
+    let contact = match flags
+        .iter()
+        .position(|a| a == "--contact")
+        .map(|i| flags.get(i + 1))
+    {
         None => robot_sim::articulated::ContactModel::Penalty,
         Some(Some(value)) if value == "penalty" => robot_sim::articulated::ContactModel::Penalty,
         Some(Some(value)) if value == "impedance" => {

@@ -187,7 +187,15 @@ pub fn default_steps(dt_seconds: f64) -> Result<u32, String> {
 /// `finish` leaves the directory's earlier committed run intact.
 #[cfg(test)]
 fn multibody(steps: u32, dt_seconds: f64, floating: bool, zero_torque: bool) -> i32 {
-    multibody_scene_to(steps, dt_seconds, floating, zero_torque, None, None, ContactModel::Penalty)
+    multibody_scene_to(
+        steps,
+        dt_seconds,
+        floating,
+        zero_torque,
+        None,
+        None,
+        ContactModel::Penalty,
+    )
 }
 
 /// [`multibody`] with an optional frame directory.
@@ -199,7 +207,15 @@ pub fn multibody_to(
     zero_torque: bool,
     out: Option<&Path>,
 ) -> i32 {
-    multibody_scene_to(steps, dt_seconds, floating, zero_torque, out, None, ContactModel::Penalty)
+    multibody_scene_to(
+        steps,
+        dt_seconds,
+        floating,
+        zero_torque,
+        out,
+        None,
+        ContactModel::Penalty,
+    )
 }
 
 /// As [`multibody_to`], with the environment read from `scene` (a USD layer)

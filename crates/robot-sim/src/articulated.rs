@@ -55,8 +55,8 @@
 use crate::collision::{self, Placed, Primitive, Proximity};
 use crate::contact::GroundContact;
 use crate::spatial::{
-    add3, add6, compose_pose, cross3, cross_motion_force, cross_motion_motion, dot3, dot6, mat3_mul,
-    inertia_apply, inertia_from_mass, inertia_transform_to_parent, join6, mat3_mul_vec,
+    add3, add6, compose_pose, cross3, cross_motion_force, cross_motion_motion, dot3, dot6,
+    inertia_apply, inertia_from_mass, inertia_transform_to_parent, join6, mat3_mul, mat3_mul_vec,
     mat3_transpose_mul_vec, matrix6_add, matrix6_sub, rotation_from_quat, scale3, scale6, split6,
     sub3, sub6, transform_force, transform_motion,
 };
@@ -539,9 +539,9 @@ impl ArticulatedBody {
             });
             for shape in &link.collision {
                 let primitive = match &shape.geometry {
-                    CollisionGeometry::Sphere { radius } => Some(Primitive::Sphere {
-                        radius: *radius,
-                    }),
+                    CollisionGeometry::Sphere { radius } => {
+                        Some(Primitive::Sphere { radius: *radius })
+                    }
                     CollisionGeometry::Box { half_extents } => Some(Primitive::Box {
                         half: [half_extents.x, half_extents.y, half_extents.z],
                     }),
@@ -738,11 +738,7 @@ impl ArticulatedBody {
     /// to the call into [`GroundContact::force`], whose signature is public.
     /// Contact rows at the current configuration: every ground contact point
     /// that penetrates the plane, and every penetrating non-adjacent pair point.
-    fn contact_rows(
-        &self,
-        world: &[Pose],
-        ground: &GroundContact,
-    ) -> Vec<ContactRow> {
+    fn contact_rows(&self, world: &[Pose], ground: &GroundContact) -> Vec<ContactRow> {
         let mut rows = Vec::new();
         for cs in &self.contact_shapes {
             let placed = place_shape(cs, &world[cs.body]);
@@ -807,7 +803,9 @@ impl ArticulatedBody {
     /// `twists` at the poses `world`. Positive means the two bodies separate.
     fn row_normal_velocity(row: &ContactRow, world: &[Pose], twists: &[[f64; 6]]) -> f64 {
         let va = point_velocity(twists[row.a], &world[row.a], row.pa);
-        let vb = row.b.map_or([0.0; 3], |b| point_velocity(twists[b], &world[b], row.pb));
+        let vb = row
+            .b
+            .map_or([0.0; 3], |b| point_velocity(twists[b], &world[b], row.pb));
         dot3(row.n, sub3(va, vb))
     }
 
@@ -872,7 +870,8 @@ impl ArticulatedBody {
         for (i, row) in rows.iter().enumerate() {
             let mut unit = vec![ZERO6; n];
             Self::add_row_wrench(&mut unit, row, &world, 1.0);
-            let response = self.aba_with_externals(q, &zeros, &zeros, Vec3::new(0.0, 0.0, 0.0), &unit)?;
+            let response =
+                self.aba_with_externals(q, &zeros, &zeros, Vec3::new(0.0, 0.0, 0.0), &unit)?;
             let (_, v_resp) = self.kinematics(q, &response);
             for (j, other) in rows.iter().enumerate() {
                 a[j][i] = Self::row_normal_velocity(other, &world, &v_resp);
@@ -2467,7 +2466,8 @@ pub(crate) mod tests {
         // isolated body the penalty equilibrium: penetration m g / k.
         let (mass, radius) = (2.0, 0.1);
         let profile = free_sphere_body(mass, radius);
-        let body = ArticulatedBody::from_profile(&profile).with_contact_model(ContactModel::Impedance);
+        let body =
+            ArticulatedBody::from_profile(&profile).with_contact_model(ContactModel::Impedance);
         let ground = test_ground(0.0);
         let mut q = FREE_IDENTITY.to_vec();
         q[2] = 0.2;
