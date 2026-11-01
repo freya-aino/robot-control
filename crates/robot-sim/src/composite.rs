@@ -1480,7 +1480,7 @@ pub fn deriv_expmap(r: [f64; 3], vel: [f64; 3]) -> [f64; 3] {
 /// maps each stage velocity back through the differential of the exponential
 /// map at the stage's own rotation increment, which is what recovers the
 /// method's order on the rotation manifold.
-fn rk_correct_vel(model: &CompositeModel, vel: &mut [f64], dqvel: &[f64], dt: f64) {
+pub fn rk_correct_free_velocity(model: &CompositeModel, vel: &mut [f64], dqvel: &[f64], dt: f64) {
     for body in &model.bodies {
         if body.kind != JointKind::Free {
             continue;
@@ -1564,7 +1564,7 @@ impl CompositeState {
 
             // The Butcher sums use the corrected one.
             let mut corrected = qdi;
-            rk_correct_vel(model, &mut corrected, &d_qvel, dt);
+            rk_correct_free_velocity(model, &mut corrected, &d_qvel, dt);
             stage_vel.push(corrected);
             stage_acc.push(fi);
         }

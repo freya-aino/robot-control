@@ -74,3 +74,4 @@ pub mod passive;
 pub mod pendulum;
 pub mod solver;
 pub mod spatial;
+pub mod world;
