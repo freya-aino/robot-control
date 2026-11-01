@@ -170,6 +170,11 @@ struct Body {
 /// A profile's joint tree, preprocessed into the articulated structure
 /// the dynamics algorithms recurse over.
 pub struct ArticulatedBody {
+    /// Weld body of each body: the top-most ancestor reached through `Fixed`
+    /// joints. Used by the collision pair filter.
+    weld: Vec<usize>,
+    /// Weld body of each weld body's parent, or `None` at a tree root.
+    weld_parent: Vec<Option<usize>>,
     contact_model: ContactModel,
     bodies: Vec<Body>,
     n_dof: usize,
@@ -181,11 +186,6 @@ pub struct ArticulatedBody {
 
 /// Points per cylinder rim used when a cylinder contacts the ground.
 const RIM_SAMPLES: usize = 8;
-
-/// Overlap allowed between two adjacent links at their shared joint, in metres.
-/// The joint geometry overlaps by design, so penalty contact between adjacent
-/// shapes starts only beyond this depth.
-pub const ADJACENT_OVERLAP_ALLOWANCE: f64 = 0.003;
 
 /// How ground and pair contact forces are computed.
 ///
@@ -230,6 +230,11 @@ struct ContactRow {
 /// frame. Shapes are contact primitives: the sphere, box and cylinder of the
 /// profile. Mesh shapes are not modelled in contact.
 struct ContactShape {
+    /// Collision type bitmask (`contype`). A pair is considered only if one
+    /// shape's type intersects the other's affinity.
+    contype: u32,
+    /// Collision affinity bitmask (`conaffinity`).
+    conaffinity: u32,
     body: usize,
     shape: Primitive,
     rotation: [f64; 9],
@@ -564,6 +569,14 @@ impl ArticulatedBody {
                         let q = shape.pose.rotation;
                         let c = shape.pose.translation;
                         contact_shapes.push(ContactShape {
+                            // `robot-model` carries no mask fields, so every
+                            // shape collides with every other by default,
+                            // matching the example's own geom defaults
+                            // (contype = conaffinity = 1). Authoring them per
+                            // shape is a `robot-model` change; the mechanism
+                            // that consumes them lives here.
+                            contype: 1,
+                            conaffinity: 1,
                             body: index,
                             shape: shape_primitive,
                             rotation: rotation_from_quat(q.w, q.x, q.y, q.z),
@@ -576,7 +589,29 @@ impl ArticulatedBody {
             body_index.push((link_id, index));
         }
 
+        // Weld bodies: the top-most ancestor reachable through zero-degree-of-
+        // freedom (`Fixed`) joints, so a rigidly welded chain is one body for
+        // collision-filtering purposes. The example's `body_weldid`
+        // (02 section 0).
+        let mut weld: Vec<usize> = (0..bodies.len()).collect();
+        for i in 0..bodies.len() {
+            if bodies[i].dof_width == 0 {
+                if let Some(p) = bodies[i].parent {
+                    weld[i] = weld[p];
+                }
+            }
+        }
+        // The weld body of each weld body's parent, for the parent-child rule.
+        let weld_parent: Vec<Option<usize>> = (0..bodies.len())
+            .map(|i| {
+                let w = weld[i];
+                bodies[w].parent.map(|p| weld[p])
+            })
+            .collect();
+
         Self {
+            weld,
+            weld_parent,
             bodies,
             n_dof: next_dof,
             n_position: next_position,
@@ -766,19 +801,18 @@ impl ArticulatedBody {
         }
         for (a_index, a) in self.contact_shapes.iter().enumerate() {
             for b in &self.contact_shapes[a_index + 1..] {
-                if a.body == b.body {
+                if !self.pair_can_collide(a, b) {
                     continue;
                 }
-                let adjacent = self.bodies[a.body].parent == Some(b.body)
-                    || self.bodies[b.body].parent == Some(a.body);
-                let allowance = if adjacent {
-                    ADJACENT_OVERLAP_ALLOWANCE
-                } else {
-                    0.0
-                };
                 let (wa, wb) = (world[a.body], world[b.body]);
                 let pa = place_shape(a, &wa);
                 let pb = place_shape(b, &wb);
+                // Broad phase, cheapest test first, before any support-mapping
+                // call (03 sections 2.2 and 2.4).
+                if collision::spheres_apart(&pa, &pb, 0.0) || collision::aabbs_apart(&pa, &pb, 0.0)
+                {
+                    continue;
+                }
                 // Box pairs give a corner manifold; other pairs one contact.
                 let contacts: Vec<collision::Contact> = match (pa.shape, pb.shape) {
                     (Primitive::Box { .. }, Primitive::Box { .. }) => {
@@ -790,7 +824,7 @@ impl ArticulatedBody {
                     },
                 };
                 for contact in contacts {
-                    let depth = contact.depth - allowance;
+                    let depth = contact.depth;
                     if depth > 0.0 {
                         rows.push(ContactRow {
                             a: a.body,
@@ -805,6 +839,54 @@ impl ArticulatedBody {
             }
         }
         rows
+    }
+
+    /// Whether a pair of collision shapes may generate a contact.
+    ///
+    /// Transferred from the example's `filterBitmask` and `filterBodyPair`
+    /// (03 sections 2.1 and 2.5), with the sleep clauses omitted because this
+    /// project has no sleeping:
+    ///
+    /// 1. the bitmask test: one shape's `contype` must intersect the other's
+    ///    `conaffinity`, in either direction;
+    /// 2. the two shapes must not belong to the same **weld** body, so a chain
+    ///    of links joined by `Fixed` joints never self-collides;
+    /// 3. at least one weld body must carry degrees of freedom, since no force
+    ///    can act between two rigidly fixed bodies;
+    /// 4. the two weld bodies must not be parent and child of one another.
+    ///
+    /// Appendix D M-16 records what this replaces: a single global
+    /// `ADJACENT_OVERLAP_ALLOWANCE` of 3 mm subtracted from the depth of every
+    /// immediate parent-child pair. That was simultaneously too small for
+    /// joints whose shapes overlap by more than 3 mm by design, which produced
+    /// a permanent spurious force pushing the links apart for the whole run,
+    /// and too large for shapes that should genuinely collide at 2 mm. It also
+    /// had no per-pair or per-shape control of any kind, so a model needing one
+    /// exception needed a code change.
+    ///
+    /// Note what is deliberately **not** excluded: siblings, and grandparent
+    /// to grandchild. The example excludes only the parent-child relation,
+    /// because a shoulder and a hip genuinely can collide with the links two
+    /// joints away from them, and excluding them would hide real contact.
+    fn pair_can_collide(&self, a: &ContactShape, b: &ContactShape) -> bool {
+        // 1. bitmask
+        if (a.contype & b.conaffinity) == 0 && (b.contype & a.conaffinity) == 0 {
+            return false;
+        }
+        let (wa, wb) = (self.weld[a.body], self.weld[b.body]);
+        // 2. same welded rigid body
+        if wa == wb {
+            return false;
+        }
+        // 3. neither weld body can move
+        if self.bodies[wa].dof_width == 0 && self.bodies[wb].dof_width == 0 {
+            return false;
+        }
+        // 4. parent and child
+        if self.weld_parent[a.body] == Some(wb) || self.weld_parent[b.body] == Some(wa) {
+            return false;
+        }
+        true
     }
 
     /// Relative separating velocity along a row's normal, for the body twists
@@ -2907,5 +2989,78 @@ pub(crate) mod tests {
                 qdd[i]
             );
         }
+    }
+    #[test]
+    fn the_pair_filter_excludes_the_relations_the_example_excludes() {
+        // Appendix D M-16. The G1 has a deep chain with `Fixed` joints in it,
+        // so it exercises every clause: same weld body, immovable pairs, and
+        // parent-child. What must *not* be excluded is as important: a pair two
+        // joints apart has to stay collidable, or real self-contact is hidden.
+        let profile = robot_model::fixtures::unitree_g1_29dof_floating_base().unwrap();
+        let body = ArticulatedBody::from_profile(&profile);
+        let shapes = &body.contact_shapes;
+        assert!(shapes.len() > 4, "the fixture should carry contact shapes");
+
+        let mut same_weld = 0;
+        let mut parent_child = 0;
+        let mut allowed = 0;
+        for (i, a) in shapes.iter().enumerate() {
+            for b in &shapes[i + 1..] {
+                let can = body.pair_can_collide(a, b);
+                if body.weld[a.body] == body.weld[b.body] {
+                    assert!(!can, "a pair on one weld body must be excluded");
+                    same_weld += 1;
+                } else if body.weld_parent[a.body] == Some(body.weld[b.body])
+                    || body.weld_parent[b.body] == Some(body.weld[a.body])
+                {
+                    assert!(!can, "a parent-child pair must be excluded");
+                    parent_child += 1;
+                } else if can {
+                    allowed += 1;
+                }
+            }
+        }
+        assert!(same_weld > 0, "the fixture should have same-weld pairs");
+        assert!(
+            parent_child > 0,
+            "the fixture should have parent-child pairs"
+        );
+        assert!(
+            allowed > 0,
+            "pairs further apart than parent-child must stay collidable"
+        );
+    }
+
+    #[test]
+    fn a_zero_collision_mask_excludes_a_pair_that_would_otherwise_collide() {
+        // The bitmask is the per-pair control the fixed overlap allowance never
+        // had. Masks default to 1, so clearing one must be the only difference.
+        let profile = robot_model::fixtures::unitree_g1_29dof_floating_base().unwrap();
+        let mut body = ArticulatedBody::from_profile(&profile);
+        let (i, j) = {
+            let shapes = &body.contact_shapes;
+            let mut found = None;
+            'outer: for (i, a) in shapes.iter().enumerate() {
+                for (j, b) in shapes.iter().enumerate().skip(i + 1) {
+                    if body.pair_can_collide(a, b) {
+                        found = Some((i, j));
+                        break 'outer;
+                    }
+                }
+            }
+            found.expect("some pair collides")
+        };
+        body.contact_shapes[i].contype = 0;
+        body.contact_shapes[i].conaffinity = 0;
+        let a = ContactShape {
+            ..body.contact_shapes[i]
+        };
+        let b = ContactShape {
+            ..body.contact_shapes[j]
+        };
+        assert!(
+            !body.pair_can_collide(&a, &b),
+            "clearing both masks must exclude the pair"
+        );
     }
 }

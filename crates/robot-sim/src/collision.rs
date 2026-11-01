@@ -174,6 +174,68 @@ impl Placed {
         add(mat_vec(&self.rotation, p), self.translation)
     }
 
+    /// World axis-aligned bounding box as `(centre, half_extents)`.
+    ///
+    /// Exact for each primitive: a sphere is its radius on every axis, a
+    /// capsule the box of its swept segment, a box the absolute row sums of its
+    /// rotation times its half extents, and a cylinder its rim circle swept
+    /// along its axis.
+    ///
+    /// This and [`Placed::bounding_sphere`] are the two cheap rejection tests
+    /// the example's broad phase runs before any narrow-phase call
+    /// (`mj_filterSphere` and `filterBox`, 03 sections 2.2 and 2.4). Appendix D
+    /// M-15 records that neither existed on the pipeline: every shape pair went
+    /// straight to a full GJK query, and `bounding_sphere` was written but
+    /// called from nowhere in the workspace.
+    #[must_use]
+    pub fn world_aabb(&self) -> (V3, V3) {
+        let r = &self.rotation;
+        // Column j of the rotation is shape axis j in world.
+        let axis_abs = |k: usize| [r[0][k].abs(), r[1][k].abs(), r[2][k].abs()];
+        match self.shape {
+            Primitive::Sphere { radius } => (self.translation, [radius, radius, radius]),
+            Primitive::Capsule {
+                half_height,
+                radius,
+            } => {
+                let up = axis_abs(2);
+                (
+                    self.translation,
+                    [
+                        up[0] * half_height + radius,
+                        up[1] * half_height + radius,
+                        up[2] * half_height + radius,
+                    ],
+                )
+            }
+            Primitive::Box { half } => {
+                let (ax, ay, az) = (axis_abs(0), axis_abs(1), axis_abs(2));
+                (
+                    self.translation,
+                    [
+                        ax[0] * half[0] + ay[0] * half[1] + az[0] * half[2],
+                        ax[1] * half[0] + ay[1] * half[1] + az[1] * half[2],
+                        ax[2] * half[0] + ay[2] * half[1] + az[2] * half[2],
+                    ],
+                )
+            }
+            Primitive::Cylinder {
+                radius,
+                half_height,
+            } => {
+                // The extent along world axis i is |n_z,i| * h plus the radius
+                // of the rim projected onto that axis, which is
+                // r * sqrt(1 - n_z,i^2).
+                let up = axis_abs(2);
+                let half = |i: usize| {
+                    let c = up[i].min(1.0);
+                    up[i] * half_height + radius * (1.0 - c * c).max(0.0).sqrt()
+                };
+                (self.translation, [half(0), half(1), half(2)])
+            }
+        }
+    }
+
     /// A bounding sphere `(centre, radius)` in the world.
     #[must_use]
     pub fn bounding_sphere(&self) -> (V3, f64) {
@@ -191,6 +253,28 @@ impl Placed {
         };
         (self.translation, r)
     }
+}
+
+/// `mj_filterSphere` of 03 section 2.4, bounding-sphere form: `true` when the
+/// two shapes are far enough apart that no contact within `margin` is possible.
+///
+/// The cheapest useful rejection, and exact for spheres.
+#[must_use]
+pub fn spheres_apart(a: &Placed, b: &Placed, margin: f64) -> bool {
+    let (ca, ra) = a.bounding_sphere();
+    let (cb, rb) = b.bounding_sphere();
+    let bound = ra + rb + margin;
+    norm2(sub(cb, ca)) > bound * bound
+}
+
+/// `filterBox` of 03 section 2.2: `true` when the world axis-aligned bounding
+/// boxes are separated on some axis. Touching counts as overlapping, as the
+/// example's strict comparison does.
+#[must_use]
+pub fn aabbs_apart(a: &Placed, b: &Placed, margin: f64) -> bool {
+    let (c1, h1) = a.world_aabb();
+    let (c2, h2) = b.world_aabb();
+    (0..3).any(|k| c1[k] + h1[k] + margin < c2[k] - h2[k] || c2[k] + h2[k] + margin < c1[k] - h1[k])
 }
 
 /// The result of a narrow-phase test between two convex shapes.
@@ -1803,6 +1887,73 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn the_world_aabb_bounds_every_primitive_it_is_asked_about() {
+        // Checked against the support function, which is independent of the
+        // bounding-box formulas: the box must contain the extreme point in
+        // each of the six axis directions, and must not be loose by more than
+        // a tolerance in any of them.
+        let shapes = [
+            Primitive::Sphere { radius: 0.3 },
+            Primitive::Capsule {
+                half_height: 0.4,
+                radius: 0.15,
+            },
+            Primitive::Box {
+                half: [0.2, 0.35, 0.1],
+            },
+            Primitive::Cylinder {
+                radius: 0.25,
+                half_height: 0.3,
+            },
+        ];
+        let rotations = [identity(), rot_z(0.6), rot_z(-1.2)];
+        for shape in shapes {
+            for rotation in rotations {
+                let placed = Placed {
+                    shape,
+                    rotation,
+                    translation: [0.7, -0.2, 0.4],
+                };
+                let (c, h) = placed.world_aabb();
+                for k in 0..3 {
+                    for sign in [-1.0, 1.0] {
+                        let mut dir = [0.0; 3];
+                        dir[k] = sign;
+                        let extreme = dot(placed.support(dir), dir);
+                        let face = sign * c[k] + h[k];
+                        assert!(
+                            extreme <= face + 1e-9,
+                            "{shape:?} axis {k} sign {sign}: support {extreme} beyond face {face}"
+                        );
+                        assert!(
+                            face - extreme < 1e-6,
+                            "{shape:?} axis {k} sign {sign}: box loose by {}",
+                            face - extreme
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_broad_phase_rejects_most_distant_pairs() {
+        // The point of the filters is that they are cheap and reject a lot.
+        // Two shapes a metre apart must be rejected by the first test.
+        let a = at(Primitive::Sphere { radius: 0.1 }, [0.0, 0.0, 0.0]);
+        let b = at(Primitive::Sphere { radius: 0.1 }, [1.0, 0.0, 0.0]);
+        assert!(spheres_apart(&a, &b, 0.0));
+        assert!(aabbs_apart(&a, &b, 0.0));
+        // Just touching: neither may reject.
+        let c = at(Primitive::Sphere { radius: 0.1 }, [0.2, 0.0, 0.0]);
+        assert!(!spheres_apart(&a, &c, 0.0));
+        assert!(!aabbs_apart(&a, &c, 0.0));
+        // The margin widens the test, so a gap below it is kept.
+        let d = at(Primitive::Sphere { radius: 0.1 }, [0.25, 0.0, 0.0]);
+        assert!(spheres_apart(&a, &d, 0.0));
+        assert!(!spheres_apart(&a, &d, 0.1));
+    }
 }
 
 #[cfg(test)]
@@ -2135,5 +2286,51 @@ mod fuzz_tests {
             overlapping > 50,
             "the sample must contain overlaps ({overlapping})"
         );
+    }
+    #[test]
+    fn the_broad_phase_filters_never_reject_a_touching_pair() {
+        // A filter that discards a pair the narrow phase would have reported is
+        // a silent loss of contact, so the only property that matters is this
+        // one: whenever the shapes actually overlap, neither filter rejects
+        // them. Checked over randomised pairs.
+        let mut rng = Lcg(23);
+        let mut overlaps = 0;
+        for case in 0..400 {
+            let a = Placed {
+                shape: Primitive::Box {
+                    half: [
+                        rng.range(0.1, 0.4),
+                        rng.range(0.1, 0.4),
+                        rng.range(0.1, 0.4),
+                    ],
+                },
+                rotation: rng.rotation(),
+                translation: [
+                    rng.range(-0.6, 0.6),
+                    rng.range(-0.6, 0.6),
+                    rng.range(-0.6, 0.6),
+                ],
+            };
+            let b = Placed {
+                shape: Primitive::Cylinder {
+                    radius: rng.range(0.1, 0.3),
+                    half_height: rng.range(0.1, 0.4),
+                },
+                rotation: rng.rotation(),
+                translation: [0.0, 0.0, 0.0],
+            };
+            if let Proximity::Overlap(_) = proximity(&a, &b) {
+                overlaps += 1;
+                assert!(
+                    !spheres_apart(&a, &b, 0.0),
+                    "case {case}: bounding spheres rejected an overlapping pair"
+                );
+                assert!(
+                    !aabbs_apart(&a, &b, 0.0),
+                    "case {case}: AABBs rejected an overlapping pair"
+                );
+            }
+        }
+        assert!(overlaps > 40, "only {overlaps} overlapping cases generated");
     }
 }
