@@ -44,11 +44,12 @@ reference):
 - `mj_transmission` beyond the direct joint case: tendon, site and slider-crank
   transmissions, so `moment' * force` is the identity on one degree of freedom.
 - The actuator-delay / `mj_readCtrl` history buffer and the bad-control zeroing.
-- `mj_actuatorDamping`, which in the example feeds both the damper and the `qH`
-  term of `mj_EulerSkip` — so a drive's damping here is explicit, not folded
-  into the implicit solve. At the G1's measured damping ratios this is not a
-  stability risk, but it is a divergence, and it is the reason a stiffer gain
-  set would need [03](03-integrators.md)'s implicit path first.
+- `mj_actuatorDamping` as a separately-named force. A drive's damping **is**
+  now folded into the implicit solve: [03](03-integrators.md)'s
+  `Integrator::ImplicitFast` builds `qH = M + h diag(kd)` from the declared
+  drive damping, so a stiffer gain set than the layer's is usable. What is not
+  ported is the example's separate accounting of actuator damping as its own
+  passive term.
 - `mj_springdamper`: polynomial stiffness and damping (only the linear
   coefficient is used); free and ball joint springs.
 - `mj_passive`: gravity compensation, fluid, contact-passive and adhesion.

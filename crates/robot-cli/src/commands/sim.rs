@@ -16,6 +16,7 @@ use super::{EXIT_FAILURE, EXIT_USAGE};
 use robot_model::joint::JointKind;
 use robot_model::profile::RobotProfile;
 use robot_sim::contact::GroundContact;
+use robot_sim::options::Integrator;
 use robot_sim::pendulum::{Pendulum, PendulumParams, PendulumState};
 use robot_sim::world::ActuationMode;
 use robot_types::time::{ClockId, Duration, Timestamp};
@@ -124,6 +125,8 @@ pub struct MultibodyRun<'a> {
     /// the joint comes within this distance of a bound rather than only after
     /// crossing it.
     pub limit_margin: f64,
+    /// Which integrator advances the state.
+    pub integrator: Integrator,
 }
 
 /// Duration (s) that the floating-base verdict covers. `robot sim multibody`
@@ -223,6 +226,7 @@ fn multibody(steps: u32, dt_seconds: f64, floating: bool, zero_torque: bool) -> 
         scene: None,
         actuation: ActuationMode::Drives,
         limit_margin: 0.0,
+        integrator: Integrator::SemiImplicitEuler,
     })
 }
 
@@ -244,6 +248,7 @@ pub fn multibody_to(
         scene: None,
         actuation: ActuationMode::Drives,
         limit_margin: 0.0,
+        integrator: Integrator::SemiImplicitEuler,
     })
 }
 
@@ -266,6 +271,7 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
         scene,
         actuation,
         limit_margin,
+        integrator,
     } = run;
     let scene_path: std::path::PathBuf =
         scene.map_or_else(|| std::path::PathBuf::from(GROUND_SCENE), Path::to_path_buf);
@@ -385,6 +391,7 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
         floating,
         actuation,
         limit_margin,
+        integrator,
     );
     if floating {
         // Place the pelvis so the lowest contact point sits STANCE_CLEARANCE
@@ -420,6 +427,7 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
     };
     println!("G1 multibody simulation ({mode}): {steps} steps at {dt_seconds} s");
     println!("  path:                    {}", sim.describe());
+    println!("  integrator:              {integrator:?}");
     println!("  degrees of freedom:      {}", sim.dof());
     if !zero_torque {
         println!("  actuation:               {}", sim.actuation());

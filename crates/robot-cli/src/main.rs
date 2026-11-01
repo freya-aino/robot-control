@@ -144,6 +144,20 @@ fn run_multibody(flags: &[String]) -> i32 {
     if !limit_margin.is_finite() || limit_margin < 0.0 {
         return invalid_flag("--limit-margin must be finite and non-negative");
     }
+    // `specs/09` item 1: the integrator is a per-run knob.
+    let integrator = match flags
+        .iter()
+        .position(|a| a == "--integrator")
+        .map(|i| flags.get(i + 1))
+    {
+        None => robot_sim::options::Integrator::SemiImplicitEuler,
+        Some(Some(v)) if v == "euler" => robot_sim::options::Integrator::SemiImplicitEuler,
+        Some(Some(v)) if v == "implicitfast" => robot_sim::options::Integrator::ImplicitFast,
+        Some(Some(v)) if v == "rk4" => robot_sim::options::Integrator::Rk4,
+        Some(_) => {
+            return invalid_flag("--integrator expects euler, implicitfast or rk4");
+        }
+    };
     let actuation = match flags
         .iter()
         .position(|a| a == "--actuation")
@@ -166,6 +180,7 @@ fn run_multibody(flags: &[String]) -> i32 {
         scene: scene.as_deref(),
         actuation,
         limit_margin,
+        integrator,
     })
 }
 
@@ -227,7 +242,7 @@ fn print_usage() {
     eprintln!("  robot data inspect <path>");
     eprintln!("  robot motion validate <path>");
     eprintln!("  robot sim qualify [--steps N] [--dt SECONDS]");
-    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--actuation drives|damping|zero] [--limit-margin RAD]");
+    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--actuation drives|damping|zero] [--limit-margin RAD]\n           [--integrator euler|implicitfast|rk4]");
     eprintln!("  robot eval summarize <values...>");
     eprintln!();
     eprintln!("named in PLAN.md but not implemented yet:");

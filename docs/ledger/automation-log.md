@@ -932,3 +932,39 @@ gitignored scratch rather than an archive, and that the reproducible record of a
 run is its command and commit rather than the files.
 
 Gate: 1080 tests, fmt and clippy clean. usdchecker passes on both replays.
+
+## 2026-11-01 — implicitfast: step 03 item 4's MUST met
+
+`Integrator::ImplicitFast` / `--integrator implicitfast` implements
+`mj_implicitSkip` with `flg_bias = 0` (example 01 section 9.2): the smooth
+forces stay at the old velocity and their velocity derivative goes into the
+matrix, so the unconstrained acceleration solves
+`(M - h dF/dv) qacc = tau - qfrc_bias`.
+
+For the forces this crate applies the derivative is **diagonal**, which is a
+property of the force set rather than a simplification: the smooth forces are a
+drive's `kp (ctrl - q) - kd qd` and a joint damper's `-kd qd`, only the damping
+terms depend on velocity, and each depends on one degree of freedom's own
+velocity. So `qH = M + h diag(kd)` adds to the sparse mass matrix's own diagonal
+and needs no new structure. The example's reset of a free body's six rows to `M`
+happens for free, since a Free joint carries no actuator and so no kd.
+
+Measured, with the G1's drive damping scaled up and its stiffness zeroed at
+dt = 2 ms: the explicit step drives the damped hinges to |qd| = 5.1e2 from a
+start of 0.5, while implicitfast keeps them at 0.74 -- a 685x difference. With
+the damping removed the two agree to 1e-12, which is the check that this is the
+same dynamics and not a different model.
+
+On the G1's **declared** gains it changes nothing measurable: a 2-second stance
+gives a pelvis minimum of 0.7882 m under Euler and 0.7881 m under implicitfast,
+both PASS. That is the correct outcome and is recorded so the feature is not
+oversold -- the layer's damping is far below the explicit ceiling, so the
+integrator removes a limit rather than changing an answer. What it buys is that
+a stiffer gain set is now usable, and step 05 no longer has to record a drive's
+damping as explicit-only.
+
+Not ported: full `implicit` (the qLU path with the recursive-Newton-Euler
+derivative) and `mjd_freeMhat`'s free-body gyroscopic block, which is what makes
+implicitfast and implicit identical for a standalone free body.
+
+Specs at 0.1.8-draft. Gate: 1082 tests, fmt and clippy clean.

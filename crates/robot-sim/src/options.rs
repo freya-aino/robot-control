@@ -32,6 +32,22 @@ pub enum Integrator {
     /// the new velocity. The cheapest, and the only one the legacy
     /// `MultibodyState::step` path offers.
     SemiImplicitEuler,
+    /// `implicitfast`: a semi-implicit position update with the velocity
+    /// derivative of the smooth forces folded into the solve
+    /// (`mj_implicitSkip` with `flg_bias = 0`, example 01 section 9.2).
+    ///
+    /// `specs/03-integrators.md` item 4 makes this a MUST before any claim of
+    /// "stable at a usable timestep on a real humanoid", and the reason is
+    /// damping. An explicit damper with gain `kd` amplifies rather than removes
+    /// velocity once `kd > m_eff / (2 h)`, so an explicit step bounds the
+    /// damping a model may declare. Solving `(M - h dF/dv) a = F` instead has no
+    /// such bound: the stiffer the damper, the more the matrix dominates.
+    ///
+    /// This matters for the G1 specifically because its drives carry their
+    /// damping as a force, so under [`Self::SemiImplicitEuler`] that damping is
+    /// explicit and a stiffer gain set than the layer's declared one could not
+    /// be used.
+    ImplicitFast,
     /// Classical fourth-order Runge-Kutta, including the
     /// Runge-Kutta-Munthe-Kaas correction that makes it higher order on a
     /// rotating free body (`crate::composite::CompositeState::rk4_step`).

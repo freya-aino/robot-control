@@ -13,8 +13,9 @@ as key/value pairs so a run carries the configuration that produced it, which is
 Section 12.1's requirement. Appendix D M-21 is closed.
 
 Every knob is also reachable from a run, not only from `SimOptions`:
-`--limit-margin` was added to `robot sim multibody` when the zero-torque
-collapse showed what the default costs. A knob that only library code can set
+`--limit-margin` and `--integrator` were both added to `robot sim multibody`
+when a run needed them — the first when the zero-torque collapse showed what the
+default costs, the second when `implicitfast` landed. A knob that only library code can set
 does not satisfy item 1.
 
 Three knobs were added by measurement rather than by enumeration, and each has

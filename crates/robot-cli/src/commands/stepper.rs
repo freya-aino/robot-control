@@ -31,7 +31,7 @@
 
 use robot_model::profile::RobotProfile;
 use robot_sim::contact::GroundContact;
-use robot_sim::options::SimOptions;
+use robot_sim::options::{Integrator, SimOptions};
 use robot_sim::world::{ActuationMode, Ground, State, World};
 use robot_types::time::Duration;
 
@@ -70,11 +70,13 @@ impl Stepper {
         floating: bool,
         mode: ActuationMode,
         limit_margin: f64,
+        integrator: Integrator,
     ) -> Self {
         let options = SimOptions {
             timestep: Duration::from_secs_f64(dt_seconds),
             condim: 3,
             limit_margin,
+            integrator,
             ..SimOptions::default()
         };
         let mut world = World::from_profile(profile, options);

@@ -2,7 +2,7 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md)
 
-**Status**: **Running, selectable per run; the implicit family is the gap.**
+**Status**: **Running, selectable per run, and `implicitfast` has landed.**
 `World::step` integrates with whichever integrator `options::SimOptions` names,
 so item 5 is met, and it is the stepper `robot sim multibody` runs — Appendix D
 M-17 is closed.
@@ -22,21 +22,60 @@ to first order, which is worth stating as specification: an integrator's order
 is a claim about the whole right-hand side, and in contact the constraint force
 is part of it.
 
-**Not ported, and now the substantive gap**: `mj_implicit` / `mj_implicitSkip`
-and the sparse `implicit`/`implicitfast` Jacobian path — non-diagonal
-derivatives and the Coriolis derivative. Item 4 makes `implicitfast` a MUST
-before any claim of "stable at a usable timestep on a real humanoid", and that
-claim is not yet available.
+**`implicitfast` is implemented** (`Integrator::ImplicitFast`,
+`--integrator implicitfast`), which is item 4's MUST. It is `mj_implicitSkip`
+with `flg_bias = 0` (example 01 section 9.2): the smooth forces stay at the old
+velocity and their velocity derivative goes into the matrix, so the
+unconstrained acceleration solves
 
-Two things changed what this gap costs. A drive's damping is applied explicitly
-rather than folded into the `qH` term of `mj_EulerSkip`
-([05](05-passive-forces-and-actuators.md)), so a stiffer gain set than the G1's
-declared one would need this path first. And the `dt = 5e-4` divergence this
-step was partly written around no longer reproduces: the G1 holds a stance for
-2 s at `dt = 1e-4` and at `dt = 5e-4` on the corrected path, with the contact
-constraint rather than a penalty spring and the model's own drives rather than a
-hand-written hold. The original divergence is therefore not attributable to the
-integrator alone, and the step should stop implying it is.
+`(M - h dF/dv) qacc = tau - qfrc_bias`
+
+instead of `M qacc = tau - qfrc_bias`. For the forces this crate applies the
+derivative **is diagonal**, and that is a property of the force set rather than
+a simplification: the smooth forces are a drive's `kp (ctrl - q) - kd qd` and a
+joint damper's `-kd qd`, only the damping terms depend on velocity, and each
+depends on one degree of freedom's own velocity. So `qH = M + h diag(kd)`, which
+adds to the sparse mass matrix's own diagonal and needs no new structure. A
+fluid force or a tendon damper would make it non-diagonal (`mjd_passive_vel`
+covers both) and neither is implemented.
+
+Example 01 section 9.2 resets a standalone free body's six rows of `qH` to `M`
+to keep the factorisation well defined; that happens here for free, because a
+`Free` joint carries no actuator and so no `kd` is added to those rows at all.
+
+**What it buys, and what it does not.** The property is that an explicit damper
+with gain `kd` amplifies rather than removes velocity once
+`kd > m_eff / (2 h)`, so an explicit step puts a **ceiling** on the damping a
+model may declare. Measured on the G1 with its drive damping scaled up and its
+stiffness zeroed, at `dt = 2 ms`: the explicit step drives the damped hinges to
+`|qd| = 5.1e2` from a start of 0.5, while `implicitfast` keeps them at 0.74.
+With the damping removed the two agree to 1e-12, which is the check that this is
+the same dynamics and not a different model.
+
+On the G1's **declared** gains it changes nothing measurable — a 2-second stance
+gives a pelvis minimum of 0.7882 m under Euler and 0.7881 m under
+`implicitfast`, and both PASS. That is the expected and correct outcome, worth
+stating so the feature is not oversold: the layer's damping (0.05 to 5.3
+N m s/rad) is far below the explicit ceiling, so the integrator removes a limit
+rather than changing an answer. It is what makes a stiffer gain set usable, and
+[05](05-passive-forces-and-actuators.md) no longer has to record a drive's
+damping as explicit-only.
+
+**Not ported**: full `implicit` — `mj_implicit`'s `qLU` path with the
+recursive-Newton-Euler derivative (`mjd_smooth_vel` with `flg_bias = 1`) and the
+unsymmetric LU solve — and `mjd_freeMhat`, the free-body gyroscopic block that
+reinstates the bias derivative for a standalone free body and is what makes
+`implicitfast` and `implicit` identical for one. Without it a tumbling free body
+is integrated as `implicitfast` proper rather than as `implicit`, which is the
+example's own behaviour for a non-free-body system and a divergence only for a
+free one.
+
+One correction to this step's own history: the `dt = 5e-4` divergence it was
+partly written around no longer reproduces. The G1 holds a stance for 2 s at
+`dt = 1e-4` and at `dt = 5e-4`, with the contact constraint rather than a
+penalty spring and the model's own drives rather than a hand-written hold. The
+original divergence is therefore not attributable to the integrator, and this
+step should stop implying it is.
 
 **Goal**: Provide an integrator family (at least `implicitfast`-equivalent, with `implicit`-equivalent and RK4 as options) selected per run. Covers old §4, items 3–5. Items 1–2 are in step 02.
 
@@ -60,12 +99,12 @@ Documentation: `doc/computation.rst` §Numerical integration (location only, not
 divergence is reproduced as a measured result rather than hidden, and the
 implicit variant has a documented damping-derivative path.
 
-**Status against Done when**: selectable per run, yes. The `dt = 5e-4` row is
-measured, and the measurement has moved: it no longer diverges, so what is
-recorded is a passing stance rather than a failure, and the earlier failure is
-attributed to the contact model and the actuation rather than to the integrator
-(see Status). The implicit damping-derivative path exists for diagonal damping
-only and is not wired to a drive's damping, so this clause is not met.
+**Status against Done when**: all three clauses are met. Each integrator is
+selectable per run (`--integrator euler|implicitfast|rk4`). The `dt = 5e-4` row
+is measured and the measurement has moved — it no longer diverges, so what is
+recorded is a passing stance, with the earlier failure attributed to the contact
+model and the actuation rather than to the integrator. And the implicit variant
+has a documented damping-derivative path that is wired to a drive's damping.
 
 **Step 5 status (pure CPU subset)**: the ported functions have hand-derived
 tests. The 1-DOF stiff-damping oracle shows the implicit step stays bounded

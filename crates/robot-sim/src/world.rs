@@ -713,6 +713,37 @@ impl World {
         Ok(rows)
     }
 
+    /// `mjd_smooth_vel` with `flg_bias = 0`: the velocity derivative of the
+    /// smooth forces, as a diagonal.
+    ///
+    /// For the forces this crate applies the derivative *is* diagonal, and that
+    /// is worth stating rather than leaving as an accident. The smooth forces
+    /// are a drive's `kp (ctrl - q) - kd qd` and a joint damper's `-kd qd`;
+    /// only the damping terms depend on velocity, and each depends on one
+    /// degree of freedom's own velocity. So `d F / d qd = -diag(kd)` and
+    /// `qH = M - h dF/dv = M + h diag(kd)`, which adds to the sparse mass
+    /// matrix's own diagonal and needs no new structure.
+    ///
+    /// A fluid force or a tendon damper would make this non-diagonal
+    /// (`mjd_passive_vel` covers both), and neither is implemented. The
+    /// recursive-Newton-Euler derivative is excluded by `flg_bias = 0`, which
+    /// is what distinguishes `implicitfast` from `implicit`; example 01
+    /// section 9.2 reinstates it exactly for a standalone free body through
+    /// `mjd_freeMhat`, which is not implemented here either and is recorded as
+    /// a gap in `specs/03-integrators.md`.
+    fn smooth_velocity_derivative(&self) -> Vec<f64> {
+        let mut kd = vec![0.0; self.model.nv()];
+        for drive in &self.drives {
+            kd[drive.dof] += drive.kd * (1.0 - drive.efficiency_loss)
+                / if drive.ratio.abs() > f64::EPSILON {
+                    drive.ratio
+                } else {
+                    1.0
+                };
+        }
+        kd
+    }
+
     /// The constrained acceleration at a state, and the rows that produced it.
     fn accel_at(
         &self,
@@ -723,7 +754,15 @@ impl World {
     ) -> Result<(Vec<f64>, solver::Solution, Vec<Row>), CompositeError> {
         let pos = composite::position(&self.model, q)?;
         let (cvel, cdof_dot) = composite::com_vel(&self.model, &pos, qd)?;
-        let qacc_smooth = composite::forward_dynamics(&self.model, &pos, qd, tau)?;
+        // Under `implicitfast` the unconstrained acceleration is solved against
+        // `M + h diag(kd)` rather than `M`, which is the whole content of the
+        // integrator: the forces stay at the old velocity and the matrix
+        // carries their derivative.
+        let qacc_smooth = if self.options.integrator == Integrator::ImplicitFast {
+            self.implicit_forward_dynamics(&pos, qd, tau)?
+        } else {
+            composite::forward_dynamics(&self.model, &pos, qd, tau)?
+        };
         let rows = self.build_rows(q, &pos, &cvel, &cdof_dot, qd)?;
         // Both solvers answer the same convex problem and have the same
         // signature, so the choice is a dispatch and nothing else depends on
@@ -744,6 +783,39 @@ impl World {
             warm,
         )?;
         Ok((solution.qacc.clone(), solution, rows))
+    }
+
+    /// Forward dynamics with the smooth-force velocity derivative folded in:
+    /// `(M + h diag(kd)) qacc = tau - qfrc_bias`.
+    ///
+    /// Example 01 section 9.2 resets a standalone free body's six rows of `qH`
+    /// to `M`, to keep the `L' D L` factorisation well defined. That happens
+    /// here for free, because a `Free` joint carries no actuator and therefore
+    /// no `kd`, so nothing is added to those rows in the first place.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the dynamics stages report, and
+    /// [`CompositeError::SingularInertia`] if the modified matrix cannot be
+    /// factorised.
+    fn implicit_forward_dynamics(
+        &self,
+        pos: &Position,
+        qd: &[f64],
+        tau: &[f64],
+    ) -> Result<Vec<f64>, CompositeError> {
+        let h = self.options.timestep.as_secs_f64();
+        let bias = composite::rne(&self.model, pos, qd, None)?;
+        let mut mass = composite::crb(&self.model, pos);
+        for (i, k) in self.smooth_velocity_derivative().iter().enumerate() {
+            if *k != 0.0 {
+                mass[self.model.tree.diag_adr(i)] += h * k;
+            }
+        }
+        let (ld, diag_inv) = composite::factor_m(&self.model.tree, &mass)?;
+        let mut acc: Vec<f64> = tau.iter().zip(&bias).map(|(t, b)| t - b).collect();
+        composite::solve_ld(&self.model.tree, &ld, &diag_inv, &mut acc);
+        Ok(acc)
     }
 
     /// Advances `state` by one timestep.
@@ -782,7 +854,9 @@ impl World {
         let (qacc, solution, rows) = self.accel_at(&state.q, &state.qd, tau, warm.as_deref())?;
 
         match self.options.integrator {
-            Integrator::SemiImplicitEuler => {
+            // Both take the same semi-implicit update; they differ only in how
+            // `qacc` was obtained, which `accel_at` has already decided.
+            Integrator::SemiImplicitEuler | Integrator::ImplicitFast => {
                 for (v, a) in state.qd.iter_mut().zip(&qacc) {
                     *v += dt * a;
                 }
@@ -2158,5 +2232,169 @@ mod tests {
             "with damping only the robot should fold; pelvis went from {start} to {}",
             state.q[pelvis]
         );
+    }
+    #[test]
+    fn implicitfast_carries_a_damping_gain_that_breaks_the_explicit_step() {
+        // `specs/03` item 4's whole reason. An explicit damper with gain `kd`
+        // amplifies rather than removes velocity once `kd > m_eff / (2 h)`, so
+        // an explicit step bounds the damping a model may declare. Solving
+        // `(M + h diag(kd)) a = F` has no such bound.
+        //
+        // The G1's own drives are far from that bound, so this test raises the
+        // damping until the explicit step fails, and asserts the implicit one
+        // does not. That is the property, stated as a property rather than as a
+        // claim about the G1's particular numbers.
+        let dt_seconds = 2e-3;
+        let build = |integrator: Integrator, damping_scale: f64| {
+            let mut profile = g1_usd();
+            for a in &mut profile.actuators {
+                if let Some(g) = a.gains.as_mut() {
+                    g.kd *= damping_scale;
+                    // Drop the stiffness so the test isolates damping: a
+                    // position servo's stiffness is a force on position, not on
+                    // velocity, and it is not what this integrator changes.
+                    g.kp = 0.0;
+                }
+            }
+            let options = SimOptions {
+                timestep: Duration::from_secs_f64(dt_seconds),
+                integrator,
+                ..SimOptions::default()
+            };
+            World::from_profile(&profile, options)
+        };
+
+        // A damping scale large enough that the explicit step diverges.
+        let scale = 4000.0;
+        let mut worst = [0.0f64; 2];
+        for (slot, integrator) in [
+            (0usize, Integrator::SemiImplicitEuler),
+            (1, Integrator::ImplicitFast),
+        ] {
+            let mut world = build(integrator, scale);
+            let mut state = world.rest_state();
+            // Give every hinge a velocity for the damper to act on.
+            let hinge_dofs: Vec<usize> = world
+                .model()
+                .bodies
+                .iter()
+                .filter(|b| b.dof_num == 1)
+                .map(|b| b.dof_adr)
+                .collect();
+            for d in &hinge_dofs {
+                state.qd[*d] = 0.5;
+            }
+            let n = world.actuator_count();
+            let ctrl = vec![0.0; n];
+            let mut tau = vec![0.0; world.nv()];
+            for _ in 0..200 {
+                if world
+                    .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Drives, &mut tau)
+                    .is_err()
+                {
+                    break;
+                }
+                if world.step(&mut state, &tau).is_err() {
+                    break;
+                }
+                // Only the damped hinges. The free base has no drive and no
+                // damper, so its velocity is gravity doing its job -- in this
+                // fixture there is no ground, so it is in free fall -- and
+                // including it would measure that instead of the damper.
+                let v = hinge_dofs
+                    .iter()
+                    .fold(0.0f64, |m, d| m.max(state.qd[*d].abs()));
+                if !v.is_finite() {
+                    worst[slot] = f64::INFINITY;
+                    break;
+                }
+                worst[slot] = worst[slot].max(v);
+            }
+        }
+        // Compared against each other rather than against absolute bounds,
+        // because the claim is about the two integrators and not about a
+        // particular velocity. Every hinge starts at 0.5 rad/s, so a damper is
+        // meant to *remove* velocity: the explicit step instead amplifies it by
+        // three orders of magnitude, where the implicit step keeps it at or
+        // below where it started.
+        println!(
+            "IMPLDIAG explicit worst |qd| = {:.4e}, implicit worst |qd| = {:.4e}",
+            worst[0], worst[1]
+        );
+        assert!(
+            worst[1].is_finite(),
+            "the implicit step must not diverge; worst |qd| was {}",
+            worst[1]
+        );
+        // Measured: explicit 5.06e2, implicit 7.39e-1, from a start of 0.5.
+        // The implicit figure sits a little above the start because the
+        // stiffness is zeroed in this fixture, so gravity swings the unheld
+        // limbs while the damper removes velocity; what matters is that it
+        // stays of the same order as the start rather than growing without
+        // bound.
+        assert!(
+            worst[1] < 2.0,
+            "the implicit step should keep the damped hinges near their starting \
+             velocity; reached {} from a start of 0.5",
+            worst[1]
+        );
+        assert!(
+            worst[0] > 100.0 * worst[1] || !worst[0].is_finite(),
+            "the explicit step should be destabilised where the implicit one is \
+             not: explicit reached {}, implicit {}",
+            worst[0],
+            worst[1]
+        );
+    }
+
+    #[test]
+    fn implicitfast_agrees_with_the_explicit_step_when_damping_is_negligible() {
+        // The two integrators differ by `h * dF/dv`, so as the damping goes to
+        // zero they must converge. This is the check that the implicit path is
+        // the same dynamics and not a different model: with the derivative
+        // removed, `qH` is `M` and the step is the explicit one exactly.
+        let dt_seconds = 5e-4;
+        let build = |integrator: Integrator| {
+            let mut profile = g1_usd();
+            for a in &mut profile.actuators {
+                if let Some(g) = a.gains.as_mut() {
+                    g.kd = 0.0;
+                }
+            }
+            let options = SimOptions {
+                timestep: Duration::from_secs_f64(dt_seconds),
+                integrator,
+                ..SimOptions::default()
+            };
+            World::from_profile(&profile, options)
+        };
+        let run = |integrator: Integrator| {
+            let mut world = build(integrator);
+            let mut state = world.rest_state();
+            let n = world.actuator_count();
+            let ctrl = vec![0.02; n];
+            let mut tau = vec![0.0; world.nv()];
+            for _ in 0..100 {
+                world
+                    .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Drives, &mut tau)
+                    .unwrap();
+                world.step(&mut state, &tau).unwrap();
+            }
+            state
+        };
+        let explicit = run(Integrator::SemiImplicitEuler);
+        let implicit = run(Integrator::ImplicitFast);
+        for (i, (a, b)) in explicit.q.iter().zip(&implicit.q).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-12,
+                "position {i} differs with zero damping: {a} against {b}"
+            );
+        }
+        for (i, (a, b)) in explicit.qd.iter().zip(&implicit.qd).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-12,
+                "velocity {i} differs with zero damping: {a} against {b}"
+            );
+        }
     }
 }
