@@ -120,6 +120,10 @@ pub struct MultibodyRun<'a> {
     pub scene: Option<&'a Path>,
     /// How the model's declared actuators are driven.
     pub actuation: ActuationMode,
+    /// Joint-limit margin in the joint's own unit: a limit row is created once
+    /// the joint comes within this distance of a bound rather than only after
+    /// crossing it.
+    pub limit_margin: f64,
 }
 
 /// Duration (s) that the floating-base verdict covers. `robot sim multibody`
@@ -218,6 +222,7 @@ fn multibody(steps: u32, dt_seconds: f64, floating: bool, zero_torque: bool) -> 
         out: None,
         scene: None,
         actuation: ActuationMode::Drives,
+        limit_margin: 0.0,
     })
 }
 
@@ -238,6 +243,7 @@ pub fn multibody_to(
         out,
         scene: None,
         actuation: ActuationMode::Drives,
+        limit_margin: 0.0,
     })
 }
 
@@ -259,6 +265,7 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
         out,
         scene,
         actuation,
+        limit_margin,
     } = run;
     let scene_path: std::path::PathBuf =
         scene.map_or_else(|| std::path::PathBuf::from(GROUND_SCENE), Path::to_path_buf);
@@ -371,7 +378,14 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
     // real G1 standing pose: this is a demonstration of the solver, not
     // a balance controller. The floating base starts at an identity
     // quaternion at the origin.
-    let mut sim = super::stepper::Stepper::new(&profile, ground, dt_seconds, floating, actuation);
+    let mut sim = super::stepper::Stepper::new(
+        &profile,
+        ground,
+        dt_seconds,
+        floating,
+        actuation,
+        limit_margin,
+    );
     if floating {
         // Place the pelvis so the lowest contact point sits STANCE_CLEARANCE
         // above the plane. The height is measured from the model, not assumed.

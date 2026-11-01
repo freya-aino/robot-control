@@ -12,10 +12,18 @@ combination is refused, not silently adjusted. `SimOptions::record()` emits them
 as key/value pairs so a run carries the configuration that produced it, which is
 Section 12.1's requirement. Appendix D M-21 is closed.
 
+Every knob is also reachable from a run, not only from `SimOptions`:
+`--limit-margin` was added to `robot sim multibody` when the zero-torque
+collapse showed what the default costs. A knob that only library code can set
+does not satisfy item 1.
+
 Three knobs were added by measurement rather than by enumeration, and each has
 its number in its own documentation: `limit_margin`, separate from the collision
 `margin` as the example keeps `jnt_margin` separate from `geom_margin` (0.177
-rad of overshoot at zero margin against exactly zero at 0.2 rad);
+rad of overshoot at zero margin against exactly zero at 0.2 rad on a joint
+driven at 50 N m, and independently 17 of the G1's 29 joints leaving their range
+by up to 0.31 rad under a zero-torque collapse at zero margin, against none at
+0.2 rad);
 `CcdConfig::max_faces`, which is a **termination condition** and not a budget
 (one EPA query took 2.9 s without it, because the face count of a non-hull
 polytope grows geometrically); and the solver algorithm, where the default is

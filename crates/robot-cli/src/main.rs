@@ -132,6 +132,18 @@ fn run_multibody(flags: &[String]) -> i32 {
              applied",
         );
     }
+    // `specs/09` section 12.1 makes every fidelity knob a per-run parameter.
+    // `limit_margin` was reachable only from `SimOptions`, and the zero-torque
+    // collapse is why it matters: with no margin a joint-limit row appears only
+    // after the joint has crossed its stop, so 17 of the G1's 29 joints leave
+    // their range under collapse loads, by up to 0.31 rad.
+    let limit_margin = match parse_flag::<f64>(flags, "--limit-margin") {
+        Ok(v) => v.unwrap_or(0.0),
+        Err(message) => return invalid_flag(&message),
+    };
+    if !limit_margin.is_finite() || limit_margin < 0.0 {
+        return invalid_flag("--limit-margin must be finite and non-negative");
+    }
     let actuation = match flags
         .iter()
         .position(|a| a == "--actuation")
@@ -153,6 +165,7 @@ fn run_multibody(flags: &[String]) -> i32 {
         out: out.as_deref(),
         scene: scene.as_deref(),
         actuation,
+        limit_margin,
     })
 }
 
@@ -214,7 +227,7 @@ fn print_usage() {
     eprintln!("  robot data inspect <path>");
     eprintln!("  robot motion validate <path>");
     eprintln!("  robot sim qualify [--steps N] [--dt SECONDS]");
-    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]");
+    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--actuation drives|damping|zero] [--limit-margin RAD]");
     eprintln!("  robot eval summarize <values...>");
     eprintln!();
     eprintln!("named in PLAN.md but not implemented yet:");

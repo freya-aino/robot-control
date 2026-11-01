@@ -69,10 +69,12 @@ impl Stepper {
         dt_seconds: f64,
         floating: bool,
         mode: ActuationMode,
+        limit_margin: f64,
     ) -> Self {
         let options = SimOptions {
             timestep: Duration::from_secs_f64(dt_seconds),
             condim: 3,
+            limit_margin,
             ..SimOptions::default()
         };
         let mut world = World::from_profile(profile, options);

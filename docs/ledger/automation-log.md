@@ -893,3 +893,42 @@ ten vertices, and a plane-hull contact is one point because `mjc_PlaneConvex`'s
 three extra contacts need polygon topology a vertex hull does not carry.
 
 Specs at 0.1.7-draft. Gate: 1080 tests, fmt and clippy clean.
+
+## 2026-11-01 — zero-torque collapse run, and what it exposed about joint limits
+
+`outputs/g1-zero-torque-newton-replay/`: 2 s of the G1 with no actuator force at
+all, on the corrected path with every one of the 33 declared colliders
+simulated. FAIL on all three supported-stance checks, which is correct -- the
+checks ask whether a stance was held and nothing is holding one.
+
+The robot **lands and comes to rest**: energy peaks at 42 J during the impact
+and decays to 0.044 J, with the pelvis settling at 0.067 m. The legacy
+zero-torque run recorded the pelvis falling *through* the plane, because only
+ten ankle spheres took part in contact and the pelvis and torso had no collision
+geometry. They have convex hulls now, so the collapsed robot lies on the ground.
+
+The collapse exposed a real inadequacy in the default joint-limit margin.
+Measured over the same collapse at 0.5 ms:
+
+  --limit-margin 0 (default):  worst excursion 0.197 rad, 3783 of 4000 steps
+  --limit-margin 0.1:          worst excursion 0.284 rad, 1459 of 4000 steps
+  --limit-margin 0.2:          worst excursion 0,          0 of 4000 steps
+
+At the default, 17 of the G1's 29 joints leave their range, the worst by
+0.31 rad -- about 18 degrees past a mechanical stop -- because with no margin a
+limit row appears only once the joint has already crossed. The archived run
+therefore uses 0.2 rad: a replay with joints bent past their stops is not a
+replay of this robot. Peak energy is also far lower with the margin (42 J
+against 132 J), since the limits prevent the through-stop motion rather than
+absorbing it afterwards.
+
+`--limit-margin` is now a CLI flag. specs/09 item 1 requires every fidelity knob
+to be a per-run parameter, and one only library code can set does not satisfy
+that; the gap was invisible until a run needed it.
+
+`outputs/README.md` is rewritten. It records that the runs previously archived
+there are gone (they were half a gigabyte each), that this directory is
+gitignored scratch rather than an archive, and that the reproducible record of a
+run is its command and commit rather than the files.
+
+Gate: 1080 tests, fmt and clippy clean. usdchecker passes on both replays.
