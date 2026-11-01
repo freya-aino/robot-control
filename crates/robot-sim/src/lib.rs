@@ -61,6 +61,7 @@
 pub mod articulated;
 pub mod backend;
 pub mod collision;
+pub mod composite;
 pub mod constraint;
 pub mod contact;
 pub mod env;
