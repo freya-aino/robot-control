@@ -31,6 +31,17 @@ Still absent: the **mid-phase bounding-volume tree** (item 1's third stage),
 which only meshes need, and **mesh convex hulls** (item 2, and
 [08](08-model-compilation-and-sensors.md) item 3).
 
+**Retired, not kept as an option.** Item 1 said the single hard-coded
+point-vs-plane penalty model "remains a separate, smaller benchmark". Under the
+MUST precedence of
+[Appendix D](appendix-d-mathematical-challenges.md) section 1.0.2 it does not:
+its stiffness scaled with the number of sampled points (M-04) and its impedance
+was referred to a fixed 1 kg reference mass (M-09), so it is a competing
+formulation rather than a cheaper setting of the example's contact model. No
+command reaches it. `contact::plane_sphere_contact` was also overwritten — it
+fixed the normal to `+z`, where example 04 section 1.1 takes it from the plane
+geom's own frame — and now takes the plane pose and normal.
+
 **Goal**: A multi-stage pipeline (broad phase, mid phase, narrow phase dispatch), exact primitive routines, a convex fallback via GJK/EPA, body-pair exclusion, and per-geometry-pair margin and gap. Covers old §6 in full.
 
 **Depends on**: [01](01-state-and-coordinates.md) (body and joint topology for pair exclusion).

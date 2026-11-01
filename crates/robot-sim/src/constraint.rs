@@ -12,6 +12,19 @@
 //! `diagApprox` path (the port uses the exact diagonal, as the
 //! `ENBL_DIAGEXACT` path does). Deviations are listed in
 //! `crates/robot-sim/specs/06-equality-constraints-and-solver.md`.
+//!
+//! # Status: the GPU's CPU reference
+//!
+//! `crate::solver` and `crate::newton` supersede this module for simulation:
+//! they solve equality rows in the same unified problem as contact and limit
+//! rows, which is what the example does and what
+//! `specs/06-equality-constraints-and-solver.md` item 2 requires.
+//!
+//! This module is kept for one reason: it is the CPU reference that
+//! `robot-sim-gpu`'s equality kernel is validated against, so it is a second
+//! implementation of the same equations used as an oracle rather than a
+//! competing formulation (`specs/appendix-d-mathematical-challenges.md`
+//! section 1.0.2, category 2). It is not reachable from a simulation path.
 
 use crate::integrators::{cholesky_factor, cholesky_solve, cholesky_substitute};
 

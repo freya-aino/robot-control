@@ -815,3 +815,45 @@ rows.
 
 All internal links verified to resolve, and every code identifier cited checked
 to exist. Gate: 1072 tests, fmt clean.
+
+## 2026-11-01 — the example's specifications are MUST; competing formulations overwritten
+
+Precedence strengthened by explicit direction and recorded as Appendix D section
+1.0.2: where pre-existing mathematics works differently from the example's, it
+is overwritten rather than recorded as a deviation.
+
+The section states the three categories a reader has to tell apart, because
+collapsing them is how a defect hides. A **competing formulation** computes a
+different answer and is a defect. A **second implementation used as an oracle**
+computes the same answer by another route and is kept, because removing it would
+leave the primary path unvalidatable. A **stricter input contract** refuses an
+input the example would repair, which is not computing differently and is
+re-labelled validation.
+
+Overwritten:
+
+- The per-point penalty contact, and the `--contact penalty|impedance` selector
+  that reached it. Its stiffness scaled with the sample count (M-04) and its
+  impedance was referred to a fixed 1 kg reference mass (M-09), so it was a
+  different contact model rather than a cheaper setting of the example's. The
+  flag is now rejected with an explanation and exit 64, not ignored: an old
+  invocation that silently ran a different simulation would be worse than one
+  that fails.
+- `contact::plane_sphere_contact`, which fixed its normal to `+z` and measured
+  `center[2] - plane_height`. Example 04 section 1.1 takes the normal from the
+  plane geom's own frame and measures `dot(pos2 - pos1, n)`; the two agree only
+  for a plane whose frame is the world's. Tested on a plane with a `+x` normal
+  and an offset position, which the old form could not express.
+
+Kept, and labelled as oracles in their own module documentation so the
+distinction cannot be read as a loophole: `articulated`'s articulated-body and
+recursive-Newton-Euler recursions (agreeing with the composite path to 1e-10 on
+the G1, and the only independent check it has) and `constraint::solve_equality`
+(the CPU reference the GPU equality kernel is validated against). Neither is
+reachable from a simulation path.
+
+Step 06's deviations list is reclassified entry by entry under the new rule, and
+the exact-`A_ii` choice is restated as the example's own DIAGEXACT path rather
+than a divergence from it. Specs at 0.1.6-draft.
+
+Gate: 1073 tests, fmt and clippy clean. One simulation path verified end to end.

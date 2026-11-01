@@ -51,6 +51,29 @@
 //! the closed-form projectile equation, and a spinning symmetric free
 //! body's angular velocity is checked for conservation, before the real
 //! G1 is ever given a floating base.
+//!
+//! # Status: an oracle, not a simulation path
+//!
+//! The example's specifications are MUST
+//! (`specs/appendix-d-mathematical-challenges.md` section 1.0.2), and where
+//! pre-existing mathematics works differently it is overwritten. This module
+//! survives that rule for a specific reason, and the reason matters:
+//!
+//! - Its **articulated-body and recursive-Newton-Euler recursions are kept.**
+//!   They are not a competing formulation -- they compute the same equations as
+//!   `crate::composite` by another route, agreeing to 1e-10 on the
+//!   29-degree-of-freedom G1, and they are the only independent check the
+//!   composite recursions have. The example having no articulated-body
+//!   algorithm of its own does not make a correct one wrong. An oracle is not a
+//!   deviation.
+//! - Its **contact and joint-limit handling is retired.** The per-point penalty
+//!   law *is* a competing formulation: its stiffness scaled with the number of
+//!   sampled points (Appendix D M-04) and its impedance was referred to a fixed
+//!   1 kg reference mass (M-09). `crate::world` is the simulation path, and no
+//!   command reaches the penalty law any more.
+//!
+//! So: read this module for a second opinion on dynamics. Do not read it for
+//! contact.
 
 use crate::collision::{self, Placed, Primitive, Proximity};
 use crate::contact::GroundContact;

@@ -45,6 +45,64 @@ What that changes, and what it does not:
   constants, defaults and tolerances belong to the engine it describes and are
   not transplanted. Adopting one needs its own measurement.
 
+#### 1.0.2 Precedence, strengthened 2026-11-01: the example's specifications are MUST
+
+Section 1.0.1 made the example the source of truth for the mathematics. By
+further explicit direction it is now **normative in the MUST sense of
+`SPECS.md`'s normative-language section**, with one consequence that changes how
+this appendix and the step files are to be read:
+
+> Where pre-existing mathematics or an algorithm in this project works
+> differently from the example's, it is **overwritten** with the example's.
+
+A recorded "deviation" is therefore no longer a thing a reader may take as
+settled. Three categories have to be told apart, because collapsing them is how
+a defect hides:
+
+1. **A competing formulation** — our mathematics computes a different answer
+   from the example's. This is a defect and is overwritten. The per-point
+   penalty contact is the example of record: its stiffness scaled with the
+   number of sampled points (M-04) and its impedance was referred to a fixed
+   1 kg reference mass (M-09), so it is not a cheaper setting of the example's
+   contact model, it is a different contact model. It is now unreachable from
+   any simulation path.
+2. **A second implementation of the same equations, used as an oracle** — the
+   same answer by another route. This is *not* a deviation and is deliberately
+   kept, because removing it would leave the primary path unvalidatable.
+   `articulated`'s articulated-body and recursive-Newton-Euler recursions agree
+   with the composite path to 1e-10 on the G1 and are the only independent check
+   it has; the example having no articulated-body algorithm of its own does not
+   make a correct one wrong. `constraint::solve_equality` is in the same position
+   as the CPU reference the GPU equality kernel is checked against. Both are
+   named as oracles in their own documentation so the distinction cannot be
+   mistaken for a loophole.
+3. **A stricter input contract** — the same mathematics, refusing an input the
+   example would accept and repair. These are kept and re-labelled as
+   *validation* rather than deviation, because refusing to compute is not
+   computing differently. Refusing a mixed-format `solref` where the example
+   warns and substitutes a default, and refusing an asymmetric mass matrix where
+   the example would silently read half of it, are both of this kind. Each is
+   recorded at its call site with what the example does instead.
+
+Rule 2 of the mapping document still holds and is the one limit on category 1:
+the example's numerical **constants**, defaults and tolerances belong to the
+engine it describes. Overwriting a formulation does not import its magic
+numbers, and adopting one still needs its own measurement. `Rpy = 2 mu^2 R0` was
+adopted as formulation; `solimp`'s default width was not adopted as a number.
+
+What this direction has already overwritten, beyond the entries above:
+
+- `contact::plane_sphere_contact` fixed its normal to `+z` and measured the
+  sphere's height as `center[2] - plane_height`. Example 04 section 1.1 takes
+  the normal from the plane geom's own frame and measures
+  `cdist = dot(pos2 - pos1, n)`. The two agree only for a plane whose frame is
+  the world's, so the general form replaced it and the deviation entry was
+  deleted rather than kept.
+- The `--contact penalty|impedance` selector is removed. Offering a formulation
+  the example replaces, alongside the one it requires, invited a reader to treat
+  the two as points on a fidelity spectrum. Earlier runs stay reproducible from
+  git history and from the archived `outputs/g1-stance-usd-replay/`.
+
 This resolved one open question outright. Appendix B **S-07** asked whether to
 change the `Free` joint's velocity convention or to amend step 01 item 3 to
 match the code. Under the new precedence the question does not arise: the

@@ -9,8 +9,11 @@ exist, and two backends implement them:
 - `world::WorldEnv`, reporting **`cpu-world`** — the corrected path: composite
   dynamics, exact collision manifolds, the unified constraint solver and the
   model's own actuators.
-- `multibody_env::MultibodyEnv`, reporting **`cpu-multibody`** — the legacy
-  articulated-body path with its penalty contact.
+- `multibody_env::MultibodyEnv`, reporting **`cpu-multibody`** — the
+  articulated-body path. Its **dynamics** are an oracle and are kept; its
+  **contact** is a formulation the example replaces and no command reaches it
+  (Appendix D section 1.0.2). An environment built on it simulates no contact at
+  all, which its own documentation states.
 
 Both names are reported rather than one being implied, because the two are
 genuinely different backends and a run record should say which produced it. They
@@ -21,9 +24,13 @@ been trained against the other. That is why the corrected path was added as a
 second backend rather than as a change of behaviour inside the first.
 
 `ArticulatedBody` is retained deliberately as the correctness oracle this step
-asks for: it is an independent algorithm (body-local articulated-body and RNE)
-that the composite recursions are validated against to 1e-10, and replacing it
-with a second copy of the same mathematics would remove the only cross-check.
+asks for, and the distinction matters now that the example's specifications are
+MUST. Its articulated-body and recursive-Newton-Euler recursions are a **second
+implementation of the same equations**, agreeing with the composite path to
+1e-10 on the G1 — not a competing formulation, and replacing them with a second
+copy of the composite mathematics would remove the only independent cross-check
+the primary path has. Its contact law was a competing formulation and is gone.
+Appendix D section 1.0.2 is the rule; an oracle is not a deviation.
 
 The narrow `init`/`step` backend trait beyond `Environment` does not exist yet.
 

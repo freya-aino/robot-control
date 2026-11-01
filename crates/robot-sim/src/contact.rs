@@ -217,9 +217,14 @@ impl GroundContact {
     }
 }
 
+/// Smallest value the example admits before treating a quantity as zero.
+const MINVAL: f64 = 1e-15;
+
 /// Why a plane-sphere contact query was rejected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlaneSphereError {
+    /// The plane normal has (near) zero length, so it names no half-space.
+    DegenerateNormal,
     /// An input is NaN or infinite.
     NonFinite,
     /// The sphere radius is negative.
@@ -229,6 +234,9 @@ pub enum PlaneSphereError {
 impl fmt::Display for PlaneSphereError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DegenerateNormal => {
+                write!(f, "plane-sphere contact normal has zero length")
+            }
             Self::NonFinite => write!(f, "plane-sphere contact input is non-finite"),
             Self::NegativeRadius => write!(f, "plane-sphere contact radius is negative"),
         }
@@ -272,14 +280,16 @@ pub struct PlaneSphereContact {
 /// Only the plane-sphere geometry is ported. The penalty force stays in
 /// [`GroundContact::force`], which is the baseline this function does not change.
 pub fn plane_sphere_contact(
+    plane_pos: [f64; 3],
+    plane_normal: [f64; 3],
     center: [f64; 3],
     radius: f64,
-    plane_height: f64,
     margin: f64,
 ) -> Result<Option<PlaneSphereContact>, PlaneSphereError> {
     if !center.iter().all(|x| x.is_finite())
+        || !plane_pos.iter().all(|x| x.is_finite())
+        || !plane_normal.iter().all(|x| x.is_finite())
         || !radius.is_finite()
-        || !plane_height.is_finite()
         || !margin.is_finite()
     {
         return Err(PlaneSphereError::NonFinite);
@@ -287,8 +297,28 @@ pub fn plane_sphere_contact(
     if radius < 0.0 {
         return Err(PlaneSphereError::NegativeRadius);
     }
-    let normal = [0.0, 0.0, 1.0];
-    let cdist = center[2] - plane_height;
+    // `mjraw_PlaneSphere` takes the normal from the plane geom's own frame,
+    // `mat1[2,5,8]`, and measures the sphere centre's height along it:
+    // `cdist = dot(pos2 - pos1, n)`. An earlier version of this function fixed
+    // `n` to `+z` and measured `center[2] - plane_height`, which is the same
+    // number only for a plane whose frame is the world's. That was recorded as
+    // a deviation; under the example's specifications being MUST it is a
+    // defect, so the general form is what is implemented.
+    let norm = (plane_normal[0] * plane_normal[0]
+        + plane_normal[1] * plane_normal[1]
+        + plane_normal[2] * plane_normal[2])
+        .sqrt();
+    if norm < MINVAL {
+        return Err(PlaneSphereError::DegenerateNormal);
+    }
+    let normal = [
+        plane_normal[0] / norm,
+        plane_normal[1] / norm,
+        plane_normal[2] / norm,
+    ];
+    let cdist = (center[0] - plane_pos[0]) * normal[0]
+        + (center[1] - plane_pos[1]) * normal[1]
+        + (center[2] - plane_pos[2]) * normal[2];
     if cdist > margin + radius {
         return Ok(None);
     }
@@ -531,9 +561,15 @@ mod tests {
         // is -dist/2 - radius = 0.01 - 0.1 = -0.09, so pos.z = 0.08 - 0.09 = -0.01,
         // which is the midpoint of the plane (0) and the sphere's lowest point (-0.02).
         // x and y are unchanged because the normal is +z.
-        let c = plane_sphere_contact([0.3, -0.2, 0.08], 0.1, 0.0, 0.0)
-            .unwrap()
-            .unwrap();
+        let c = plane_sphere_contact(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.3, -0.2, 0.08],
+            0.1,
+            0.0,
+        )
+        .unwrap()
+        .unwrap();
         assert!((c.dist + 0.02).abs() < 1e-15, "dist = {}", c.dist);
         assert_eq!(c.normal, [0.0, 0.0, 1.0]);
         assert!((c.pos[0] - 0.3).abs() < 1e-15 && (c.pos[1] + 0.2).abs() < 1e-15);
@@ -545,7 +581,7 @@ mod tests {
         // Hand derivation: centre height 0.15, radius 0.1, margin 0.1. cdist = 0.15 is
         // not greater than margin + radius = 0.2, so the pair is reported with
         // dist = 0.15 - 0.1 = 0.05 > 0 (separated, inside the margin).
-        let c = plane_sphere_contact([0.0, 0.0, 0.15], 0.1, 0.0, 0.1)
+        let c = plane_sphere_contact([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.15], 0.1, 0.1)
             .unwrap()
             .unwrap();
         assert!((c.dist - 0.05).abs() < 1e-15, "dist = {}", c.dist);
@@ -556,7 +592,7 @@ mod tests {
         // Hand derivation: centre height 0.25, radius 0.1, margin 0. cdist = 0.25
         // exceeds margin + radius = 0.1, so no contact is returned.
         assert_eq!(
-            plane_sphere_contact([0.0, 0.0, 0.25], 0.1, 0.0, 0.0),
+            plane_sphere_contact([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.25], 0.1, 0.0),
             Ok(None)
         );
     }
@@ -564,12 +600,74 @@ mod tests {
     #[test]
     fn plane_sphere_refuses_invalid_inputs() {
         assert_eq!(
-            plane_sphere_contact([0.0, 0.0, f64::NAN], 0.1, 0.0, 0.0),
+            plane_sphere_contact(
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, f64::NAN],
+                0.1,
+                0.0
+            ),
             Err(PlaneSphereError::NonFinite)
         );
         assert_eq!(
-            plane_sphere_contact([0.0, 0.0, 0.0], -0.1, 0.0, 0.0),
+            plane_sphere_contact([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0], -0.1, 0.0),
             Err(PlaneSphereError::NegativeRadius)
+        );
+    }
+    #[test]
+    fn a_plane_sphere_contact_uses_the_planes_own_frame() {
+        // `mjraw_PlaneSphere` takes the normal from the plane geom's frame and
+        // measures `cdist = dot(pos2 - pos1, n)`. This function used to fix the
+        // normal to `+z` and measure `center[2] - plane_height`, which agrees
+        // only when the plane's frame is the world's. That was recorded as a
+        // deviation; under the example's specifications being MUST it is a
+        // defect, so this asserts the general case the old form could not
+        // express.
+        //
+        // A plane through the origin whose normal is `+x`: a unit sphere at
+        // `x = 0.75` is 0.25 deep, its contact normal is `+x`, and its contact
+        // point sits halfway between the plane and the sphere's deepest point,
+        // at `x = -0.125`.
+        let c = plane_sphere_contact(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.75, 3.0, -2.0],
+            1.0,
+            0.0,
+        )
+        .expect("valid input")
+        .expect("the sphere penetrates");
+        assert!((c.dist + 0.25).abs() < 1e-15, "dist {}", c.dist);
+        assert_eq!(c.normal, [1.0, 0.0, 0.0]);
+        assert!((c.pos[0] + 0.125).abs() < 1e-15, "pos.x {}", c.pos[0]);
+        // The contact point stays on the sphere's own axis in the other two
+        // coordinates, because the offset is along the normal only.
+        assert!((c.pos[1] - 3.0).abs() < 1e-15);
+        assert!((c.pos[2] + 2.0).abs() < 1e-15);
+
+        // A non-unit normal is normalised rather than scaling the distance.
+        let scaled = plane_sphere_contact(
+            [0.0, 0.0, 0.0],
+            [7.0, 0.0, 0.0],
+            [0.75, 3.0, -2.0],
+            1.0,
+            0.0,
+        )
+        .unwrap()
+        .unwrap();
+        assert!((scaled.dist - c.dist).abs() < 1e-15);
+
+        // An offset plane: the height is measured from the plane's position.
+        let offset =
+            plane_sphere_contact([0.5, 0.0, 0.0], [1.0, 0.0, 0.0], [1.25, 0.0, 0.0], 1.0, 0.0)
+                .unwrap()
+                .unwrap();
+        assert!((offset.dist + 0.25).abs() < 1e-15, "dist {}", offset.dist);
+
+        // A zero-length normal names no half-space.
+        assert_eq!(
+            plane_sphere_contact([0.0; 3], [0.0; 3], [0.0, 0.0, 1.0], 1.0, 0.0),
+            Err(PlaneSphereError::DegenerateNormal)
         );
     }
 }

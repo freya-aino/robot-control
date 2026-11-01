@@ -15,7 +15,6 @@
 use super::{EXIT_FAILURE, EXIT_USAGE};
 use robot_model::joint::JointKind;
 use robot_model::profile::RobotProfile;
-use robot_sim::articulated::ContactModel;
 use robot_sim::contact::GroundContact;
 use robot_sim::pendulum::{Pendulum, PendulumParams, PendulumState};
 use robot_sim::world::ActuationMode;
@@ -119,8 +118,6 @@ pub struct MultibodyRun<'a> {
     pub out: Option<&'a Path>,
     /// Scene layer to read the environment from.
     pub scene: Option<&'a Path>,
-    /// Legacy contact model to use, or `None` for the corrected path.
-    pub contact: Option<ContactModel>,
     /// How the model's declared actuators are driven.
     pub actuation: ActuationMode,
 }
@@ -220,7 +217,6 @@ fn multibody(steps: u32, dt_seconds: f64, floating: bool, zero_torque: bool) -> 
         zero_torque,
         out: None,
         scene: None,
-        contact: None,
         actuation: ActuationMode::Drives,
     })
 }
@@ -241,7 +237,6 @@ pub fn multibody_to(
         zero_torque,
         out,
         scene: None,
-        contact: None,
         actuation: ActuationMode::Drives,
     })
 }
@@ -251,12 +246,10 @@ pub fn multibody_to(
 /// scene is simulated, or the run is refused.
 ///
 /// `actuation` chooses how the model's declared actuators are driven; see
-/// [`ActuationMode`]. `contact` selects which simulation path runs. `None` is the corrected path
-/// -- composite-frame dynamics, exact collision manifolds and the primal
-/// Newton constraint solver -- and is what `--contact` left off now gives.
-/// `Some` keeps one of the two legacy contact models reachable, because
-/// retiring them silently would throw away the only way to reproduce a number
-/// this command printed before.
+/// [`ActuationMode`]. There is one simulation path -- composite-frame dynamics,
+/// exact collision manifolds and the primal Newton constraint solver -- because
+/// the example's specifications are MUST and the legacy penalty contact is a
+/// formulation they replace rather than a fidelity option.
 pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
     let MultibodyRun {
         steps,
@@ -265,7 +258,6 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
         zero_torque,
         out,
         scene,
-        contact,
         actuation,
     } = run;
     let scene_path: std::path::PathBuf =
@@ -335,11 +327,6 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
             return EXIT_FAILURE;
         }
     };
-    let path = match contact {
-        None => super::stepper::Path::Corrected,
-        Some(ContactModel::Penalty) => super::stepper::Path::LegacyPenalty,
-        Some(ContactModel::Impedance) => super::stepper::Path::LegacyImpedance,
-    };
     let dt = Duration::from_secs_f64(dt_seconds);
     let dt_nanos = dt.nanos();
     // Every environment collider of the scene is simulated, or the run is refused:
@@ -384,8 +371,7 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
     // real G1 standing pose: this is a demonstration of the solver, not
     // a balance controller. The floating base starts at an identity
     // quaternion at the origin.
-    let mut sim =
-        super::stepper::Stepper::new(path, &profile, ground, dt_seconds, floating, actuation);
+    let mut sim = super::stepper::Stepper::new(&profile, ground, dt_seconds, floating, actuation);
     if floating {
         // Place the pelvis so the lowest contact point sits STANCE_CLEARANCE
         // above the plane. The height is measured from the model, not assumed.
@@ -419,7 +405,7 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
         _ => "fixed base, no ground contact",
     };
     println!("G1 multibody simulation ({mode}): {steps} steps at {dt_seconds} s");
-    println!("  path:                    {}", path.describe());
+    println!("  path:                    {}", sim.describe());
     println!("  degrees of freedom:      {}", sim.dof());
     if !zero_torque {
         println!("  actuation:               {}", sim.actuation());
@@ -427,16 +413,14 @@ pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
     if floating {
         let (modelled, unmodelled) = sim.shape_counts();
         println!("  contact shapes:          {modelled} modelled, {unmodelled} not modelled");
-        if !path.uses_scene_stiffness() {
-            // Said plainly rather than left to be inferred from unchanged
-            // output: the constraint formulation derives a contact force from
-            // an impedance, so a stiffness and a damping per plane have
-            // nowhere to go. Appendix D M-09 is the entry.
-            println!(
-                "  scene stiffness:         ignored on this path (impedance replaces it); height {:.3} m and friction {:.2} are used",
-                ground.ground_height, ground.friction
-            );
-        }
+        // Said plainly rather than left to be inferred from unchanged output:
+        // the constraint formulation derives a contact force from an impedance,
+        // so a stiffness and a damping per plane have nowhere to go.
+        // Appendix D M-09 is the entry.
+        println!(
+            "  scene stiffness:         not used (impedance replaces it); height {:.3} m and friction {:.2} are used",
+            ground.ground_height, ground.friction
+        );
     }
 
     let report_every = (steps / 10).max(1);

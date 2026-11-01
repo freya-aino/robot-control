@@ -94,12 +94,63 @@ constraints share one solver; the time-constant check reports clamped rows
 Gauss-Seidel-style solver both exist and agree to 1e-8; and warm start is
 measured against the cold start. CG is not implemented and is no longer owed.
 
-**Deviations from the pinned source (recorded per FR-4)**:
-- `R` uses the exact diagonal `A_ii` of `J M^-1 J^T`. This matches the `mjENBL_DIAGEXACT` path (`mj_makeYNumeric`, `mj_projectConstraint`), not the default `mj_diagApprox` (`engine_core_constraint.c` line 1605). For `mjEQ_JOINT` rows `mj_diagApprox` sums `dof_invweight0`, the inverse inertia at `qpos0` with no `poly'(d)^2` factor. So `R` differs from the default path whenever `|poly'(d)| != 1` or `M(q) != M(qpos0)`, even for diagonal `M`.
-- A mixed-format `solref` is refused with `MixedSolrefFormat`. the reference simulator warns and replaces it with the default.
-- The `2*timestep` clamp is unconditional. the reference simulator skips it under `mjINT_DISCRETE` (`mj_isMetric`), which this port has no path for. the reference simulator also skips it when `mjDSBL_REFSAFE` is set (`getsolparam`, line 1906); this port has no disable switch.
-- A mass matrix that is not symmetric is refused with `NotSymmetric`. `cholesky_solve` reads only the lower triangle, so an asymmetric input would otherwise be misread silently.
-- `plane_sphere_contact` fixes the normal to `+z` and omits `con->tangent`. The source takes the normal from `mat1[2,5,8]`.
+**Deviations from the example, re-read under the MUST precedence of
+[Appendix D](appendix-d-mathematical-challenges.md) section 1.0.2.** Each entry
+below is now classified, because a "deviation" is no longer something a reader
+may take as settled: a competing formulation is a defect and is overwritten,
+while a stricter input contract is validation and is kept.
+
+*Formulation, kept because it is the example's own better path:*
+
+- `R` uses the exact diagonal `A_ii` of `J M^-1 J'`. This is the example's
+  `mjENBL_DIAGEXACT` path (`mj_makeYNumeric`, `mj_projectConstraint`), not its
+  default `mj_diagApprox`, which for `mjEQ_JOINT` rows sums `dof_invweight0` —
+  the inverse inertia at `qpos0` with no `poly'(d)^2` factor. The two differ
+  whenever `|poly'(d)| != 1` or `M(q) != M(qpos0)`. Choosing the exact diagonal
+  is choosing the more accurate of two paths the example provides, not diverging
+  from it, and it is what let M-09 close: the G1's effective masses span about
+  five orders of magnitude, so no single approximation stands in across them.
+
+*Validation, kept and re-labelled — the same mathematics, refusing an input
+rather than repairing it:*
+
+- A mixed-format `solref` is refused with `MixedSolrefFormat`. The example warns
+  and substitutes its default. Refusing to compute is not computing
+  differently, and a silently substituted default is exactly the class of thing
+  this project's evidence discipline exists to prevent.
+- An asymmetric mass matrix is refused with `NotSymmetric`. The example's
+  factorisation reads only the lower triangle, so an asymmetric input would be
+  half-read without complaint.
+- The `2*timestep` time-constant clamp is unconditional. The example skips it
+  under `mjINT_DISCRETE` (`mj_isMetric`) and under `mjDSBL_REFSAFE`
+  (`getsolparam`), and this port has neither an implicit-discrete integrator nor
+  a disable switch — so there is no configuration in which the two differ. If
+  either is added, the skip comes with it rather than being decided again.
+
+*Overwritten, and no longer a deviation:*
+
+- `contact::plane_sphere_contact` fixed its normal to `+z` and measured the
+  sphere centre's height as `center[2] - plane_height`. Example 04 section 1.1
+  takes the normal from the plane geom's own frame and measures
+  `cdist = dot(pos2 - pos1, n)`; the two agree only for a plane whose frame is
+  the world's. The general form replaced it.
+- The per-point penalty contact law, and the `--contact penalty|impedance`
+  selector that reached it, are gone. M-04 and M-09 record why it was a
+  competing formulation rather than a cheaper setting.
+
+*A cost gap, not a formulation difference:* `newton` forms a dense `nv x nv`
+Hessian and refactorises it each iteration, where `HessianIncremental` updates
+it rank-1 and `FactorizeHessian` keeps a sparse pattern. Same answer, more work;
+it is the first thing to change if the solver becomes a bottleneck, and it is
+also what [11](11-gpu-batched-backend.md) needs.
+
+*One implementation choice stated rather than hidden:* section 6.8's line search
+is iterative — a Newton march to bracket the minimum, then bisection against a
+tolerance. The cost along a search direction is a convex piecewise quadratic in
+`alpha` whose breakpoints are where each inequality row's `jar` crosses zero, so
+`newton` sorts the breakpoints and minimises the quadratic on each segment,
+finding the minimiser **exactly**. It computes what section 6.8 approaches; the
+mathematics is the example's and the iteration sequence is not.
 
 **Not yet ported from `engine_core_constraint.c`**: `mjEQ_CONNECT`, `mjEQ_WELD`, `mjEQ_TENDON` build rows (need body or tendon kinematics), `mj_Jdotv` (needed only for the connect and weld Jdot term), friction, limit and contact rows, `mj_diagApprox`, `mj_makeARSymbolic` sparse pattern, and the iterative solvers in `engine_solver.c`. `mjc_PlaneCapsule`, `mjc_PlaneCylinder`, `mjc_PlaneBox`, `mjc_SphereSphere` and the other collision pairs in `engine_collision_primitive.c` are not ported.
 

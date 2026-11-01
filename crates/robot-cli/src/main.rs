@@ -119,23 +119,19 @@ fn run_multibody(flags: &[String]) -> i32 {
         Ok(scene) => scene,
         Err(message) => return invalid_flag(&message),
     };
-    let contact = match flags
-        .iter()
-        .position(|a| a == "--contact")
-        .map(|i| flags.get(i + 1))
-    {
-        // Absent means the corrected path, not a legacy contact model.
-        None => None,
-        Some(Some(value)) if value == "penalty" => {
-            Some(robot_sim::articulated::ContactModel::Penalty)
-        }
-        Some(Some(value)) if value == "impedance" => {
-            Some(robot_sim::articulated::ContactModel::Impedance)
-        }
-        Some(_) => {
-            return invalid_flag("--contact expects penalty or impedance");
-        }
-    };
+    // `--contact penalty|impedance` selected a legacy contact formulation that
+    // the example's specifications replace, so it no longer exists. Rejecting
+    // it explicitly rather than ignoring it: an old invocation that silently
+    // ran a different simulation than it asked for would be worse than one
+    // that fails.
+    if flags.iter().any(|a| a == "--contact") {
+        return invalid_flag(
+            "--contact was removed: the per-point penalty contact it selected is a formulation \
+             the example's specifications replace, not a fidelity option. There is one \
+             simulation path. Use --actuation to choose how the model's declared drives are \
+             applied",
+        );
+    }
     let actuation = match flags
         .iter()
         .position(|a| a == "--actuation")
@@ -156,7 +152,6 @@ fn run_multibody(flags: &[String]) -> i32 {
         zero_torque,
         out: out.as_deref(),
         scene: scene.as_deref(),
-        contact,
         actuation,
     })
 }
