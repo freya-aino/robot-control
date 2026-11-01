@@ -163,6 +163,24 @@ fn offset(base: &[f64], dir: &[f64], scale: f64) -> Vec<f64> {
 /// is not finite and positive; `b` is then unchanged, but `a` is partially
 /// overwritten and must be rebuilt by the caller.
 pub(crate) fn cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
+    if !cholesky_factor(a, n) {
+        return false;
+    }
+    cholesky_substitute(a, b, n);
+    true
+}
+
+/// In-place Cholesky factorisation of the symmetric `n x n` row-major `a`,
+/// writing the lower-triangular factor over its lower triangle. Returns `false`
+/// when a pivot is not finite and positive, leaving `a` partially overwritten.
+///
+/// Split out from [`cholesky_solve`] so that one factorisation can serve many
+/// right-hand sides. Appendix D M-23 records the cost of not having this: the
+/// equality solver copied and refactorised the same mass matrix once per
+/// constraint row, `O(m nv^3)` where `O(nv^3 + m nv^2)` suffices. The example
+/// factorises `M` once per step and back-substitutes per row
+/// (02 sections 2.10 and 2.11).
+pub(crate) fn cholesky_factor(a: &mut [f64], n: usize) -> bool {
     for j in 0..n {
         let mut d = a[j * n + j];
         for k in 0..j {
@@ -181,6 +199,12 @@ pub(crate) fn cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
             a[i * n + j] = s / l_jj;
         }
     }
+    true
+}
+
+/// Forward and back substitution through a factor produced by
+/// [`cholesky_factor`], solving `a x = b` in place over `b`.
+pub(crate) fn cholesky_substitute(a: &[f64], b: &mut [f64], n: usize) {
     for i in 0..n {
         let mut s = b[i];
         for k in 0..i {
@@ -195,7 +219,6 @@ pub(crate) fn cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
         }
         b[i] = s / a[i * n + i];
     }
-    true
 }
 
 #[cfg(test)]

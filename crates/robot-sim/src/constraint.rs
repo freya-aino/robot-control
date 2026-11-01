@@ -13,7 +13,7 @@
 //! `ENBL_DIAGEXACT` path does). Deviations are listed in
 //! `crates/robot-sim/specs/06-equality-constraints-and-solver.md`.
 
-use crate::integrators::cholesky_solve;
+use crate::integrators::{cholesky_factor, cholesky_solve, cholesky_substitute};
 
 /// `MINVAL`, minimum value in any denominator (the reference type header).
 pub const MINVAL: f64 = 1e-15;
@@ -357,13 +357,19 @@ pub fn solve_equality(
         imp.push(imp_i);
     }
 
+    // Appendix D M-23: factorise the mass matrix once, then substitute per
+    // row, as the example does. This previously copied and refactorised `mass`
+    // inside the loop, which is `O(m nv^3)` instead of `O(nv^3 + m nv^2)` and
+    // gave `m` independent places for a non-positive-definite input to be
+    // detected rather than one.
+    let mut factor = mass.to_vec();
+    if !cholesky_factor(&mut factor, nv) {
+        return Err(ConstraintError::NotPositiveDefinite);
+    }
     let mut minv_jt = Vec::with_capacity(m);
     for row in rows {
-        let mut factor = mass.to_vec();
         let mut x = row.jacobian.clone();
-        if !cholesky_solve(&mut factor, &mut x, nv) {
-            return Err(ConstraintError::NotPositiveDefinite);
-        }
+        cholesky_substitute(&factor, &mut x, nv);
         minv_jt.push(x);
     }
 
