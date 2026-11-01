@@ -6,8 +6,9 @@ Status: proposed architecture for `robot-sim`'s physics layer. Not ratified; no 
 
 | Field | Value |
 | --- | --- |
-| Document version | 0.1.2-draft |
-| Last revised | 2026-10-31 |
+| Document version | 0.1.3-draft |
+| Last revised | 2026-11-01 |
+| Change in 0.1.3-draft | Records the precedence change of [Appendix D](appendix-d-mathematical-challenges.md) section 1.0.1: `docs/example-system-specs/` is now the single source of truth for the mathematics and execution model of multi-body simulation, while this project's goals, scope, language, dependency policy, evidence discipline and GPU-bound target are unchanged. Appendix D gains a status section (1.5) recording which of M-01 to M-24 are fixed, and 1.5.1 recording what M-05 and M-06 turned out to need. Appendix B **S-07** and **S-08** are resolved |
 | Change in 0.1.2-draft | Adds [Appendix D](appendix-d-mathematical-challenges.md), the record of a full implementation audit against these step files and against the non-normative `docs/example-system-specs/`, and adds a **Challenges** field to the steps it found entries against (01–07, 09, 11, 12). Opens Appendix B **S-07** to **S-09** for the three entries needing a specification decision. No requirement, acceptance row or deviations list is changed by this revision; the audit records where the code does not meet the text already here |
 | Companion documents | `SPECS.md` (platform specification; this document inherits its normative-language and evidence-state conventions without restating them), `PLAN.md` Phase 3, `docs/decisions/0005-gpu-batched-simulation-target.md`, `crates/robot-sim/README.md` |
 | Scope | `robot-sim`'s physics engine only: dynamics, contact, collision, actuation, integration and their GPU-batched execution. Motion capture, retargeting, learning algorithms and hardware are out of scope and unaffected |
@@ -35,8 +36,8 @@ Each step file links back to this index in its first line. Cross-references to o
 | Step file | Step | Status | Depends on |
 | --- | --- | --- | --- |
 | [00-target-and-constraints.md](00-target-and-constraints.md) | Target, constraints, evidence base | Specification only | — |
-| [01-state-and-coordinates.md](01-state-and-coordinates.md) | Generalized coordinates, `Free` / `Ball` joints | Partially implemented (`Free` done; `Ball` deferred). Two audit defects: the `Free` velocity convention is body-local against item 3's MUST (D/M-01, B/S-07), and a non-unit joint axis breaks `v = S qdot` (D/M-02) | 00 |
-| [02-pure-dynamics-core.md](02-pure-dynamics-core.md) | Mass matrix (CRBA), bias forces (RNE), frame convention | Partially implemented (spatial and ABA/RNE paths use plain arrays; CRBA / M(q) not implemented). Audit: both recursions re-derived and correct; the absent `M(q)` blocks step 03 (D/M-18) | 01 |
+| [01-state-and-coordinates.md](01-state-and-coordinates.md) | Generalized coordinates, `Free` / `Ball` joints | `Free` implemented; `Ball` deferred. Both audit defects fixed: the velocity convention is the example's in `composite` (D/M-01, B/S-07 resolved, momentum now exact to 1e-14) and joint axes are normalised at one accessor (D/M-02) | 00 |
+| [02-pure-dynamics-core.md](02-pure-dynamics-core.md) | Mass matrix (CRBA), bias forces (RNE), frame convention | **CRBA and M(q) implemented** in `composite` (world-orientation frame), cross-validated against the local-frame recursion to 1e-10 on the G1; `articulated` keeps the body-local ABA/RNE path. D/M-18 and D/M-24 closed | 01 |
 | [03-integrators.md](03-integrators.md) | Integrator family (`implicitfast`, `implicit`, RK4) | Partially implemented (semi-implicit Euler, implicit-damping Euler and RK4 CPU subsets), all three correct as written but none reachable from a run (D/M-17). The implicit step needs an `M(q)` that does not exist (D/M-18) and RK4 cannot take a `Free` joint (D/M-19) | 02 |
 | [04-fidelity-loop.md](04-fidelity-loop.md) | Source-faithful oracle plan: oracle definitions, tolerance table per tier, derivation rules | Partially implemented (`oracle.rs` and fidelity schema v7). The battery has no contact, collision or constraint row, which is where most audit entries are (D/M-20) | 02, 03 |
 | [05-passive-forces-and-actuators.md](05-passive-forces-and-actuators.md) | Passive forces, actuators, tendons (deferred) | Partially implemented (linear scalar-joint spring/damper and affine direct-joint actuator subset), correct but unreachable: the actuation that runs is `stance_torques`, which bypasses the gain/bias factoring and `ActuatorSpec` entirely (D/M-17) | 02, 03 |

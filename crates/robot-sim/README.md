@@ -78,6 +78,68 @@ dissipation check (symplectic-integrator energy drift bounded over
 contact model strictly losing energy on impact; friction that damps
 without ever reversing a slide).
 
+## What the corrections did (2026-11-01)
+
+`docs/example-system-specs/` is now the single source of truth for the
+mathematics and execution model of multi-body simulation. The project's goals,
+scope, language, dependency policy, evidence discipline and GPU-bound target are
+unchanged; the example is read for how to compute, not for what to build.
+`specs/appendix-d-mathematical-challenges.md` section 1.0.1 records the change
+and 1.5 records which of its 24 entries are now closed.
+
+**New module `composite`.** The example's own dynamics path, which is not the
+articulated-body algorithm: it forms the mass matrix and factorises it. Position
+and velocity stages (`subtree_com`, `cinert`, `cdof`, `cdof_dot`), the
+composite-rigid-body `M(q)`, its `L' D L` factorization over the
+degree-of-freedom tree, back-substitution, recursive Newton-Euler, forward
+dynamics as `qacc = M^-1 (tau - bias)`, position integration, and a stepper.
+Everything is in world orientation with the reference point at the owning tree's
+centre of mass, which is the example's frame.
+
+It is validated by cross-algorithm agreement, not by assertion: `M` from the
+composite recursion matches `M` built column by column from `articulated`'s
+local-frame inverse dynamics to 1e-10 on the full 29-degree-of-freedom G1, and
+the bias force to 1e-9. Two different algorithms in two different coordinate
+frames. The degree-of-freedom-tree factorization is also the structure a batched
+GPU backend parallelises over, so this is the shape the eventual GPU path wants.
+
+**The `Free` joint convention is fixed.** World-frame linear velocity in the
+first three degrees of freedom, body-frame angular in the last three,
+translation first, with an exact exponential-map quaternion update. A force-free
+spinning body conserved world linear momentum to only 3.93e-3 per simulated
+second before; it is now exact to below 1e-14, because under this convention the
+translational rows of `M` are a constant `m*I` with zero bias and there is no
+`-omega x u` cancellation left for an explicit step to approximate. The
+anisotropic rotational energy drift is unchanged at about 1.8e-2 and is asserted
+to be first-order in the timestep, because it never was the convention's fault:
+it is explicit integration of Euler's equations, which is what an implicit or
+RK4 step would address.
+
+**Also fixed**: inertia validity now tests the principal moments rather than the
+diagonal entries, via the new `robot_model::eig` (a tensor with eigenvalues
+3, 1, -1 used to pass); joint axes are normalised at a single accessor, so
+scaling a declared axis no longer changes the dynamics; the small dense solver's
+pivot tolerance is relative to its matrix; `stiffness_damping` selects the
+`solref` format with one predicate; and an edge-edge box contact is placed on
+the edges instead of at a corner about 0.7 m away.
+
+**What is not done, and the honest reason.** The unified constraint solver of
+example files 07 and 08 is not built, so Appendix D M-04 and M-08 to M-12 stand:
+contact is still the penalty and coupled-impedance pair, friction is still
+outside the solve, and limits are still a separate active set plus a position
+clamp. `MultibodyState::step` is still the stepper the CLI and the environments
+run, so the composite path is available but not yet the default — switching over
+means moving contact to the same path, which is the same piece of work.
+
+M-05 and M-06, the GJK and EPA degeneracies, were attempted and reverted.
+Appendix D section 1.5.1 records what they turned out to need: the example's
+enclosure invariant comes from its GJK, not its EPA — four non-zero barycentric
+weights from the signed-volume subdistance of 05 section 5.4 *are* strict
+enclosure — and our `reduce` uses Ericson's region tests, which cannot provide
+it. Building the polytope constructions of 05 section 6.1 on top of that
+mismatch traded a false positive for a false negative and back. The fix is to
+replace `reduce` with the subdistance first.
+
 ## What a full audit of the maths found (2026-10-31)
 
 Every algorithm module in this crate, in `robot-sim-gpu`, and the mass-property

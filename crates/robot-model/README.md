@@ -166,8 +166,33 @@ because the two reject different inputs. Note that `robot-sim`'s step 05 names
 this function as the pattern a future spring-damper sign-preservation check
 should follow, so it is a weaker precedent than that reference assumes.
 
-Neither defect is fixed by that audit; both want a reproducing test alongside
-the fix, per the testing policy in `AGENT.md`.
+**Both are fixed as of 2026-11-01**, each with the reproducing test the testing
+policy asks for.
+
+M-02: `JointSpec::unit_axis` is now the single accessor for a joint's axis, used
+by `transform_at` and by both dynamics adapters, so `v = S qdot` holds by
+construction. `robot_sim::composite`'s
+`a_non_unit_joint_axis_gives_the_same_dynamics_as_a_unit_one` asserts that
+scaling every declared axis by 3.5 leaves the mass matrix and the bias force
+unchanged.
+
+M-03: the condition now applies to the **principal moments**, computed by the
+new `eig` module (a transfer of the example's symmetric 3x3 Jacobi
+eigendecomposition, `12_linear_algebra_sparse_numerics.md` section 7). One
+deviation is documented at the call site: the example applies the triangle
+inequality with no tolerance, which is unusable on eigenvalues produced by
+iteration because a thin rod has principal moments `(0, I, I)` and sits exactly
+on the boundary, so the test carries a tolerance relative to the largest moment.
+Every link of both vendored G1 fixtures passes the stricter condition, which is
+asserted — worth pinning, since the check became stronger.
+
+A note from writing those tests, because it illustrates the original defect
+better than the counterexample does. The first "obviously valid" tensor written
+by hand for the accept-side test — diagonal `(4, 3, 2)` with products
+`(1, 0.5, -0.25)` — turned out to have principal moments `(4.65, 2.69, 1.66)`,
+and `2.69 + 1.66 < 4.65`. No rigid body has those moments. It passes the old
+diagonal-entry test. The accept-side fixture is now built by rotating a valid
+diagonal tensor, so it is valid by construction.
 
 ## Testing
 

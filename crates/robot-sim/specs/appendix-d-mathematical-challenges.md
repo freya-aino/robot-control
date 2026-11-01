@@ -17,13 +17,38 @@ references at once:
 
 1. The step files 00–12 of this directory, which state what the subsystem is
    required to do.
-2. `docs/example-system-specs/` (17 documents, non-normative; see
-   `docs/example-system-mapping.md` for how that folder is used). The example
-   describes a complete, working rigid-body and contact simulator in equations
-   and algorithm steps. It is read here as the *mathematics of a system known to
-   work*, so a divergence from it is a question worth asking, never a
-   requirement in itself. Rule 3 of the mapping document still holds: where the
-   example and a parent requirement disagree, the parent governs.
+2. `docs/example-system-specs/` (17 documents; see
+   `docs/example-system-mapping.md` for how that folder came into use). The
+   example describes a complete, working rigid-body and contact simulator in
+   equations and algorithm steps.
+
+### 1.0.1 Precedence, changed 2026-11-01
+
+When this appendix was first written the example folder was non-normative, and
+rule 3 of the mapping document governed: where the example and a parent
+requirement disagreed, the parent won. **That is no longer the case.** By
+explicit direction, `docs/example-system-specs/` is now the **single source of
+truth for the mathematics and the execution model of multi-body simulation**.
+
+What that changes, and what it does not:
+
+- **Mathematics and algorithms**: the example governs. A divergence from its
+  formulation is a defect to fix, not a question to ask, and the deviations
+  recorded under step 06 and step 02 are re-read in that light.
+- **Everything else is unchanged**: the project's own goals, scope, normative
+  language, evidence discipline (`SPECS.md` Section 3), the std-only dependency
+  closure (`SPECS.md` Section 2), the Rust-native requirement, and the standing
+  requirement that the backend end up GPU-bound and batched
+  (`00-target-and-constraints.md` Section 1.2). The example is read for how to
+  compute, not for what to build.
+- Rule 2 of the mapping document still holds: the example's numerical
+  constants, defaults and tolerances belong to the engine it describes and are
+  not transplanted. Adopting one needs its own measurement.
+
+This resolved one open question outright. Appendix B **S-07** asked whether to
+change the `Free` joint's velocity convention or to amend step 01 item 3 to
+match the code. Under the new precedence the question does not arise: the
+example's convention is the mathematics, so the code changed.
 
 Files read in full: `robot-sim/src/{spatial,articulated,collision,contact,constraint,integrators,passive,oracle}.rs`,
 `robot-sim-gpu/src/{integrators,contact,constraint,passive,launch}.rs`,
@@ -142,6 +167,75 @@ repository.
 | [M-22](#m-22) | The GPU dense path is `f32` and capped at 6 degrees of freedom; the G1 needs 35 at `cond(M) ~ 1e5` | gap | [11](11-gpu-batched-backend.md), [12](12-cpu-gpu-agreement.md) |
 | [M-23](#m-23) | `solve_equality` refactorises `M` once per constraint row | cost | [06](06-equality-constraints-and-solver.md) |
 | [M-24](#m-24) | `inverse_inertia_diagonal` costs `nv` forward-dynamics passes and runs inside the stance loop | cost | [02](02-pure-dynamics-core.md) |
+
+### 1.5 Status after the 2026-11-01 corrections
+
+The register below was written as an audit. This section records what has since
+been done against it, so that the entries are read as a work list with known
+state rather than as a flat list of open defects. Each **fixed** row names the
+test that would fail if the fix regressed.
+
+| ID | State | Where |
+| --- | --- | --- |
+| [M-01](#m-01) | **fixed** | `composite`: world-frame linear velocity, translation-first, per 02 §2.3; exact exponential-map quaternion update per 01 §8.3. World linear momentum now conserved to below 1e-14 against a measured 3.93e-3 drift. `a_force_free_body_conserves_world_linear_momentum_exactly` |
+| [M-02](#m-02) | **fixed** | `JointSpec::unit_axis` is the single accessor, used by `transform_at` and both dynamics adapters. `a_non_unit_joint_axis_gives_the_same_dynamics_as_a_unit_one` |
+| [M-03](#m-03) | **fixed** | The condition moved to the principal moments, via the new `robot_model::eig` (12 §7). `an_indefinite_tensor_is_rejected_even_though_its_diagonal_passes` |
+| [M-04](#m-04) | open | Folded into the constraint-solver work; see S-09 and the note below |
+| [M-05](#m-05) | **attempted, reverted** | Needs the signed-volume subdistance; see 1.5.1 |
+| [M-06](#m-06) | **attempted, reverted** | Same; see 1.5.1 |
+| [M-07](#m-07) | **fixed** | Support-feature edge pair plus closest-points, replacing the extreme-corner fallback. `an_edge_edge_box_contact_is_placed_on_the_edges_not_at_a_corner` |
+| [M-08](#m-08) | open | Needs limit rows in a shared solver |
+| [M-09](#m-09) to [M-12](#m-12) | open | The constraint solver, per 07 and 08 |
+| [M-13](#m-13) | **fixed** | One predicate for one `solref` format choice |
+| [M-14](#m-14) | **fixed** | Pivot tolerance relative to the matrix, matching `solve_dense` |
+| [M-15](#m-15), [M-16](#m-16) | open | Broad and mid phase; pair exclusion |
+| [M-17](#m-17) | **partly addressed** | The composite module is now a complete forward-dynamics path (`CompositeState::step`) rather than another unreachable function, but `MultibodyState::step` is still the stepper the CLI and the environments run, and the three ported modules are still not on it. Switching over waits on the solver, because contact has to move at the same time |
+| [M-18](#m-18) | **fixed** | `crb`, `factor_m`, `solve_ld`, `full_m` supply `M(q)` and its factorization. Cross-validated against the local-frame recursion on the 29-degree-of-freedom G1 to 1e-10 |
+| [M-19](#m-19) | open | RK4 still cannot take a `Free` joint. The drift it is wanted for is now asserted to be first-order in the timestep, which is the measurement that would show an implicit or RK4 step working |
+| [M-20](#m-20) | open | The battery still has no contact, collision or constraint row. The new cross-algorithm checks live in the module's own tests, not in the archival battery |
+| [M-21](#m-21) | open | Still compile-time constants |
+| [M-22](#m-22) | open, better understood | The composite module's degree-of-freedom-tree factorization is the structure a batched backend parallelises over, so the sparse route named in M-22 now exists on the CPU. The `f32` and `MAX_DOF = 6` limits in `robot-sim-gpu` are untouched |
+| [M-23](#m-23) | open | `solve_equality` still refactorises per row. The composite path does not have the defect, so this is confined to the standalone equality solver |
+| [M-24](#m-24) | **fixed** | `composite::inverse_inertia_diagonal` is one factorization plus `nv` back-substitutions instead of `nv` articulated-body passes. `the_inverse_inertia_diagonal_matches_the_articulated_construction` |
+
+#### 1.5.1 What M-05 and M-06 actually need
+
+This is the one finding that changed shape on contact with the code, so it is
+recorded rather than left as "open".
+
+The enclosure invariant EPA depends on does not come from the example's EPA. It
+comes from its **GJK**: penetration is signalled only when the signed-volume
+subdistance of 05 §5.4 returns four non-zero barycentric weights, and four
+non-zero weights *are* strict enclosure by construction. The polytope
+constructions of 05 §6.1 then rely on that invariant rather than establishing
+it. Our `reduce` uses Ericson's region tests, which give a correct closest
+feature but no such guarantee.
+
+Building §6.1's constructions on top of Ericson's `reduce` was tried and
+reverted. That included the five-vertex hexahedron §6.1 uses for a triangle
+simplex, which is itself the explanation for the original defect: **no**
+tetrahedron built on three vertices whose plane passes through the origin can
+strictly contain the origin without being degenerate, so the previous
+"grow to four affinely independent points" step could not have established the
+invariant whatever its tolerances. Two further details of §6.1 turned out to be
+load-bearing and are worth carrying into the real fix: the `P3_MISSING_ORIGIN`
+test must be skipped when the GJK distance is essentially zero (the example
+guards it with `dist[0] > 10*mjMINVAL`), because the origin is then on the
+shared face of both half-tetrahedra and neither can pass; and an empty EPA
+horizon means the support point adds nothing, which is *convergence* for a
+polyhedron, not the `nedges < 3` failure.
+
+Each attempt traded one failure for another. Requiring strict interiority in
+`reduce` turned M-06's false positive into a false negative for shallow
+penetrations; relaxing it reintroduced false overlaps for separated pairs. That
+oscillation is the signature of the structural mismatch, not of a missing
+tolerance.
+
+So the work is: replace `reduce` with the signed-volume subdistance (05 §5.4),
+then build §6.1's polytope2/3/4 on the invariant it provides. Bounded, fully
+specified, and a different piece of work from the one attempted. Until then the
+entries stand as written, and the `depth.max(0.0)` that hides the failure is
+still in place.
 
 ---
 
