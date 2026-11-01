@@ -1412,6 +1412,181 @@ impl CompositeState {
     }
 }
 
+/// `bortzCoef(xx)` of 02 section 1.2, the coefficient of the second-order term
+/// of the inverse differential of the exponential map, with `xx = |r|^2`.
+///
+/// Below `1.75^2` the example uses a nine-term Horner polynomial, because the
+/// closed form `(1 - (x/2)/tan(x/2)) / xx` loses all significance as `x`
+/// approaches zero. Both branches are reproduced, with the example's
+/// double-precision coefficients.
+#[must_use]
+pub fn bortz_coef(xx: f64) -> f64 {
+    // Transcribed verbatim from the example's double-precision table. The
+    // trailing digits exceed what `f64` represents, so trimming them would not
+    // change a single bit of the result -- but it would make the table
+    // impossible to diff against the source of truth, which for a transferred
+    // constant list is the property worth keeping. This is the documented
+    // reason `AGENT.md` asks for before an allow.
+    #[allow(clippy::excessive_precision)]
+    const C: [f64; 9] = [
+        0.083_333_333_333_333_384,
+        0.001_388_888_888_885_975_5,
+        3.306_878_309_443_320_1e-5,
+        8.267_194_907_152_073_4e-7,
+        2.087_690_064_203_914_2e-8,
+        5.282_849_430_384_458_8e-10,
+        1.345_548_595_105_788_8e-11,
+        3.161_551_550_077_821_9e-13,
+        1.230_313_397_310_169e-14,
+    ];
+    if xx < 3.0625 {
+        let mut acc = 0.0;
+        for c in C.iter().rev() {
+            acc = acc * xx + c;
+        }
+        acc
+    } else {
+        let x = xx.sqrt();
+        let half = 0.5 * x;
+        (1.0 - half / half.tan()) / xx
+    }
+}
+
+/// `mju_derivExpmap(r, vel)` of 02 section 1.2:
+/// `dexp^-1_{-r}(vel) = vel + 0.5 r x vel + c(|r|^2) r x (r x vel)`, with `r`
+/// first reduced to an angle in `(-pi, pi]`.
+#[must_use]
+pub fn deriv_expmap(r: [f64; 3], vel: [f64; 3]) -> [f64; 3] {
+    let mut r = r;
+    let xx = dot3(r, r);
+    if xx > core::f64::consts::PI * core::f64::consts::PI {
+        let x = xx.sqrt();
+        let tau = 2.0 * core::f64::consts::PI;
+        let wrapped = x - tau * (x / tau + 0.5).floor();
+        r = scale3(r, wrapped / x);
+    }
+    let c = bortz_coef(dot3(r, r));
+    let rxv = cross3(r, vel);
+    let rxrxv = cross3(r, rxv);
+    add3(add3(vel, scale3(rxv, 0.5)), scale3(rxrxv, c))
+}
+
+/// `rkCorrectVel` of 01 section 9.4: the Runge-Kutta-Munthe-Kaas correction,
+/// applied in place to the rotational degrees of freedom of every `Free` joint.
+///
+/// Rotational velocities do not live in a vector space, so weighting stage
+/// velocities as if they did is what makes a naive Runge-Kutta step on a
+/// rotating body only first-order accurate in its orientation. The correction
+/// maps each stage velocity back through the differential of the exponential
+/// map at the stage's own rotation increment, which is what recovers the
+/// method's order on the rotation manifold.
+fn rk_correct_vel(model: &CompositeModel, vel: &mut [f64], dqvel: &[f64], dt: f64) {
+    for body in &model.bodies {
+        if body.kind != JointKind::Free {
+            continue;
+        }
+        let a = body.dof_adr + 3;
+        let rot = [dt * dqvel[a], dt * dqvel[a + 1], dt * dqvel[a + 2]];
+        let v = [vel[a], vel[a + 1], vel[a + 2]];
+        let corrected = deriv_expmap(rot, v);
+        vel[a..a + 3].copy_from_slice(&corrected);
+    }
+}
+
+impl CompositeState {
+    /// One classical fourth-order Runge-Kutta step (01 section 9.4,
+    /// `mj_RungeKutta` with `N = 4`).
+    ///
+    /// Unlike [`crate::integrators::rk4_step`] this handles a `Free` joint,
+    /// which is the whole point. Appendix D M-19 records that the scalar port
+    /// asserts `q.len() == qd.len()` and advances stage positions by
+    /// `q + h * v`, so it rejects a free joint outright -- and even with the
+    /// widths reconciled, `q + h * v` leaves the quaternion manifold. That
+    /// matters because the one configuration step 03 item 4 specifies RK4
+    /// *for* is a free-floating tumbling body.
+    ///
+    /// Two things make this correct for such a body. Stage positions advance
+    /// through [`integrate_pos`], so the quaternion follows an exact
+    /// exponential-map update rather than a linear one; and stage velocities
+    /// carry the RKMK correction of [`rk_correct_vel`], without which the
+    /// orientation would still be integrated to first order however many
+    /// stages are taken.
+    ///
+    /// The example's own asymmetry is reproduced: the corrected stage velocity
+    /// feeds the Butcher sums, while the force evaluation at each stage uses
+    /// the **uncorrected** one, because that is the velocity the stage state
+    /// actually has.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`forward_dynamics`] and [`integrate_pos`] report.
+    pub fn rk4_step(
+        &mut self,
+        model: &CompositeModel,
+        tau: &[f64],
+        dt: f64,
+    ) -> Result<(), CompositeError> {
+        const A: [[f64; 3]; 3] = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]];
+        const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
+        let nv = model.nv();
+
+        // Stage 0 is the current state.
+        let q0 = self.q.clone();
+        let qd0 = self.qd.clone();
+        let pos0 = position(model, &q0)?;
+        let f0 = forward_dynamics(model, &pos0, &qd0, tau)?;
+
+        // Per stage: the velocity that enters the Butcher sums (corrected for
+        // stages 1..3) and the acceleration.
+        let mut stage_vel: Vec<Vec<f64>> = vec![qd0.clone()];
+        let mut stage_acc: Vec<Vec<f64>> = vec![f0];
+
+        for i in 1..4 {
+            let mut d_qvel = vec![0.0; nv];
+            let mut d_qacc = vec![0.0; nv];
+            for j in 0..i {
+                let a = A[i - 1][j];
+                if a == 0.0 {
+                    continue;
+                }
+                for k in 0..nv {
+                    d_qvel[k] += a * stage_vel[j][k];
+                    d_qacc[k] += a * stage_acc[j][k];
+                }
+            }
+            let mut qi = q0.clone();
+            integrate_pos(model, &mut qi, &d_qvel, dt)?;
+            let qdi: Vec<f64> = qd0.iter().zip(&d_qacc).map(|(v, a)| v + dt * a).collect();
+
+            // The force evaluation uses the uncorrected stage velocity.
+            let posi = position(model, &qi)?;
+            let fi = forward_dynamics(model, &posi, &qdi, tau)?;
+
+            // The Butcher sums use the corrected one.
+            let mut corrected = qdi;
+            rk_correct_vel(model, &mut corrected, &d_qvel, dt);
+            stage_vel.push(corrected);
+            stage_acc.push(fi);
+        }
+
+        // B-weighted combination, then one advance with it.
+        let mut d_qvel = vec![0.0; nv];
+        let mut d_qacc = vec![0.0; nv];
+        for j in 0..4 {
+            for k in 0..nv {
+                d_qvel[k] += B[j] * stage_vel[j][k];
+                d_qacc[k] += B[j] * stage_acc[j][k];
+            }
+        }
+        for (v, a) in self.qd.iter_mut().zip(&d_qacc) {
+            *v += dt * a;
+        }
+        // The position advances with the weighted mean velocity, not with the
+        // updated one: `mj_advance(..., qacc = dX[nv:2nv], qvel = dX[0:nv])`.
+        integrate_pos(model, &mut self.q, &d_qvel, dt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2394,5 +2569,126 @@ mod tests {
         let mut q = vec![0.0; 7];
         assert!(integrate_pos(&model, &mut q, &[0.0; 5], 1e-3).is_err());
         assert!(integrate_pos(&model, &mut q, &[0.0; 6], f64::NAN).is_err());
+    }
+    fn free_body_drift_rk4(inertia: InertiaTensorLit, dt: f64, seconds: f64) -> (f64, f64) {
+        let profile = free_body(2.0, inertia);
+        let mut model = CompositeModel::from_profile(&profile);
+        model.gravity = [0.0, 0.0, 0.0];
+        let mut state = CompositeState::identity(&model);
+        state.qd = vec![1.0, 0.0, 0.0, 3.0, 5.0, 7.0];
+        let v0 = [state.qd[0], state.qd[1], state.qd[2]];
+        let ke0 = state.kinetic_energy(&model).unwrap();
+        let tau = vec![0.0; 6];
+        let steps = (seconds / dt).round() as usize;
+        for _ in 0..steps {
+            state.rk4_step(&model, &tau, dt).unwrap();
+        }
+        let v1 = [state.qd[0], state.qd[1], state.qd[2]];
+        let dv =
+            ((v1[0] - v0[0]).powi(2) + (v1[1] - v0[1]).powi(2) + (v1[2] - v0[2]).powi(2)).sqrt();
+        let ke1 = state.kinetic_energy(&model).unwrap();
+        (dv, (ke1 - ke0).abs() / ke0)
+    }
+
+    #[test]
+    fn rk4_integrates_a_free_joint_at_all() {
+        // Appendix D M-19: the scalar port rejects a `Free` joint outright,
+        // which is the one configuration step 03 item 4 specifies RK4 for.
+        let profile = free_body(2.0, (0.02, 0.10, 0.30));
+        let model = CompositeModel::from_profile(&profile);
+        let mut state = CompositeState::identity(&model);
+        state.qd = vec![0.5, -0.2, 0.3, 1.0, 2.0, -1.5];
+        let tau = vec![0.0; 6];
+        state.rk4_step(&model, &tau, 1e-3).unwrap();
+        assert!(state.q.iter().all(|v| v.is_finite()));
+        // The quaternion stays unit, which a linear stage update would not keep.
+        let n = (state.q[3] * state.q[3]
+            + state.q[4] * state.q[4]
+            + state.q[5] * state.q[5]
+            + state.q[6] * state.q[6])
+            .sqrt();
+        assert!((n - 1.0).abs() < 1e-14, "quaternion norm {n}");
+    }
+
+    #[test]
+    fn rk4_conserves_world_linear_momentum_exactly_on_a_free_body() {
+        for inertia in [(0.1, 0.1, 0.1), (0.02, 0.10, 0.30)] {
+            let (dv, _) = free_body_drift_rk4(inertia, 1e-3, 1.0);
+            assert!(dv < 1e-12, "linear velocity drifted {dv} for {inertia:?}");
+        }
+    }
+
+    #[test]
+    fn rk4_is_higher_order_than_the_semi_implicit_step_on_a_tumbling_body() {
+        // The energy drift of an anisotropic tumbling free body is the quantity
+        // step 03 item 4 wants RK4 for, and the semi-implicit step was measured
+        // to be first-order in it (see
+        // `anisotropic_rotational_energy_drift_is_first_order_in_the_timestep`).
+        //
+        // Two things are asserted, because either alone would be weak. First
+        // that RK4's drift is far smaller at the same timestep -- not a
+        // constant-factor win but orders of magnitude. Second that it shrinks
+        // much faster than first order when the timestep is halved, which is
+        // what "higher order" means and what a mere constant-factor
+        // improvement would not show.
+        let inertia = (0.02, 0.10, 0.30);
+        let (_, euler) = free_body_drift(inertia, 1e-3, 0.5);
+        let (_, rk4_coarse) = free_body_drift_rk4(inertia, 1e-3, 0.5);
+        let (_, rk4_fine) = free_body_drift_rk4(inertia, 5e-4, 0.5);
+
+        assert!(
+            rk4_coarse < euler / 100.0,
+            "rk4 drift {rk4_coarse} should be far below the semi-implicit {euler}"
+        );
+        // Guard against the fine result being so small it is pure rounding,
+        // which would make the ratio meaningless.
+        if rk4_fine > 1e-14 {
+            let ratio = rk4_coarse / rk4_fine;
+            assert!(
+                ratio > 4.0,
+                "halving the timestep should cut the drift by much more than \
+                 the factor of 2 a first-order method gives; got {ratio}"
+            );
+        }
+    }
+
+    #[test]
+    fn deriv_expmap_and_bortz_coef_match_hand_derived_values() {
+        // At zero rotation the correction is the identity.
+        let v = [0.3, -0.7, 1.1];
+        assert_close(&deriv_expmap([0.0; 3], v), &v, 1e-15, "zero rotation");
+        // The Bortz coefficient's two branches meet at `1.75^2 = 3.0625`: the
+        // nine-term polynomial below, the closed form at or above. They agree
+        // only to about 3.2e-7 there, which is the truncation error of the
+        // example's own coefficients at the top of their range and not a
+        // transcription mistake -- the polynomial is chosen for the
+        // small-angle regime, where the closed form loses all significance,
+        // and 1.75 rad is the far end of it. The bound below records the
+        // measured discontinuity rather than wishing it away; anything much
+        // tighter would be asserting a property the formulation does not have.
+        let just_below = 3.0624_f64;
+        let just_above = 3.0626_f64;
+        let x = just_above.sqrt();
+        let closed = (1.0 - (0.5 * x) / (0.5 * x).tan()) / just_above;
+        let jump = (bortz_coef(just_below) - bortz_coef(just_above)).abs();
+        assert!(
+            jump < 1e-6,
+            "the two branches disagree by {jump} at the switch: {} vs {}",
+            bortz_coef(just_below),
+            bortz_coef(just_above)
+        );
+        assert!(
+            jump > 1e-8,
+            "the discontinuity is expected to be around 3e-7; got {jump}, which \
+             suggests the coefficients changed"
+        );
+        assert!((bortz_coef(just_above) - closed).abs() < 1e-15);
+        // Small-angle limit: the coefficient tends to 1/12.
+        assert!((bortz_coef(0.0) - 1.0 / 12.0).abs() < 1e-15);
+        // A rotation parallel to the velocity leaves it unchanged, because both
+        // cross products vanish.
+        let r = [0.0, 0.0, 0.4];
+        let along = [0.0, 0.0, 2.0];
+        assert_close(&deriv_expmap(r, along), &along, 1e-15, "parallel");
     }
 }
