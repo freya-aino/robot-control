@@ -117,6 +117,16 @@ SPECS.md Section 3 governs claims. Treat research and performance claims as
 
 ## Workflow rules
 
+- This project does not follow a branching strategy. Work on `main` directly.
+  Do not create a branch, a worktree, or a pull request unless the user
+  explicitly asks for one.
+- If your harness forces isolation anyway (some background and sandboxed agent
+  runners reject edits outside a worktree), that is the harness, not this
+  project's workflow. Finish the work in the worktree, then fast-forward `main`
+  onto it, remove the worktree, and delete the branch, so `main` is the only
+  branch left. Base such a worktree on the current `main` (`git worktree add
+  <path> -b <name> HEAD`), not on `origin/main`, or it cannot fast-forward.
+  Say in your report that you did this.
 - Commit only when the user explicitly asks. When you commit, follow the
   commit format below.
 - Commit subject: `type(scope): imperative summary`. The type is lowercase
