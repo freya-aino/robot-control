@@ -716,14 +716,30 @@ pub fn position(model: &CompositeModel, q: &[f64]) -> Result<Position, Composite
             Some(p) => (xmat[p], xpos[p]),
             None => ([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [0.0; 3]),
         };
-        xmat.push(mat3_mul(prot, lrot));
-        xpos.push(add3(mat3_mul_vec(prot, ltrans), ppos));
-        // The anchor is the joint origin in world; the axis is the declared
-        // axis carried into world by the parent's rotation composed with the
-        // joint origin's own rotation, which is the frame the axis is declared
-        // in.
-        let anchor_local = body.origin_trans;
-        xanchor.push(add3(mat3_mul_vec(prot, anchor_local), ppos));
+        let world_rot = mat3_mul(prot, lrot);
+        let world_pos = add3(mat3_mul_vec(prot, ltrans), ppos);
+        xmat.push(world_rot);
+        xpos.push(world_pos);
+        // §2.1. For a `Free` joint the anchor is the body's own world position
+        // ("xanchor[j] = xpos"), because the joint's reference point travels
+        // with the body. For every other kind it is the joint origin carried
+        // into world by the parent alone: a hinge rotates about a point that
+        // does not move, and a slide's `cdof` is `[0; axis]`, which uses no
+        // offset at all.
+        //
+        // Getting this wrong is not subtle in its effect. With the anchor held
+        // at the parent's frame, a displaced free body acquires an offset equal
+        // to its own displacement, the rotational `cdof` pick up a spurious
+        // `axis x offset` lever arm, and a force-free spinning body diverges
+        // instead of travelling in a straight line.
+        xanchor.push(match body.kind {
+            JointKind::Free => world_pos,
+            _ => add3(mat3_mul_vec(prot, body.origin_trans), ppos),
+        });
+        // The axis is the declared axis carried into world through the parent
+        // and the joint origin's own rotation, the frame it is declared in. A
+        // `Free` joint has no single axis; its rotational subspace uses the
+        // body frame axes directly (§2.3).
         let axis_frame = mat3_mul(prot, body.origin_rot);
         xaxis.push(mat3_mul_vec(axis_frame, body.axis));
     }
@@ -1171,6 +1187,227 @@ pub fn inverse_inertia_diagonal(
         out[j] = e[j];
     }
     Ok(out)
+}
+
+/// Forward dynamics: `qacc = M^-1 (tau - qfrc_bias)` (§5 `mj_forward`, §8.3).
+///
+/// This is the example's own execution path and it is **not** the
+/// articulated-body algorithm. The example forms `M`, factorises it and solves;
+/// it has no `mj_aba`. Two consequences matter here.
+///
+/// First, it is the reason a `Free` joint can carry the example's velocity
+/// convention at all. A world-frame linear motion subspace is
+/// configuration-dependent, so the articulated-body recursion would need the
+/// `Sdot qdot` term its `v x S qdot` bias has no place for. Forming `M` sidesteps
+/// that: the configuration dependence lives in `cdof` and `cdof_dot`, which
+/// [`position`] and [`com_vel`] compute explicitly.
+///
+/// Second, `tau` here is a generalized force over all degrees of freedom and
+/// already includes any constraint or contact force, exactly as the example's
+/// `qfrc_smooth + qfrc_constraint` does.
+///
+/// # Errors
+///
+/// [`CompositeError::WidthMismatch`] or [`CompositeError::NotFinite`] on a bad
+/// input, [`CompositeError::SingularInertia`] if `M` cannot be factorised.
+pub fn forward_dynamics(
+    model: &CompositeModel,
+    pos: &Position,
+    qd: &[f64],
+    tau: &[f64],
+) -> Result<Vec<f64>, CompositeError> {
+    let nv = model.tree.nv;
+    if tau.len() != nv {
+        return Err(CompositeError::WidthMismatch {
+            what: "tau",
+            expected: nv,
+            found: tau.len(),
+        });
+    }
+    if tau.iter().any(|x| !x.is_finite()) {
+        return Err(CompositeError::NotFinite { what: "tau" });
+    }
+    let bias = rne(model, pos, qd, None)?;
+    let m = crb(model, pos);
+    let (ld, diag_inv) = factor_m(&model.tree, &m)?;
+    let mut qacc: Vec<f64> = tau.iter().zip(&bias).map(|(t, b)| t - b).collect();
+    solve_ld(&model.tree, &ld, &diag_inv, &mut qacc);
+    Ok(qacc)
+}
+
+/// `mju_quatIntegrate(quat, vel, scale)` of §8.3: rotates `quat` by the
+/// body-frame angular velocity `vel` over `scale`.
+///
+/// This is an exact axis-angle (exponential-map) update, not the first-order
+/// `q + dt/2 q omega` step. The example's order of operations is reproduced
+/// exactly, because it is load-bearing: `quat` is normalised **before** the
+/// multiplication and deliberately **not** after it.
+#[must_use]
+pub fn quat_integrate(quat: [f64; 4], vel: [f64; 3], scale: f64) -> [f64; 4] {
+    let (axis, norm) = normalize3(vel);
+    let angle = scale * norm;
+    // axisAngle2Quat: angle == 0 gives the identity.
+    let qrot = if angle == 0.0 {
+        [1.0, 0.0, 0.0, 0.0]
+    } else {
+        let half = angle * 0.5;
+        let s = half.sin();
+        [half.cos(), axis[0] * s, axis[1] * s, axis[2] * s]
+    };
+    // normalize4: fall back on a degenerate quaternion, and skip the rescale
+    // when it is already unit to within MINVAL.
+    let n = (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3]).sqrt();
+    let q = if !n.is_finite() || n < MINVAL {
+        [1.0, 0.0, 0.0, 0.0]
+    } else if (n - 1.0).abs() > MINVAL {
+        [quat[0] / n, quat[1] / n, quat[2] / n, quat[3] / n]
+    } else {
+        quat
+    };
+    mul_quat(q, qrot)
+}
+
+/// Hamilton product `a (x) b`, `[w, x, y, z]` ordering (§1.2 `mju_mulQuat`).
+#[must_use]
+pub fn mul_quat(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [
+        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+        a[0] * b[2] + a[2] * b[0] + a[3] * b[1] - a[1] * b[3],
+        a[0] * b[3] + a[3] * b[0] + a[1] * b[2] - a[2] * b[1],
+    ]
+}
+
+/// `mj_integratePosInd` of §8.3: advances `q` by `dt` using the velocity `v`.
+///
+/// Per joint kind:
+/// - `Free`: `q[0:3] += dt * v[0:3]` — a plain world-frame translation,
+///   because the example's free-joint linear velocity **is** world-frame. Then
+///   the quaternion by [`quat_integrate`] with `v[3:6]`, the body-frame angular
+///   velocity.
+/// - single-axis: `q += dt * v`.
+///
+/// Both `q` and `v` are in internal order.
+///
+/// # Errors
+///
+/// [`CompositeError::WidthMismatch`] or [`CompositeError::NotFinite`] on a bad
+/// input.
+pub fn integrate_pos(
+    model: &CompositeModel,
+    q: &mut [f64],
+    v: &[f64],
+    dt: f64,
+) -> Result<(), CompositeError> {
+    if q.len() != model.nq {
+        return Err(CompositeError::WidthMismatch {
+            what: "q",
+            expected: model.nq,
+            found: q.len(),
+        });
+    }
+    if v.len() != model.tree.nv {
+        return Err(CompositeError::WidthMismatch {
+            what: "qd",
+            expected: model.tree.nv,
+            found: v.len(),
+        });
+    }
+    if !dt.is_finite() {
+        return Err(CompositeError::NotFinite { what: "dt" });
+    }
+    for body in &model.bodies {
+        let (pa, va) = (body.qpos_adr, body.dof_adr);
+        match body.kind {
+            JointKind::Fixed => {}
+            JointKind::Revolute | JointKind::Continuous | JointKind::Prismatic => {
+                q[pa] += dt * v[va];
+            }
+            JointKind::Free => {
+                for k in 0..3 {
+                    q[pa + k] += dt * v[va + k];
+                }
+                let updated = quat_integrate(
+                    [q[pa + 3], q[pa + 4], q[pa + 5], q[pa + 6]],
+                    [v[va + 3], v[va + 4], v[va + 5]],
+                    dt,
+                );
+                q[pa + 3..pa + 7].copy_from_slice(&updated);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Configuration and velocity in internal order, steppable against a
+/// [`CompositeModel`].
+///
+/// `q` is [`CompositeModel::nq`] wide and `qd` is [`CompositeModel::nv`] wide;
+/// the two differ whenever the model holds a `Free` joint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompositeState {
+    /// Position coordinates, internal order.
+    pub q: Vec<f64>,
+    /// Velocity coordinates, internal order.
+    pub qd: Vec<f64>,
+}
+
+impl CompositeState {
+    /// A state at rest at `q`.
+    #[must_use]
+    pub fn at_rest(q: Vec<f64>, nv: usize) -> Self {
+        Self {
+            qd: vec![0.0; nv],
+            q,
+        }
+    }
+
+    /// The identity configuration of a model whose first joint is `Free`:
+    /// origin, identity quaternion, then zeros.
+    #[must_use]
+    pub fn identity(model: &CompositeModel) -> Self {
+        let mut q = vec![0.0; model.nq];
+        for body in &model.bodies {
+            if body.kind == JointKind::Free {
+                q[body.qpos_adr + 3] = 1.0;
+            }
+        }
+        Self::at_rest(q, model.nv())
+    }
+
+    /// One semi-implicit Euler step (§8.3 `mj_advance`): the velocity is
+    /// updated from the acceleration first, then the position is integrated
+    /// with the **new** velocity.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`forward_dynamics`] and [`integrate_pos`] report.
+    pub fn step(
+        &mut self,
+        model: &CompositeModel,
+        tau: &[f64],
+        dt: f64,
+    ) -> Result<(), CompositeError> {
+        let pos = position(model, &self.q)?;
+        let qacc = forward_dynamics(model, &pos, &self.qd, tau)?;
+        for (v, a) in self.qd.iter_mut().zip(&qacc) {
+            *v += dt * a;
+        }
+        let qd = self.qd.clone();
+        integrate_pos(model, &mut self.q, &qd, dt)
+    }
+
+    /// Total kinetic energy, `0.5 qd' M qd`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`position`] reports.
+    pub fn kinetic_energy(&self, model: &CompositeModel) -> Result<f64, CompositeError> {
+        let pos = position(model, &self.q)?;
+        let m = crb(model, &pos);
+        let mv = mul_m(&model.tree, &m, &self.qd);
+        Ok(0.5 * self.qd.iter().zip(&mv).map(|(a, b)| a * b).sum::<f64>())
+    }
 }
 
 #[cfg(test)]
@@ -1760,5 +1997,400 @@ mod tests {
         let (v, n) = normalize3([0.0, 3.0, 4.0]);
         assert!((n - 5.0).abs() < 1e-15);
         assert_close(&v, &[0.0, 0.6, 0.8], 1e-15, "normalize3");
+    }
+
+    /// A single free body: a `world` base link and one `Free` joint.
+    fn free_body(mass: f64, inertia: InertiaTensorLit) -> RobotProfile {
+        use robot_model::joint::{JointLimits, JointSpec};
+        use robot_model::link::{InertiaTensor, LinkSpec, MassProperties};
+        use robot_model::pose::RigidPose;
+        use robot_model::profile::{FirmwareContract, PROFILE_SCHEMA_VERSION};
+        use robot_types::frames::GravityConvention;
+        use robot_types::ids::{JointId, LinkId, Name};
+        use robot_types::schema::ExtensionTable;
+        use robot_types::time::Duration;
+        use robot_types::units::{Kilograms, NewtonMetres, RadiansPerSecond};
+
+        RobotProfile {
+            schema_version: PROFILE_SCHEMA_VERSION,
+            name: Name::new("free-body").unwrap(),
+            profile_version: "test".to_owned(),
+            joints: vec![JointSpec {
+                id: JointId::new(0),
+                name: Name::new("floating").unwrap(),
+                kind: JointKind::Free,
+                parent: LinkId::new(0),
+                child: LinkId::new(1),
+                origin: RigidPose::IDENTITY,
+                axis: Vec3::unit_z(),
+                limits: JointLimits::unbounded(RadiansPerSecond(1e6), NewtonMetres(1e6)),
+                sign: 1.0,
+                zero_offset: 0.0,
+            }],
+            links: vec![
+                LinkSpec {
+                    id: LinkId::new(0),
+                    name: Name::new("world").unwrap(),
+                    mass: MassProperties::MASSLESS,
+                    collision: Vec::new(),
+                },
+                LinkSpec {
+                    id: LinkId::new(1),
+                    name: Name::new("body").unwrap(),
+                    mass: MassProperties {
+                        mass: Kilograms(mass),
+                        center_of_mass: Vec3::ZERO,
+                        inertia: InertiaTensor {
+                            ixx: inertia.0,
+                            iyy: inertia.1,
+                            izz: inertia.2,
+                            ixy: 0.0,
+                            ixz: 0.0,
+                            iyz: 0.0,
+                        },
+                    },
+                    collision: Vec::new(),
+                },
+            ],
+            actuators: Vec::new(),
+            sensors: Vec::new(),
+            root_link: LinkId::new(0),
+            gravity: GravityConvention::minus_z_standard(robot_types::frames::FrameId::WORLD),
+            firmware: FirmwareContract {
+                version: "test".to_owned(),
+                command_expiration: Duration::ZERO,
+                watchdog_timeout: Duration::ZERO,
+                has_independent_estop: false,
+                allowed_modes: Vec::new(),
+            },
+            extensions: ExtensionTable::new(),
+        }
+    }
+
+    type InertiaTensorLit = (f64, f64, f64);
+
+    #[test]
+    fn a_free_joint_lays_its_degrees_of_freedom_out_as_the_example_does() {
+        // §2.3: three unit world translations first, then three rotational
+        // degrees of freedom on the body axes. Appendix D M-01 recorded the
+        // previous layout as angular-first and body-local in both halves.
+        let profile = free_body(2.0, (0.1, 0.2, 0.3));
+        let model = CompositeModel::from_profile(&profile);
+        assert_eq!(model.nv(), 6);
+        assert_eq!(model.nq, 7);
+
+        // At a non-identity orientation the translational subspace must still
+        // be the world axes, and the rotational one the body axes.
+        let angle = 0.7_f64;
+        let (s, c) = (angle.sin(), angle.cos());
+        // A rotation of `angle` about world +z.
+        let q = vec![
+            0.0,
+            0.0,
+            0.0,
+            (angle / 2.0).cos(),
+            0.0,
+            0.0,
+            (angle / 2.0).sin(),
+        ];
+        let pos = position(&model, &q).unwrap();
+        assert_close(
+            &pos.cdof[0],
+            &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            1e-14,
+            "translation dof 0 is world +x",
+        );
+        assert_close(
+            &pos.cdof[1],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            1e-14,
+            "translation dof 1 is world +y",
+        );
+        assert_close(
+            &pos.cdof[2],
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            1e-14,
+            "translation dof 2 is world +z",
+        );
+        // Rotational dof 0 is the body's own x axis carried into world, which
+        // for a rotation about +z is (cos, sin, 0).
+        assert_close(
+            &pos.cdof[3][..3],
+            &[c, s, 0.0],
+            1e-14,
+            "rotation dof 0 is the body x axis in world",
+        );
+    }
+
+    /// Runs a force-free, torque-free free body and returns the relative
+    /// world-linear-velocity drift and the relative kinetic-energy drift.
+    fn free_body_drift(inertia: InertiaTensorLit, dt: f64, seconds: f64) -> (f64, f64) {
+        let profile = free_body(2.0, inertia);
+        let mut model = CompositeModel::from_profile(&profile);
+        // No gravity: isolate the convention from any applied force.
+        model.gravity = [0.0, 0.0, 0.0];
+
+        let mut state = CompositeState::identity(&model);
+        // World linear velocity first, then body angular velocity.
+        state.qd = vec![1.0, 0.0, 0.0, 3.0, 5.0, 7.0];
+        let v0 = [state.qd[0], state.qd[1], state.qd[2]];
+        let ke0 = state.kinetic_energy(&model).unwrap();
+        let tau = vec![0.0; 6];
+
+        let steps = (seconds / dt).round() as usize;
+        for _ in 0..steps {
+            state.step(&model, &tau, dt).unwrap();
+        }
+        let v1 = [state.qd[0], state.qd[1], state.qd[2]];
+        let dv =
+            ((v1[0] - v0[0]).powi(2) + (v1[1] - v0[1]).powi(2) + (v1[2] - v0[2]).powi(2)).sqrt();
+        let speed = (v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2]).sqrt();
+        let ke1 = state.kinetic_energy(&model).unwrap();
+        (dv / speed, (ke1 - ke0).abs() / ke0)
+    }
+
+    #[test]
+    fn a_force_free_body_conserves_world_linear_momentum_exactly() {
+        // This is the measurement Appendix D M-01 reports as failing. Under the
+        // previous body-local linear-velocity convention the body-frame linear
+        // acceleration was -omega x u, a bookkeeping term that cancels the
+        // rotation of the frame the velocity is expressed in, and an explicit
+        // step cancels it only to O(dt). The measured drift over one simulated
+        // second at dt = 1e-4 was 3.93e-3 with an isotropic inertia and 4.61e-3
+        // with an anisotropic one, and exactly zero with no spin -- which is
+        // what identified the convention rather than the integrator as the
+        // cause.
+        //
+        // With the example's world-frame linear velocity there is nothing to
+        // cancel. The translational rows of M are a constant m*I decoupled from
+        // the rotational ones and their bias force is zero, so qacc[0..3] is
+        // identically zero and qvel[0..3] is a constant of the motion. The
+        // bound below is machine precision, and it holds whatever the spin.
+        for inertia in [(0.1, 0.1, 0.1), (0.02, 0.10, 0.30), (0.3, 0.05, 0.17)] {
+            let (dv, _) = free_body_drift(inertia, 1e-4, 1.0);
+            assert!(
+                dv < 1e-14,
+                "world linear velocity must be conserved exactly; drifted {dv} for {inertia:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_force_free_body_travels_in_a_straight_line_while_spinning() {
+        let profile = free_body(2.0, (0.02, 0.10, 0.30));
+        let mut model = CompositeModel::from_profile(&profile);
+        model.gravity = [0.0, 0.0, 0.0];
+        let mut state = CompositeState::identity(&model);
+        state.qd = vec![1.0, 0.0, 0.0, 3.0, 5.0, 7.0];
+        let tau = vec![0.0; 6];
+        for _ in 0..10_000 {
+            state.step(&model, &tau, 1e-4).unwrap();
+        }
+        // One second at 1 m/s along world +x, whatever the body did rotationally.
+        assert!(
+            (state.q[0] - 1.0).abs() < 1e-12,
+            "x = {}, expected 1.0",
+            state.q[0]
+        );
+        assert!(state.q[1].abs() < 1e-12 && state.q[2].abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_isotropic_spinning_body_conserves_kinetic_energy_exactly() {
+        // With an isotropic inertia Euler's equations give omega_dot = 0, so
+        // there is no rotational integration error to make, and the exact
+        // exponential-map orientation update introduces none either.
+        let (_, ke) = free_body_drift((0.1, 0.1, 0.1), 1e-4, 1.0);
+        assert!(ke < 1e-14, "kinetic energy drifted {ke}");
+    }
+
+    #[test]
+    fn anisotropic_rotational_energy_drift_is_first_order_in_the_timestep() {
+        // A non-isotropic free body tumbles under Euler's equations, which are
+        // nonlinear in omega, and the semi-implicit velocity update is
+        // first-order. The resulting energy drift is a property of the
+        // integrator, not of the coordinate convention: Appendix D M-01's
+        // controls showed it vanishing at zero spin and shrinking towards the
+        // isotropic case, and the convention fix above leaves it where it was
+        // (1.94e-2 measured before, 1.84e-2 after, at dt = 1e-4 over 1 s).
+        //
+        // Rather than assert a magnitude, assert the order: halving the
+        // timestep must roughly halve the drift. That is what distinguishes
+        // integration error from a modelling error, and this drift is the
+        // quantity step 03 item 4 wants an implicit or RK4 integrator for
+        // (Appendix D M-19 records that RK4 cannot currently take a `Free`
+        // joint at all).
+        let inertia = (0.02, 0.10, 0.30);
+        let (_, coarse) = free_body_drift(inertia, 2e-4, 0.5);
+        let (_, fine) = free_body_drift(inertia, 1e-4, 0.5);
+        let (_, finer) = free_body_drift(inertia, 5e-5, 0.5);
+        assert!(
+            coarse > fine && fine > finer,
+            "drift must shrink with the timestep: {coarse}, {fine}, {finer}"
+        );
+        // First order means a ratio near 2 for each halving. The band is wide
+        // because the point is the order, not a calibration.
+        let r1 = coarse / fine;
+        let r2 = fine / finer;
+        assert!(
+            (1.5..3.0).contains(&r1) && (1.5..3.0).contains(&r2),
+            "ratios {r1} and {r2} should each be near 2 for a first-order method"
+        );
+    }
+
+    #[test]
+    fn a_free_body_under_gravity_follows_the_discrete_projectile_formula() {
+        let profile = free_body(1.7, (0.05, 0.06, 0.07));
+        let model = CompositeModel::from_profile(&profile);
+        let g = model.gravity[2];
+        let mut state = CompositeState::identity(&model);
+        let tau = vec![0.0; 6];
+        let dt = 1e-3;
+        let steps = 500;
+        for _ in 0..steps {
+            state.step(&model, &tau, dt).unwrap();
+        }
+        // Semi-implicit Euler on a constant acceleration is exact for the
+        // velocity and gives the closed form sum for the position:
+        // v_n = n h g, z_n = h^2 g n(n+1)/2.
+        let n = steps as f64;
+        let expected_v = n * dt * g;
+        let expected_z = dt * dt * g * n * (n + 1.0) / 2.0;
+        assert!(
+            (state.qd[2] - expected_v).abs() < 1e-12,
+            "vz = {}, expected {expected_v}",
+            state.qd[2]
+        );
+        assert!(
+            (state.q[2] - expected_z).abs() < 1e-10,
+            "z = {}, expected {expected_z}",
+            state.q[2]
+        );
+        // Gravity acts on the world z translation only: nothing else moved.
+        assert!(state.q[0].abs() < 1e-15 && state.q[1].abs() < 1e-15);
+        assert!(state.qd[3].abs() < 1e-15 && state.qd[4].abs() < 1e-15);
+    }
+
+    #[test]
+    fn quat_integrate_matches_a_hand_derived_rotation() {
+        // A quarter turn about +z: omega = (0,0,pi/2) for one second.
+        let q = quat_integrate(
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, core::f64::consts::FRAC_PI_2],
+            1.0,
+        );
+        let half = core::f64::consts::FRAC_PI_4;
+        assert_close(
+            &q,
+            &[half.cos(), 0.0, 0.0, half.sin()],
+            1e-15,
+            "quarter turn about +z",
+        );
+        // Zero velocity is the identity and leaves the quaternion alone.
+        let same = quat_integrate([0.5, 0.5, 0.5, 0.5], [0.0, 0.0, 0.0], 0.1);
+        assert_close(&same, &[0.5, 0.5, 0.5, 0.5], 1e-15, "zero velocity");
+        // The update is exact, so N steps of angle/N equal one step of angle.
+        let mut acc = [1.0, 0.0, 0.0, 0.0];
+        for _ in 0..1000 {
+            acc = quat_integrate(acc, [0.0, 0.0, 1.0], 1e-3);
+        }
+        let once = quat_integrate([1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0);
+        assert_close(&acc, &once, 1e-12, "exactness of the exponential map");
+        // and the result stays unit to machine precision over those 1000 steps.
+        let n = (acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2] + acc[3] * acc[3]).sqrt();
+        assert!((n - 1.0).abs() < 1e-14, "norm drifted to {n}");
+    }
+
+    #[test]
+    fn forward_dynamics_inverts_inverse_dynamics_on_a_free_body() {
+        let profile = free_body(2.3, (0.04, 0.09, 0.15));
+        let model = CompositeModel::from_profile(&profile);
+        let q = vec![0.3, -0.2, 1.1, 0.6, 0.5, -0.5, 0.37416573867739417];
+        let qd = vec![0.5, -1.2, 0.7, 2.0, -0.4, 1.3];
+        let pos = position(&model, &q).unwrap();
+        let qdd = vec![1.1, 0.2, -0.9, 0.3, -1.4, 0.8];
+
+        let tau = rne(&model, &pos, &qd, Some(&qdd)).unwrap();
+        let recovered = forward_dynamics(&model, &pos, &qd, &tau).unwrap();
+        assert_close(&recovered, &qdd, 1e-10, "forward o inverse = identity");
+    }
+
+    #[test]
+    fn forward_dynamics_inverts_inverse_dynamics_on_the_floating_g1() {
+        let profile = robot_model::fixtures::unitree_g1_29dof_floating_base().unwrap();
+        let model = CompositeModel::from_profile(&profile);
+        let nv = model.nv();
+        assert_eq!(nv, 35);
+        assert_eq!(model.nq, 36);
+
+        let mut q = vec![0.0; model.nq];
+        for body in &model.bodies {
+            if body.kind == JointKind::Free {
+                q[body.qpos_adr + 3] = 1.0;
+            } else if body.qpos_num == 1 {
+                q[body.qpos_adr] = 0.19 * ((body.qpos_adr % 5) as f64) - 0.25;
+            }
+        }
+        let qd: Vec<f64> = (0..nv).map(|i| 0.3 * ((i % 7) as f64) - 0.6).collect();
+        let qdd: Vec<f64> = (0..nv).map(|i| 0.2 * ((i % 4) as f64) - 0.3).collect();
+
+        let pos = position(&model, &q).unwrap();
+        let tau = rne(&model, &pos, &qd, Some(&qdd)).unwrap();
+        let recovered = forward_dynamics(&model, &pos, &qd, &tau).unwrap();
+        assert_close(
+            &recovered,
+            &qdd,
+            1e-8,
+            "forward o inverse on the floating G1",
+        );
+    }
+
+    #[test]
+    fn the_floating_g1_falls_under_gravity_at_exactly_g() {
+        // With no contact and no torque the whole robot is in free fall, so the
+        // base's world linear acceleration is exactly gravity, whatever the
+        // joint configuration. This is a property of the world-frame
+        // convention: it is the translational rows of M being m_total * I with
+        // zero bias.
+        let profile = robot_model::fixtures::unitree_g1_29dof_floating_base().unwrap();
+        let model = CompositeModel::from_profile(&profile);
+        let free = model
+            .bodies
+            .iter()
+            .find(|b| b.kind == JointKind::Free)
+            .expect("the floating fixture has a Free joint");
+        let (pa, va) = (free.qpos_adr, free.dof_adr);
+
+        let mut q = vec![0.0; model.nq];
+        q[pa + 3] = 1.0;
+        for body in &model.bodies {
+            if body.kind != JointKind::Free && body.qpos_num == 1 {
+                q[body.qpos_adr] = 0.3;
+            }
+        }
+        let qd = vec![0.0; model.nv()];
+        let tau = vec![0.0; model.nv()];
+        let pos = position(&model, &q).unwrap();
+        let qacc = forward_dynamics(&model, &pos, &qd, &tau).unwrap();
+        assert!(
+            (qacc[va]).abs() < 1e-9 && (qacc[va + 1]).abs() < 1e-9,
+            "no horizontal acceleration in free fall: {:?}",
+            &qacc[va..va + 3]
+        );
+        assert!(
+            (qacc[va + 2] - model.gravity[2]).abs() < 1e-9,
+            "vertical acceleration is {} , expected g = {}",
+            qacc[va + 2],
+            model.gravity[2]
+        );
+    }
+
+    #[test]
+    fn integrate_pos_rejects_bad_input() {
+        let profile = free_body(1.0, (0.1, 0.1, 0.1));
+        let model = CompositeModel::from_profile(&profile);
+        let mut q = vec![0.0; 7];
+        assert!(integrate_pos(&model, &mut q, &[0.0; 5], 1e-3).is_err());
+        assert!(integrate_pos(&model, &mut q, &[0.0; 6], f64::NAN).is_err());
     }
 }
