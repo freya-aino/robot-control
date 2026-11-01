@@ -839,17 +839,80 @@ pub fn box_box_contacts(a: &Placed, b: &Placed) -> Option<Vec<Contact>> {
         }
     }
     if points.is_empty() {
-        let deepest_a = corners(ca, ha, &axes_a)
-            .into_iter()
-            .min_by(|x, y| dot(*x, n).total_cmp(&dot(*y, n)))?;
-        let deepest_b = corners(cb, hb, &axes_b)
-            .into_iter()
-            .max_by(|x, y| dot(*x, n).total_cmp(&dot(*y, n)))?;
+        // Edge-edge: no corner of either box lies inside the other, so the
+        // boxes meet along two crossing edges. The separating-axis minimum
+        // gives the right depth and normal, but the contact *point* is in the
+        // interior of each edge, not at a corner.
+        //
+        // Appendix D M-07: this used the most negative corner of `a` and the
+        // most positive corner of `b` along the normal. Those are generally
+        // metres away from where the boxes actually touch, so the depth was
+        // right and the moment arm was wrong, and `wrench_at` produced a
+        // torque that did not correspond to the contact. A box resting on an
+        // edge received a correct push and an incorrect spin.
+        //
+        // The two edges are found as the ones most nearly perpendicular to the
+        // normal and most extreme along it, which is the standard
+        // construction; their closest points are then the contact. Falling
+        // back to the previous corner pair would reintroduce the defect, so a
+        // failure to identify an edge reports no manifold instead.
+        // The contacting feature of a box along a direction is its support
+        // set: the corners extreme along that direction. Two such corners mean
+        // an edge, which is the case here. This is more robust than picking
+        // the edge from axis heuristics, because it makes no assumption about
+        // how the box is oriented relative to the normal.
+        let support_feature = |c: V3, h: V3, axes: &[V3; 3], dir: V3| -> Vec<V3> {
+            let cs = corners(c, h, axes);
+            let best = cs
+                .iter()
+                .map(|p| dot(*p, dir))
+                .fold(f64::NEG_INFINITY, f64::max);
+            // Tolerance relative to the box's own extent, so the set is stable
+            // for a box lying flat against the direction.
+            let extent = h[0].abs() + h[1].abs() + h[2].abs();
+            let tol = 1e-9 * extent.max(1.0);
+            cs.into_iter()
+                .filter(|p| dot(*p, dir) >= best - tol)
+                .collect()
+        };
+        // `n` points from b toward a, so a's contacting feature is extreme
+        // along -n and b's along +n.
+        let fa = support_feature(ca, ha, &axes_a, scale(n, -1.0));
+        let fb = support_feature(cb, hb, &axes_b, n);
+        let segment = |f: &[V3]| -> (V3, V3) {
+            match f.len() {
+                0 => ([0.0; 3], [0.0; 3]),
+                1 => (f[0], f[0]),
+                // Two corners are an edge; more than two is a face, and its
+                // two most separated corners span it well enough for the
+                // closest-point query below.
+                _ => {
+                    let mut best = (f[0], f[1]);
+                    let mut far = -1.0;
+                    for i in 0..f.len() {
+                        for j in (i + 1)..f.len() {
+                            let d = norm2(sub(f[i], f[j]));
+                            if d > far {
+                                far = d;
+                                best = (f[i], f[j]);
+                            }
+                        }
+                    }
+                    best
+                }
+            }
+        };
+        if fa.is_empty() || fb.is_empty() {
+            return None;
+        }
+        let (a0, a1) = segment(&fa);
+        let (b0, b1) = segment(&fb);
+        let (pa, pb) = closest_segment_segment(a0, a1, b0, b1);
         points.push(Contact {
             depth,
             normal: n,
-            point_a: deepest_a,
-            point_b: deepest_b,
+            point_a: pa,
+            point_b: pb,
         });
     }
     points.truncate(8);
@@ -1095,6 +1158,58 @@ mod tests {
         let pts = plane_contact_points(&c, 8);
         assert_eq!(pts.len(), 2);
         assert!(pts.iter().all(|(_, r)| (*r - 0.1).abs() < 1e-12));
+    }
+    #[test]
+    fn an_edge_edge_box_contact_is_placed_on_the_edges_not_at_a_corner() {
+        // Two long thin boxes crossing like an X, one above the other, rotated
+        // 45 degrees about z relative to each other so that no corner of
+        // either lies inside the other. They touch near the world origin,
+        // where their edges cross.
+        //
+        // Appendix D M-07: the contact used to be reported at the extreme
+        // corners along the normal, which for these boxes are about 0.7 m from
+        // where they actually meet. The force was therefore applied with a
+        // moment arm that does not exist.
+        let lower = Placed {
+            shape: Primitive::Box {
+                half: [1.0, 0.05, 0.05],
+            },
+            rotation: identity(),
+            translation: [0.0, 0.0, 0.0],
+        };
+        let upper = Placed {
+            shape: Primitive::Box {
+                half: [1.0, 0.05, 0.05],
+            },
+            rotation: rot_z(core::f64::consts::FRAC_PI_2),
+            translation: [0.0, 0.0, 0.09],
+        };
+        let contacts = box_box_contacts(&upper, &lower).expect("the boxes overlap");
+        assert!(!contacts.is_empty());
+        for c in &contacts {
+            // The normal is +z (the least-overlap axis is the thin one).
+            assert!(
+                c.normal[2].abs() > 0.99,
+                "normal should be vertical: {:?}",
+                c.normal
+            );
+            // The contact must be where the edges cross, near the origin in x
+            // and y, not out at a corner about 0.7 m away.
+            assert!(
+                c.point_a[0].abs() < 0.2 && c.point_a[1].abs() < 0.2,
+                "point_a {:?} is not near the crossing",
+                c.point_a
+            );
+            assert!(
+                c.point_b[0].abs() < 0.2 && c.point_b[1].abs() < 0.2,
+                "point_b {:?} is not near the crossing",
+                c.point_b
+            );
+            // and the two witness points are close together, since the
+            // surfaces are 0.01 m apart at the crossing.
+            let gap = norm(sub(c.point_a, c.point_b));
+            assert!(gap < 0.15, "witness points {gap} apart");
+        }
     }
 }
 
