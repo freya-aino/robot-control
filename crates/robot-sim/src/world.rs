@@ -635,17 +635,29 @@ impl World {
         }
 
         self.warm = solution.force.clone();
-        let contacts = rows
-            .iter()
-            .filter(|r| r.kind == RowKind::ContactNormal)
-            .count();
+        // One contact is one frictionless row, or one group of pyramid edges
+        // identified by its first edge. The normal force of a pyramidal contact
+        // is the sum of its edge coefficients, which is what
+        // `solver::decode_pyramid` reads off: every edge direction carries a
+        // full unit of normal, so the normal component is the plain sum.
+        let mut contacts = 0usize;
+        let mut normal_force = 0.0;
+        for (i, row) in rows.iter().enumerate() {
+            match row.kind {
+                RowKind::ContactNormal => {
+                    contacts += 1;
+                    normal_force += solution.force[i];
+                }
+                RowKind::ContactPyramid { first_edge, .. } => {
+                    if first_edge == i {
+                        contacts += 1;
+                    }
+                    normal_force += solution.force[i];
+                }
+                RowKind::Equality | RowKind::Limit => {}
+            }
+        }
         let limits = rows.iter().filter(|r| r.kind == RowKind::Limit).count();
-        let normal_force = rows
-            .iter()
-            .zip(&solution.force)
-            .filter(|(r, _)| r.kind == RowKind::ContactNormal)
-            .map(|(_, f)| *f)
-            .sum();
         Ok(StepReport {
             rows: rows.len(),
             contacts,

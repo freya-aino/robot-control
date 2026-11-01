@@ -76,21 +76,30 @@ pub const MAXIMP: f64 = 0.9999;
 
 /// What a constraint row is, which determines the set its force is confined to
 /// (`Omega` of section 2.3).
+///
+/// Every kind here is either unbounded or non-negative. That is not a
+/// simplification: it is what the example's **pyramidal** representation buys.
+/// A friction cone is expressed by making each row a *generator direction* of
+/// the cone, `n +/- mu t_k`, and requiring its coefficient to be non-negative
+/// (07 section 9.2), so the cone constraint is carried entirely by the row
+/// Jacobians and the solver needs no cone projection at all.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum RowKind {
     /// Equality: the force is unbounded in both directions.
     Equality,
-    /// A joint limit: the force may only push inward, so it is non-negative.
+    /// A joint limit: it may only push inward, so it is non-negative.
     Limit,
-    /// A contact normal: non-negative, and it bounds the friction rows that
-    /// name it.
+    /// A frictionless contact (`condim = 1`): one row along the normal,
+    /// non-negative.
     ContactNormal,
-    /// A contact friction direction, bounded by the pyramidal cone
-    /// `|f| <= mu * f_normal`.
-    ContactFriction {
-        /// Index of the normal row this direction belongs to.
-        normal_row: usize,
-        /// Friction coefficient for this direction.
+    /// One edge of a pyramidal friction cone, with Jacobian `n +/- mu t_k` and
+    /// a non-negative coefficient. `condim = 3` produces four of them per
+    /// contact, in the example's order `(+t1, -t1, +t2, -t2)`.
+    ContactPyramid {
+        /// Index of the first edge row of this contact, so a caller can group
+        /// the edges of one contact and decode them.
+        first_edge: usize,
+        /// Friction coefficient of this edge's tangent direction.
         mu: f64,
     },
 }
@@ -460,7 +469,29 @@ pub fn solve(
         // Section 2.4: R_ii = (1 - d)/d * A_ii, with the exact diagonal.
         // Appendix D M-09 records the constant that stood here before.
         let diag = a[i * m + i];
-        r[i] = (((1.0 - d) / d.max(MINVAL)) * diag).max(MINVAL);
+        let mut r_i = (((1.0 - d) / d.max(MINVAL)) * diag).max(MINVAL);
+        // Section 2.4, pyramidal rows: "all edges share `Rpy = 2 mu^2 R0`
+        // where `R0` is computed from the first edge's diagA".
+        //
+        // This is not a cosmetic detail. The four edges of one contact all
+        // contain the normal direction, so four non-negative coefficients
+        // encode three force components and the dual is convex but not
+        // strictly so: the Gauss-Seidel iterates can drift along the redundant
+        // direction without the per-sweep residual shrinking. Sharing one R
+        // across the edges and scaling it by `2 mu^2` regularises exactly that
+        // direction, which is why the example does it and why leaving it out
+        // left warm and cold starts disagreeing on the acceleration by 4e-4
+        // instead of 1e-9.
+        if let RowKind::ContactPyramid { first_edge, mu } = row.kind {
+            let d0 = impedance(
+                rows[first_edge].solimp,
+                rows[first_edge].pos,
+                rows[first_edge].margin,
+            );
+            let r0 = ((1.0 - d0) / d0.max(MINVAL)) * a[first_edge * m + first_edge];
+            r_i = (2.0 * mu * mu * r0).max(MINVAL);
+        }
+        r[i] = r_i;
         let (k, b) = stiffness_damping(solref, row.solimp);
         let vel = dot(&row.jacobian, qd);
         // a_ref = -B vel - K d (pos - margin).
@@ -500,14 +531,12 @@ pub fn solve(
             let unprojected = -acc / diag;
             let next = match rows[i].kind {
                 RowKind::Equality => unprojected,
-                RowKind::Limit | RowKind::ContactNormal => unprojected.max(0.0),
-                RowKind::ContactFriction { normal_row, mu } => {
-                    // The pyramidal cone: this direction is bounded by the
-                    // current normal force. Using the current value rather than
-                    // a fixed one is what couples friction to the normal solve,
-                    // which Appendix D M-10 records as absent.
-                    let bound = (mu * f[normal_row]).max(0.0);
-                    unprojected.clamp(-bound, bound)
+                // A limit pushes one way; a frictionless contact pushes along
+                // its normal; a pyramid edge carries a non-negative coefficient
+                // of a generator direction. The friction cone is in the
+                // Jacobians, not here.
+                RowKind::Limit | RowKind::ContactNormal | RowKind::ContactPyramid { .. } => {
+                    unprojected.max(0.0)
                 }
             };
             change = change.max((next - f[i]).abs());
@@ -555,12 +584,31 @@ pub fn default_solimp() -> [f64; 5] {
 /// Builds the rows of one contact point at `condim`, given the contact frame
 /// and the two bodies.
 ///
-/// `depth` is the penetration, positive when the surfaces overlap, so the
-/// residual is `-depth`. `point` is the contact position in world coordinates.
-/// Pass `body_b = None` for a contact against a static environment.
+/// `depth` is the penetration, positive when the surfaces overlap, so every row
+/// carries `pos = -depth` as the example does ("all rows carry `pos = dist`",
+/// 07 section 9.2). `point` is the contact position in world coordinates. Pass
+/// `body_b = None` for a contact against a static environment.
 ///
-/// At `condim = 1` only the normal row is produced; at `condim = 3` two
-/// friction rows follow it, bounded by the pyramid.
+/// At `condim = 1` one row along the normal. At `condim = 3` the four
+/// **pyramid edges** of 07 section 9.2, with Jacobians `n + mu t_1`,
+/// `n - mu t_1`, `n + mu t_2`, `n - mu t_2` and non-negative coefficients, in
+/// that order.
+///
+/// # Why edges rather than a normal and two tangents
+///
+/// An earlier version of this function emitted one normal row plus two
+/// tangential rows, and bounded each tangential force by `mu` times the normal
+/// force inside the solver. That is a cone, but it is the wrong one: bounding
+/// each tangential component independently gives the pyramid whose
+/// cross-section is a **square** of half-width `mu f_n`, which circumscribes
+/// the true circular cone and allows up to `sqrt(2) mu f_n` of friction along a
+/// diagonal -- about 41 per cent too much.
+///
+/// The example's generator form gives the **inscribed diamond** instead: with
+/// `lambda >= 0`, the realised force is `sum_k lambda_k (n +/- mu t_k)`, whose
+/// tangential part satisfies `|f_t1| + |f_t2| <= mu f_n`. That is conservative
+/// rather than permissive, which is the right side to err on for a contact
+/// model, and it is what `mju_decodePyramid` inverts.
 ///
 /// # Errors
 ///
@@ -592,7 +640,7 @@ pub fn contact_rows(
         });
     }
     let nv = model.tree.nv;
-    // The relative point Jacobian: body a minus body b.
+    // The relative point Jacobian and its derivative: body a minus body b.
     let (ja, _) = point_jacobian(model, pos, point, body_a);
     let jda = point_jacobian_dot(model, pos, cvel, cdof_dot, point, body_a);
     let (jb, jdb) = match body_b {
@@ -605,50 +653,81 @@ pub fn contact_rows(
     let rel: Vec<f64> = ja.iter().zip(&jb).map(|(x, y)| x - y).collect();
     let rel_dot: Vec<f64> = jda.iter().zip(&jdb).map(|(x, y)| x - y).collect();
 
-    // Project the relative Jacobian onto a contact-frame direction.
+    // Projects the relative Jacobian onto a direction in the contact frame.
     let project = |dir: [f64; 3], src: &[f64]| -> Vec<f64> {
         (0..nv)
             .map(|i| (0..3).map(|r| dir[r] * src[r * nv + i]).sum::<f64>())
             .collect()
     };
-    // `normal` points from b toward a, and a positive normal force must push
-    // them apart, so the row measures the approach along it.
-    let normal_row = out.len();
-    let jn = project(normal, &rel);
-    let jn_dot = project(normal, &rel_dot);
-    let jdot_v_n = dot(&jn_dot, qd);
-    out.push(Row {
-        jacobian: jn,
-        pos: -depth,
-        jdot_v: jdot_v_n,
-        solref,
-        solimp,
-        margin,
-        kind: RowKind::ContactNormal,
-    });
-    if condim == 3 {
-        let (t1, t2) = contact_tangents(normal);
-        for t in [t1, t2] {
-            let jt = project(t, &rel);
-            let jt_dot = project(t, &rel_dot);
+
+    if condim == 1 {
+        let j = project(normal, &rel);
+        let jd = project(normal, &rel_dot);
+        out.push(Row {
+            jdot_v: dot(&jd, qd),
+            jacobian: j,
+            pos: -depth,
+            solref,
+            solimp,
+            margin,
+            kind: RowKind::ContactNormal,
+        });
+        return Ok(());
+    }
+
+    let (t1, t2) = contact_tangents(normal);
+    let first_edge = out.len();
+    for t in [t1, t2] {
+        for sign in [1.0f64, -1.0] {
+            // The edge direction itself: n +/- mu t.
+            let dir = [
+                normal[0] + sign * friction * t[0],
+                normal[1] + sign * friction * t[1],
+                normal[2] + sign * friction * t[2],
+            ];
+            let j = project(dir, &rel);
+            let jd = project(dir, &rel_dot);
             out.push(Row {
-                jacobian: jt,
-                // Friction rows have no residual and no stiffness
-                // (section 2.4: "friction loss and elliptic friction rows have
-                // r = 0, K = 0").
-                pos: 0.0,
-                jdot_v: dot(&jt_dot, qd),
+                jdot_v: dot(&jd, qd),
+                jacobian: j,
+                pos: -depth,
                 solref,
                 solimp,
-                margin: 0.0,
-                kind: RowKind::ContactFriction {
-                    normal_row,
+                margin,
+                kind: RowKind::ContactPyramid {
+                    first_edge,
                     mu: friction,
                 },
             });
         }
     }
     Ok(())
+}
+
+/// `mju_decodePyramid`: the contact-frame force `(normal, t1, t2)` of a
+/// pyramidal contact, from the four non-negative edge coefficients in the order
+/// [`contact_rows`] emits them.
+///
+/// `f_n = sum_k lambda_k`, and `f_tk = mu (lambda_{2k} - lambda_{2k+1})`. The
+/// result always satisfies `|f_t1| + |f_t2| <= mu f_n`, which is the pyramid
+/// this representation realises.
+#[must_use]
+pub fn decode_pyramid(edges: &[f64], mu: f64) -> [f64; 3] {
+    let mut normal = 0.0;
+    let mut t1 = 0.0;
+    let mut t2 = 0.0;
+    for (k, pair) in edges.chunks(2).enumerate() {
+        let plus = pair.first().copied().unwrap_or(0.0);
+        let minus = pair.get(1).copied().unwrap_or(0.0);
+        normal += plus + minus;
+        let tangential = mu * (plus - minus);
+        if k == 0 {
+            t1 = tangential;
+        } else if k == 1 {
+            t2 = tangential;
+        }
+    }
+    [normal, t1, t2]
 }
 
 #[cfg(test)]
@@ -950,15 +1029,18 @@ mod tests {
                         warm.as_deref(),
                     )
                     .unwrap();
-                    let fn_ = solution.force[0];
-                    assert!(fn_ >= -1e-12, "the normal force must not pull: {fn_}");
-                    for ft in &solution.force[1..] {
-                        assert!(
-                            ft.abs() <= mu * fn_.max(0.0) + 1e-9,
-                            "friction {ft} exceeds the cone bound {}",
-                            mu * fn_.max(0.0)
-                        );
+                    // Every edge coefficient is non-negative, and the force
+                    // they encode lies in the pyramid: `|ft1| + |ft2| <= mu fn`.
+                    for (edge, f) in solution.force.iter().enumerate() {
+                        assert!(*f >= -1e-12, "pyramid edge {edge} pulled: {f}");
                     }
+                    let [fn_, ft1, ft2] = decode_pyramid(&solution.force, mu);
+                    assert!(fn_ >= -1e-12, "the normal force must not pull: {fn_}");
+                    assert!(
+                        ft1.abs() + ft2.abs() <= mu * fn_.max(0.0) + 1e-9,
+                        "friction ({ft1}, {ft2}) leaves the pyramid of bound {}",
+                        mu * fn_.max(0.0)
+                    );
                     warm = Some(solution.force.clone());
                     for (v, a) in state.qd.iter_mut().zip(&solution.qacc) {
                         *v += dt * a;
@@ -1097,7 +1179,28 @@ mod tests {
     fn warm_starting_reaches_the_same_answer_in_fewer_sweeps() {
         // Step 06 item 7. The forces are the solution of a convex problem, so
         // the starting point cannot change where it converges, only how long it
-        // takes.
+        // takes -- but only *at convergence*, which is why this test sets its
+        // own sweep budget instead of taking the default.
+        //
+        // Four pyramidal contacts on a six-degree-of-freedom body give sixteen
+        // rows for a rank-six problem. Projected Gauss-Seidel needs **1011
+        // sweeps** to bring the per-sweep force change below 1e-10 there,
+        // against the default budget of 100. At 100 sweeps the residual is
+        // still 1.1e-2 and the two starting points land on visibly different
+        // forces, so an earlier version of this test was comparing two
+        // unconverged iterates and reading the difference as disagreement.
+        //
+        // The default budget is not wrong for stepping: at 100 sweeps the
+        // acceleration is already within 2e-4 relative of the converged value,
+        // and acceleration is what the integrator consumes. It is the *forces*
+        // that are far from settled. That gap is the quantitative case for the
+        // Newton solver of `specs/08`, which Appendix D M-22 records as
+        // outstanding, and it is measured here rather than asserted.
+        const CONVERGED: SolverConfig = SolverConfig {
+            iterations: 10_000,
+            tolerance: 1e-10,
+            warm_start: true,
+        };
         let profile = free_body(2.0);
         let model = CompositeModel::from_profile(&profile);
         let mut state = CompositeState::identity(&model);
@@ -1136,7 +1239,7 @@ mod tests {
             &qacc_smooth,
             &rows,
             1e-3,
-            SolverConfig::default(),
+            CONVERGED,
             None,
         )
         .unwrap();
@@ -1147,7 +1250,7 @@ mod tests {
             &qacc_smooth,
             &rows,
             1e-3,
-            SolverConfig::default(),
+            CONVERGED,
             Some(&cold.force),
         )
         .unwrap();
@@ -1157,15 +1260,22 @@ mod tests {
             warm.iterations,
             cold.iterations
         );
-        // They must agree to within what the solver claims, not to machine
-        // precision. The stopping rule bounds the force *change* per sweep, so
-        // two runs from different starting points land at two nearby points of
-        // the same convex problem; measured here at 2.6e-5 relative.
-        for (a, b) in warm.force.iter().zip(&cold.force) {
+        // They must agree on the **acceleration**, not on the individual row
+        // forces, and the difference is not slack in the test.
+        //
+        // A pyramidal contact is a redundant parameterisation: four
+        // non-negative edge coefficients encode three force components, and
+        // every edge direction contains the normal, so infinitely many
+        // coefficient vectors give the same physical force. The dual problem is
+        // therefore convex but not strictly so in `f`, and two runs from
+        // different starting points legitimately land on different coefficients
+        // -- measured at up to 6.9e-2 relative here. What the problem does
+        // determine uniquely is the acceleration, so that is what is compared.
+        for (a, b) in warm.qacc.iter().zip(&cold.qacc) {
             let scale = a.abs().max(b.abs()).max(1.0);
             assert!(
-                (a - b).abs() / scale < 1e-3,
-                "warm and cold must agree to the solver's tolerance: {a} against {b}"
+                (a - b).abs() / scale < 1e-6,
+                "warm and cold must agree on the acceleration: {a} against {b}"
             );
         }
     }

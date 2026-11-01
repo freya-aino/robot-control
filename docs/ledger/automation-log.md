@@ -643,3 +643,30 @@ live once written.
 - **Verification:** `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo test --workspace` 1046 passed / 0 failed. No test was weakened, ignored or deleted. Four fidelity tests had pinned constants updated for the schema bump, and one collision test's expectation changed because the behaviour it pinned is the behaviour M-04 asked to replace; both are noted in their commits. Two solver tests were corrected after the fix showed their premises wrong, with the corrected reasoning in the test.
 - **One documented allow:** `clippy::excessive_precision` on the transferred Bortz coefficient table, so the digits can still be diffed against the source of truth.
 - **Not done:** M-17 (the composite and solver path is not yet what `MultibodyState::step` runs; the `Free`-joint layout has to move across the workspace in one change) and M-22 (the GPU backend's `f32` and six-degree-of-freedom limits, which now additionally need the Newton solver because a sequential per-row update does not vectorise).
+
+## 2026-11-01 — third correction pass: the switch-over, and a cone of the wrong shape
+
+`World` and `WorldEnv` wire the corrected dynamics, collision and constraint
+pieces into something that runs, addressing the substance of Appendix D M-17.
+Measured: the ground is enforced on every collision shape through a 3000-step
+zero-torque G1 collapse (contacts carry full weight, worst penetration
+0.045 m), and a joint limit holds its bound exactly when given a margin to act
+in (0.177 rad overshoot at zero margin, zero at 0.2 rad). Both numbers
+corrected a test premise before they were asserted; `SimOptions` gained
+`limit_margin` as a result.
+
+Also a correction to the second pass. M-10 had been recorded as fixed with
+friction rows bounded by `|f_t| <= mu f_n` per component. That is the
+circumscribed *square* pyramid, which allows up to sqrt(2)·mu·f_n diagonally —
+41 per cent too much. 07 section 9.2 builds the rows as the cone's **generator
+directions**, `J = n ± mu·t_k`, with non-negative coefficients, giving the
+inscribed diamond. Reimplemented; `RowKind::ContactFriction` is gone because
+every row kind is now non-negative and the cone lives in the Jacobians.
+
+That exposed a further measured fact: the edge representation is redundant, and
+projected Gauss-Seidel needs 1011 sweeps to converge on sixteen pyramidal rows
+over a rank-six problem, against a default budget of 100. Accelerations are
+within 2e-4 at 100 sweeps; the forces are not. This is the quantitative case
+for the Newton solver of specs/08, recorded in Appendix D section 1.7.3.
+
+Gate: 1055 tests, fmt and clippy clean.

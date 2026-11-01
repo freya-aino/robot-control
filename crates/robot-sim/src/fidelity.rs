@@ -1524,11 +1524,23 @@ fn friction_cone_bound(dt: Duration) -> Result<Measurement, BatteryError> {
         )
         .map_err(BatteryError::Composite)?;
         if !solution.force.is_empty() {
-            let normal = solution.force[0].max(0.0);
-            for ft in &solution.force[1..] {
-                let excess = ft.abs() - mu * normal;
-                if excess > worst {
-                    worst = excess;
+            // The rows are the four edges of a pyramidal cone, each with a
+            // non-negative coefficient (07 section 9.2), so the quantity to
+            // bound is the decoded tangential force against the decoded normal:
+            // `|f_t1| + |f_t2| <= mu f_n`. Bounding each edge coefficient
+            // separately would test nothing, since the cone lives in the row
+            // Jacobians.
+            let [normal, t1, t2] = crate::solver::decode_pyramid(&solution.force, mu);
+            let excess = t1.abs() + t2.abs() - mu * normal.max(0.0);
+            if excess > worst {
+                worst = excess;
+                worst_at = step as usize;
+            }
+            // A pulling edge is its own failure, and is reported through the
+            // same measurement so one oracle covers both halves of the cone.
+            for f in &solution.force {
+                if -f > worst {
+                    worst = -f;
                     worst_at = step as usize;
                 }
             }

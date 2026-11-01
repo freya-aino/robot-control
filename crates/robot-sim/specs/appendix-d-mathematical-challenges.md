@@ -254,7 +254,7 @@ that remain are named with what they need.
 | [M-07](#m-07) | **fixed** | Support-feature edge pair plus closest points |
 | [M-08](#m-08) | **fixed** | Limits are rows with the same `solref`/`solimp` impedance as any other |
 | [M-09](#m-09) | **fixed** | `R_ii = (1 - d)/d * A_ii` with the exact diagonal |
-| [M-10](#m-10) | **fixed** | Friction rows in the same problem, bounded by the pyramidal cone against the normal row's current force; contact frame from `mju_makeFrame`, so no hard-coded tangent plane |
+| [M-10](#m-10) | **fixed** | Friction in the same problem as the normal force, as the example's **pyramid edges**: `2(condim-1)` rows with Jacobians `n ± μ·t_k` and non-negative coefficients (07 §9.2). Contact frame from `mju_makeFrame`, so no hard-coded tangent plane. See §1.7 — the first fix used the wrong cone |
 | [M-11](#m-11) | **fixed** | `a_u = J qacc_smooth + Jdot v`. The point Jacobian is checked against a central finite difference |
 | [M-12](#m-12) | **fixed** | Limit and contact rows share one `A` |
 | [M-13](#m-13) | **fixed** | One predicate for one `solref` format |
@@ -310,6 +310,104 @@ makes step 06 item 5's "at least two solver algorithms" a prerequisite for
 M-22 rather than an independent nicety.
 
 ---
+
+### 1.7 Third pass, 2026-11-01: the switch-over, and a cone that was the wrong shape
+
+Two things happened in this pass. The corrected pieces were wired into
+something that runs, and one of the fixes claimed in §1.6 turned out to be
+wrong in a way that only showed up once I checked it against the example
+instead of against my own reasoning.
+
+#### 1.7.1 `World` and `WorldEnv` — what M-17 asked for
+
+[M-17](#m-17) recorded that `composite`, `solver`, `collision` and `options`
+were each validated and that nothing ran them. `crates/robot-sim/src/world.rs`
+is the path that does: it owns the composite model, the collision shapes behind
+the pair filter and broad phase, the ground plane and the per-run
+configuration, and steps them as one — position and velocity stages, contact
+detection, contact rows at the configured `condim`, joint-limit rows per 07 §8,
+one solve, then integration by the configured integrator. Under Runge-Kutta the
+constraint problem is solved at **every stage**, as `mj_forwardSkip` is per
+stage in 01 §9.4; solving once and reusing the force would quietly reduce the
+method to first order. `WorldEnv` puts it behind the `Environment` and
+`Backend` interface that `specs/10` requires external crates to use, reporting
+`cpu-world`.
+
+Two measurements, both of which corrected a test premise of mine first:
+
+- **The ground is enforced.** Over 3000 steps of the zero-torque G1 the
+  contacts carry up to the robot's full weight and no collision shape goes
+  more than 0.045 m below the plane. The pelvis *does* pass through, and that is
+  not a contact failure — the vendored G1's pelvis and torso carry no collision
+  geometry at all. A test asserting "the robot stands" was also wrong on
+  physics: a zero-torque humanoid cannot stand, because nothing holds its
+  joints. The assertion is now on the shapes that exist.
+- **Limits hold exactly when given room to act.** A G1 joint driven at 50 N·m
+  into its bound overshoots by 0.177 rad with no margin and by **exactly zero**
+  with a 0.2 rad margin. With no margin a row appears only once `dist < 0`, so
+  the constraint brakes the joint after it has already crossed. Raising the
+  impedance barely moves that transient while it does pull the steady state
+  onto the bound, which is what pointed at the margin. `SimOptions` gained
+  `limit_margin`, separate from the collision `margin` as the example keeps
+  `jnt_margin` separate from `geom_margin`.
+
+What remains of M-17: `robot sim multibody` and the USD replay writer still run
+`MultibodyState`. Moving them needs the replay writer's `Free`-joint layout and
+the stance controller moved at the same time, and it changes the G1 numbers the
+command prints, so it wants its own change with a before-and-after.
+
+#### 1.7.2 The friction cone was the wrong shape — a correction to §1.6
+
+§1.6 recorded [M-10](#m-10) as fixed by "friction rows bounded by the pyramidal
+cone against the normal row's current force". That is a cone, and it couples
+friction to the normal solve, but it is **not the example's cone**.
+
+I had implemented one normal row plus two tangential rows, bounding each
+tangential force by `μ·f_n` inside the solver. Bounding each component
+independently gives the pyramid whose cross-section is a **square** of
+half-width `μ·f_n`. That square *circumscribes* the true circular cone, so it
+allows up to `√2·μ·f_n` of friction along a diagonal — about 41 % too much.
+
+07 §9.2 is explicit about what the example does, and it is structurally
+different: the rows **are the generator directions**. For `k = 1..dim-1`,
+`row± = jac[0] ± friction[k-1]·jac[k]`, i.e. `J = n ± μ·t_k`, giving
+`2(condim-1)` rows each with a non-negative coefficient and all carrying
+`pos = dist`. With `λ ≥ 0` the realised force is `Σ λ_k (n ± μ t_k)`, whose
+tangential part satisfies `|f_t1| + |f_t2| ≤ μ f_n` — the **inscribed diamond**.
+Conservative rather than permissive, which is the right side to err on, and it
+is what `mju_decodePyramid` inverts.
+
+`solver::contact_rows` now emits the edges, `solver::decode_pyramid` reads the
+contact-frame force back out, and `RowKind::ContactFriction` is gone: every row
+kind is now unbounded or non-negative, because the cone lives entirely in the
+row Jacobians. The solver needs no cone projection at all. This is the one place
+in the audit where consulting material outside the example changed what I
+looked at — a search on MuJoCo's pyramidal representation said the cone is
+parameterised by non-negative coefficients over generator directions rather
+than by a box, which sent me to 07 §9.2 to read the construction properly.
+
+#### 1.7.3 What the pyramid then exposed: projected Gauss-Seidel is too slow
+
+The edge representation is redundant: four non-negative coefficients encode
+three force components, and every edge contains the normal. Four pyramidal
+contacts on a six-degree-of-freedom body give **sixteen rows for a rank-six
+problem**, and projected Gauss-Seidel needs **1011 sweeps** to bring the
+per-sweep force change below 1e-10 there — against the default budget of 100,
+at which the residual is still 1.1e-2. The example's `Rpy = 2μ²R₀` shared
+across a contact's edges (07 §2.4) is now implemented and does not close that
+gap on its own.
+
+The default budget is not wrong for *stepping*: at 100 sweeps the acceleration
+is already within 2e-4 relative of the converged value, and acceleration is what
+the integrator consumes. It is the forces that are far from settled. A warm-start
+test had been comparing two unconverged iterates and reading the difference as
+disagreement; it now sets its own budget and tests what it claims.
+
+This is the quantitative case for the Newton solver of
+[specs/08](../../../docs/example-system-specs/08_solvers.md), which
+[M-22](#m-22) already records as outstanding for the GPU backend on the separate
+ground that Gauss-Seidel does not vectorise. It is now also outstanding on
+accuracy grounds on the CPU, which is a stronger reason and a measured one.
 
 ## 2. Entries
 
