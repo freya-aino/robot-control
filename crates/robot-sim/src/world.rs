@@ -47,7 +47,8 @@ use crate::backend::Backend;
 use crate::collision::{self, Placed, Primitive, Proximity};
 use crate::composite::{self, CompositeError, CompositeModel, Position};
 use crate::env::{Environment, PhysicsStep};
-use crate::options::{Integrator, SimOptions};
+use crate::newton;
+use crate::options::{Integrator, SimOptions, SolverAlgorithm};
 use crate::solver::{self, Row, RowKind};
 use robot_model::joint::JointKind;
 use robot_model::link::CollisionGeometry;
@@ -534,7 +535,15 @@ impl World {
         let (cvel, cdof_dot) = composite::com_vel(&self.model, &pos, qd)?;
         let qacc_smooth = composite::forward_dynamics(&self.model, &pos, qd, tau)?;
         let rows = self.build_rows(q, &pos, &cvel, &cdof_dot, qd)?;
-        let solution = solver::solve(
+        // Both solvers answer the same convex problem and have the same
+        // signature, so the choice is a dispatch and nothing else depends on
+        // it. `SolverAlgorithm`'s documentation carries the measurement that
+        // makes Newton the default.
+        let solve = match self.options.solver {
+            SolverAlgorithm::Newton => newton::solve_newton,
+            SolverAlgorithm::ProjectedGaussSeidel => solver::solve,
+        };
+        let solution = solve(
             &self.model,
             &pos,
             qd,

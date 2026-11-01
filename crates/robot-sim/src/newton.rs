@@ -102,29 +102,45 @@ fn constraint_update(
     cost
 }
 
-/// Dense lower-triangular Cholesky in place, `A = L L'`, returning false if the
-/// matrix is not positive definite.
-fn chol_factor(a: &mut [f64], n: usize) -> Result<(), usize> {
-    for i in 0..n {
-        for j in 0..=i {
-            let mut sum = a[i * n + j];
-            for k in 0..j {
-                sum -= a[i * n + k] * a[j * n + k];
-            }
-            if i == j {
-                if sum <= MINVAL {
-                    return Err(i);
-                }
-                a[i * n + i] = sum.sqrt();
-            } else {
-                a[i * n + j] = sum / a[j * n + j];
-            }
+/// `mju_cholFactor` of 08 section 7.1: dense lower-triangular Cholesky in
+/// place, `A = L L'`, reading and writing the lower triangle only.
+///
+/// Returns the rank. A pivot below `mindiag` is **clamped to `mindiag`** and
+/// that column below the diagonal is zeroed, exactly as the example does,
+/// rather than reported as a failure. That matters here and is not defensive
+/// coding: `D = 1/R` reaches 1e15 when a row's regularisation is at its floor,
+/// so `M + J' D_q J` can lose a pivot to cancellation on a 35-degree-of-freedom
+/// G1 even though it is positive definite in exact arithmetic. An earlier
+/// version of this function returned an error there and the G1 stance run died
+/// at degree of freedom 31. Clamping factorises a nearby positive-definite
+/// matrix instead, which still gives a descent direction; if the direction is
+/// useless the line search returns a zero step and the iteration stops.
+fn chol_factor(a: &mut [f64], n: usize, mindiag: f64) -> usize {
+    let mut rank = n;
+    for j in 0..n {
+        let mut tmp = a[j * n + j];
+        for k in 0..j {
+            tmp -= a[j * n + k] * a[j * n + k];
         }
-        for j in (i + 1)..n {
-            a[i * n + j] = 0.0;
+        if tmp < mindiag {
+            rank -= 1;
+            a[j * n + j] = mindiag.sqrt();
+            for i in (j + 1)..n {
+                a[i * n + j] = 0.0;
+            }
+        } else {
+            a[j * n + j] = tmp.sqrt();
+            let inv = 1.0 / a[j * n + j];
+            for i in (j + 1)..n {
+                let mut sum = a[i * n + j];
+                for k in 0..j {
+                    sum -= a[i * n + k] * a[j * n + k];
+                }
+                a[i * n + j] = sum * inv;
+            }
         }
     }
-    Ok(())
+    rank
 }
 
 /// Solves `L L' x = b` in place for a factor from [`chol_factor`].
@@ -423,17 +439,10 @@ pub fn solve_newton(
                 }
             }
         }
-        // Mirror into the upper triangle; the factorisation reads the lower.
-        for r in 0..nv {
-            for c in 0..r {
-                hessian[c * nv + r] = hessian[r * nv + c];
-            }
-        }
         factor.copy_from_slice(&hessian);
-        // The Hessian is `M + J' D_q J` with `M` positive definite and the
-        // second term positive semi-definite, so a failure here means the mass
-        // matrix itself has gone bad rather than the constraints.
-        chol_factor(&mut factor, nv).map_err(|dof| CompositeError::SingularInertia { dof })?;
+        // The factorisation reads and writes the lower triangle only, and
+        // clamps a lost pivot rather than failing; see `chol_factor`.
+        chol_factor(&mut factor, nv, MINVAL);
         // search = -H^-1 grad.
         let mut search: Vec<f64> = grad.iter().map(|g| -g).collect();
         chol_solve(&factor, nv, &mut search);

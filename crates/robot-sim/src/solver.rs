@@ -693,7 +693,18 @@ pub fn contact_rows(
             .collect()
     };
 
-    if condim == 1 {
+    // A pair with zero friction is a frictionless contact, whatever `condim`
+    // asks for, and 07 section 9.2 gives that one row along the normal.
+    //
+    // Building a pyramid anyway is not merely wasteful, it is singular: the
+    // edge directions are `n +/- mu t_k`, so at `mu = 0` all four collapse onto
+    // `n` and the four rows become identical. Worse, `Rpy = 2 mu^2 R0` is then
+    // zero, so `D = 1/R` saturates at `1/MINVAL = 1e15` and the Hessian
+    // `M + J' D_q J` loses every pivot to cancellation. That is not
+    // hypothetical: it is what made the Newton solver diverge on step 1511 of
+    // the G1 collapse, once the folded robot began contacting its own links
+    // through a pair friction of zero.
+    if condim == 1 || friction <= 0.0 {
         let j = project(normal, &rel);
         let jd = project(normal, &rel_dot);
         out.push(Row {
@@ -1389,5 +1400,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(solution.clamped_rows, vec![0]);
+    }
+    #[test]
+    fn a_frictionless_pair_gets_one_row_rather_than_a_degenerate_pyramid() {
+        // Regression. `condim = 3` with `mu = 0` used to build four pyramid
+        // edges, and at `mu = 0` the directions `n +/- mu t_k` all collapse
+        // onto `n`: four identical rows, with `Rpy = 2 mu^2 R0 = 0` so
+        // `D = 1/R` saturated at 1e15. The Hessian `M + J' D_q J` then lost
+        // every pivot and the Newton solver diverged on step 1511 of the G1
+        // collapse, once the folded robot started contacting its own links
+        // through the default pair friction of zero.
+        let profile = free_body(2.0);
+        let model = CompositeModel::from_profile(&profile);
+        let mut state = CompositeState::identity(&model);
+        state.q[2] = -0.002;
+        let pos = position(&model, &state.q).unwrap();
+        let (cvel, cdof_dot) = com_vel(&model, &pos, &state.qd).unwrap();
+        let build = |mu: f64| {
+            let mut rows = Vec::new();
+            contact_rows(
+                &model,
+                &pos,
+                &cvel,
+                &cdof_dot,
+                &state.qd,
+                [0.0, 0.0, -0.002],
+                [0.0, 0.0, 1.0],
+                0.002,
+                0,
+                None,
+                3,
+                mu,
+                default_solref(),
+                default_solimp(),
+                0.0,
+                &mut rows,
+            )
+            .unwrap();
+            rows
+        };
+        let frictionless = build(0.0);
+        assert_eq!(frictionless.len(), 1, "zero friction is one normal row");
+        assert_eq!(frictionless[0].kind, RowKind::ContactNormal);
+        assert_eq!(build(0.6).len(), 4, "a real pyramid is four edges");
     }
 }

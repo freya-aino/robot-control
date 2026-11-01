@@ -670,3 +670,25 @@ within 2e-4 at 100 sweeps; the forces are not. This is the quantitative case
 for the Newton solver of specs/08, recorded in Appendix D section 1.7.3.
 
 Gate: 1055 tests, fmt and clippy clean.
+
+## 2026-11-01 — the primal Newton solver, and what making it the default exposed
+
+specs/08 section 6 implemented in `crates/robot-sim/src/newton.rs` and made the
+default. One iteration to a scaled gradient norm of 4.9e-14 on the sixteen-row
+pyramidal problem that took projected Gauss-Seidel 1011 sweeps; the two agree on
+the acceleration to 1e-8. Gauss-Seidel is kept as that cross-check.
+
+Switching the default over found two defects a non-running solver could not
+have. `mju_cholFactor` clamps a lost pivot to `mindiag` and decrements the rank
+rather than failing (08 section 7.1); returning an error killed the G1 stance
+run at degree of freedom 31. And a contact with zero friction must be `dim == 1`:
+`condim = 3` with `mu = 0` built four identical pyramid edges with
+`Rpy = 2 mu^2 R0 = 0`, so `D` saturated at 1/MINVAL and the Hessian lost every
+pivot, diverging on step 1511 of the collapse once the folded robot contacted
+its own links through the default pair friction of zero.
+
+Gauss-Seidel's non-convergence had been masking that: it never reached the true
+force in 100 sweeps, so it under-estimated it and the degenerate rows never
+showed. Recorded in Appendix D section 1.7.4 with a regression test.
+
+Gate: 1061 tests, fmt and clippy clean.

@@ -409,6 +409,51 @@ This is the quantitative case for the Newton solver of
 ground that Gauss-Seidel does not vectorise. It is now also outstanding on
 accuracy grounds on the CPU, which is a stronger reason and a measured one.
 
+#### 1.7.4 The Newton solver, and what making it the default exposed
+
+[specs/08](../../../docs/example-system-specs/08_solvers_islands.md) section 6
+is now implemented in `crates/robot-sim/src/newton.rs` and is the default
+([`SolverAlgorithm::Newton`]). Measured on the same sixteen-row problem that
+took projected Gauss-Seidel 1011 sweeps: **one** Newton iteration, final scaled
+gradient norm 4.9e-14. The two agree on the acceleration to 1e-8, which is the
+cross-algorithm check that makes the new path trustworthy — the same discipline
+the composite mass matrix was validated under against the articulated-body
+inverse dynamics. Gauss-Seidel is kept for exactly that purpose.
+
+The primal form also removes the projection entirely. A row's force is
+`-D jar`, and an inequality row contributes to the cost only while `jar < 0`,
+so non-negativity is a property of the hinge rather than of a projection step.
+Nothing in the solver knows what a friction cone is; the cone is in the row
+Jacobians.
+
+Two corrections came out of switching the default over, and both are the kind
+that only a running system produces.
+
+**`mju_cholFactor` clamps, it does not fail.** 08 section 7.1 is explicit: a
+pivot below `mindiag` is set to `mindiag`, the rank is decremented and that
+column below the diagonal is zeroed. The first implementation returned an error
+instead, and the G1 stance run died at degree of freedom 31. `D = 1/R` reaches
+1e15 when a row's regularisation sits on its floor, so `M + J' D_q J` can lose
+a pivot to cancellation even though it is positive definite exactly.
+
+**A contact with zero friction must be `dim == 1`.** This is the substantive
+one. `condim = 3` with `mu = 0` was building four pyramid edges, and at `mu = 0`
+the directions `n ± mu t_k` all collapse onto `n` — four *identical* rows — while
+`Rpy = 2 mu^2 R0` is zero, so `D` saturated at `1/MINVAL` and the Hessian lost
+every pivot. The Newton solver diverged on step 1511 of the G1 collapse, once
+the folded robot began contacting its own links through `World`'s default pair
+friction of zero. 07 section 9.2 already says what to do: a frictionless contact
+gets one row along the normal. With that fix the full 3000-step collapse runs
+with Newton converging in two to four iterations at a residual around 1e-16.
+
+Worth recording separately: **Gauss-Seidel's non-convergence had been acting as
+damping.** It never reached the true force in 100 sweeps, so it systematically
+under-estimated it, and that under-estimate masked the degenerate rows. A solver
+that actually converges is what surfaced them. This is a general hazard in
+reading a simulation as validation of its own solver, and it is why the
+zero-friction case now has a regression test of its own rather than only a
+passing stance run.
+
 ## 2. Entries
 
 ### M-01

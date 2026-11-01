@@ -41,13 +41,27 @@ pub enum Integrator {
 /// Which algorithm solves the constraint problem.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SolverAlgorithm {
-    /// Projected Gauss-Seidel on the dual problem
-    /// (`crate::solver`). Step 06 item 5 asks for a Newton-style method
-    /// alongside this one, and
-    /// `specs/11-gpu-batched-backend.md` records that a strictly sequential
-    /// per-row update is the reason the example's own GPU backend drops this
-    /// algorithm, so the batched path will need the Newton variant. Only this
-    /// one exists today, and the enum says so rather than pretending otherwise.
+    /// The primal Newton method of `specs/08-solvers-islands.md` section 6
+    /// (`crate::newton`), on the acceleration.
+    ///
+    /// The default, because it is the only one of the two that converges on a
+    /// pyramidal contact problem at a sane budget. Measured on sixteen
+    /// pyramidal rows over a rank-six problem: **one** iteration to a scaled
+    /// gradient norm of 4.9e-14, against 1011 Gauss-Seidel sweeps for the same
+    /// answer. The reason is structural -- its variable is the acceleration,
+    /// one per degree of freedom, where the dual has one redundant coefficient
+    /// per pyramid edge.
+    Newton,
+    /// Projected Gauss-Seidel on the dual problem (`crate::solver`).
+    ///
+    /// Kept as the independent cross-check on [`Self::Newton`]: the two solve
+    /// the same convex problem by different routes and agree on the
+    /// acceleration to 1e-8, which is how the Newton path was validated.
+    ///
+    /// Not suitable as the default. Its per-row update is strictly sequential,
+    /// which `specs/11-gpu-batched-backend.md` records as the reason the
+    /// example's own GPU backend drops the algorithm, and on pyramidal rows it
+    /// needs roughly a thousand sweeps where Newton needs one.
     ProjectedGaussSeidel,
 }
 
@@ -178,7 +192,7 @@ impl Default for SimOptions {
         Self {
             timestep: Duration::from_micros(100),
             integrator: Integrator::SemiImplicitEuler,
-            solver: SolverAlgorithm::ProjectedGaussSeidel,
+            solver: SolverAlgorithm::Newton,
             solver_iterations: 100,
             solver_tolerance: 1e-10,
             condim: 3,
