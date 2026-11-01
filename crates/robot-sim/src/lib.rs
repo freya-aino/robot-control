@@ -71,4 +71,5 @@ pub mod multibody_env;
 pub mod oracle;
 pub mod passive;
 pub mod pendulum;
+pub mod solver;
 pub mod spatial;
