@@ -358,6 +358,73 @@ fn stiffness_damping(solref: [f64; 2], solimp: [f64; 5]) -> (f64, f64) {
     }
 }
 
+/// The per-row impedance data both solvers need.
+///
+/// Separated out because the two need different amounts of `A = J M^-1 J'`.
+/// Projected Gauss-Seidel works in force space and needs the whole matrix;
+/// Newton works in acceleration space and needs only its diagonal, since
+/// `R_ii = (1 - d)/d * A_ii` is the only place `A` enters the regularisation.
+pub(crate) struct Impedance {
+    /// Regularisation per row, `R_ii`.
+    pub r: Vec<f64>,
+    /// Constraint stiffness per row, `D_i = 1/R_i`.
+    ///
+    /// This is `efc_D` of 08 section 2, the primal problem's quadratic
+    /// coefficient. At the optimum `J a - a_ref = -R f`, so
+    /// `f = -D (J a - a_ref)`, which is why the primal solver gets a row's
+    /// force by evaluating a hinge rather than by projecting onto a set.
+    pub d: Vec<f64>,
+    /// Reference acceleration per row, `a_ref`.
+    pub aref: Vec<f64>,
+    /// Rows whose time constant was raised to twice the timestep.
+    pub clamped: Vec<usize>,
+}
+
+/// Computes `R`, `D` and `a_ref` for every row, given the diagonal of
+/// `A = J M^-1 J'`.
+pub(crate) fn row_impedance(rows: &[Row], qd: &[f64], timestep: f64, diag_a: &[f64]) -> Impedance {
+    let m = rows.len();
+    let mut out = Impedance {
+        r: vec![0.0; m],
+        d: vec![0.0; m],
+        aref: vec![0.0; m],
+        clamped: Vec::new(),
+    };
+    for (i, row) in rows.iter().enumerate() {
+        let (tc, was_clamped) = effective_timeconst(row.solref, timestep);
+        if was_clamped {
+            out.clamped.push(i);
+        }
+        let solref = [tc, row.solref[1]];
+        let imp = impedance(row.solimp, row.pos, row.margin);
+        // Section 2.4: R_ii = (1 - d)/d * A_ii, with the exact diagonal.
+        // Appendix D M-09 records the constant that stood here before.
+        let mut r_i = (((1.0 - imp) / imp.max(MINVAL)) * diag_a[i]).max(MINVAL);
+        // Section 2.4, pyramidal rows: "all edges share `Rpy = 2 mu^2 R0`
+        // where `R0` is computed from the first edge's diagA".
+        //
+        // The four edges of one contact all contain the normal direction, so
+        // four non-negative coefficients encode three force components and the
+        // dual is convex but not strictly so: Gauss-Seidel iterates can drift
+        // along the redundant direction without the per-sweep residual
+        // shrinking. Sharing one R across the edges and scaling it by `2 mu^2`
+        // regularises exactly that direction.
+        if let RowKind::ContactPyramid { first_edge, mu } = row.kind {
+            let first = &rows[first_edge];
+            let d0 = impedance(first.solimp, first.pos, first.margin);
+            let r0 = ((1.0 - d0) / d0.max(MINVAL)) * diag_a[first_edge];
+            r_i = (2.0 * mu * mu * r0).max(MINVAL);
+        }
+        out.r[i] = r_i;
+        out.d[i] = 1.0 / r_i.max(MINVAL);
+        let (k, b) = stiffness_damping(solref, row.solimp);
+        let vel = dot(&row.jacobian, qd);
+        // a_ref = -B vel - K d (pos - margin).
+        out.aref[i] = -b * vel - k * imp * (row.pos - row.margin);
+    }
+    out
+}
+
 /// Solves the constraint problem of 07 section 2.3 by projected Gauss-Seidel.
 ///
 /// `qacc_smooth` is the unconstrained acceleration `M^-1 (tau - c)`, and `qd`
@@ -456,47 +523,13 @@ pub fn solve(
         }
     }
 
-    // Per-row impedance, regularisation and reference acceleration.
-    let mut r = vec![0.0; m];
-    let mut aref = vec![0.0; m];
-    for (i, row) in rows.iter().enumerate() {
-        let (tc, clamped) = effective_timeconst(row.solref, timestep);
-        if clamped {
-            solution.clamped_rows.push(i);
-        }
-        let solref = [tc, row.solref[1]];
-        let d = impedance(row.solimp, row.pos, row.margin);
-        // Section 2.4: R_ii = (1 - d)/d * A_ii, with the exact diagonal.
-        // Appendix D M-09 records the constant that stood here before.
-        let diag = a[i * m + i];
-        let mut r_i = (((1.0 - d) / d.max(MINVAL)) * diag).max(MINVAL);
-        // Section 2.4, pyramidal rows: "all edges share `Rpy = 2 mu^2 R0`
-        // where `R0` is computed from the first edge's diagA".
-        //
-        // This is not a cosmetic detail. The four edges of one contact all
-        // contain the normal direction, so four non-negative coefficients
-        // encode three force components and the dual is convex but not
-        // strictly so: the Gauss-Seidel iterates can drift along the redundant
-        // direction without the per-sweep residual shrinking. Sharing one R
-        // across the edges and scaling it by `2 mu^2` regularises exactly that
-        // direction, which is why the example does it and why leaving it out
-        // left warm and cold starts disagreeing on the acceleration by 4e-4
-        // instead of 1e-9.
-        if let RowKind::ContactPyramid { first_edge, mu } = row.kind {
-            let d0 = impedance(
-                rows[first_edge].solimp,
-                rows[first_edge].pos,
-                rows[first_edge].margin,
-            );
-            let r0 = ((1.0 - d0) / d0.max(MINVAL)) * a[first_edge * m + first_edge];
-            r_i = (2.0 * mu * mu * r0).max(MINVAL);
-        }
-        r[i] = r_i;
-        let (k, b) = stiffness_damping(solref, row.solimp);
-        let vel = dot(&row.jacobian, qd);
-        // a_ref = -B vel - K d (pos - margin).
-        aref[i] = -b * vel - k * d * (row.pos - row.margin);
-    }
+    // Per-row impedance, regularisation and reference acceleration, shared
+    // with the Newton solver through `row_impedance`.
+    let diag_a: Vec<f64> = (0..m).map(|i| a[i * m + i]).collect();
+    let imp = row_impedance(rows, qd, timestep, &diag_a);
+    let r = imp.r;
+    let aref = imp.aref;
+    solution.clamped_rows = imp.clamped;
 
     // a_u = J qacc_smooth + Jdot v, and the dual's linear term
     // `efc_b = a_u - a_ref`.
