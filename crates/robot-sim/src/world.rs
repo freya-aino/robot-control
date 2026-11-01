@@ -118,6 +118,19 @@ pub struct World {
     limits: Vec<Option<(f64, f64)>>,
     /// Effort bound per body, for the stance controller's clamp.
     effort: Vec<f64>,
+    /// Index of each body's joint in the profile's `actuated_joints` order, or
+    /// `None` for a body attached by a joint that is not actuated.
+    ///
+    /// `CompositeModel` numbers bodies parent-before-child, which the
+    /// factorisation requires, while the replay and every other consumer index
+    /// by actuated joint. The two do not coincide: the vendored G1 has 39
+    /// bodies and 30 actuated joints, the difference being fixed joints that
+    /// carry no degree of freedom and so appear in neither the actuated list
+    /// nor the external layout. The mapping is therefore taken from the
+    /// profile rather than inferred from an offset.
+    actuated_index: Vec<Option<usize>>,
+    /// Number of actuated joints, the width of [`Self::limit_fractions`].
+    actuated_count: usize,
     ground: Option<Ground>,
     /// Friction coefficient between two shapes of the robot.
     pair_friction: f64,
@@ -175,6 +188,9 @@ impl World {
         let mut shapes = Vec::new();
         let mut limits = vec![None; model.bodies.len()];
         let mut effort = vec![0.0; model.bodies.len()];
+        let mut actuated_index: Vec<Option<usize>> = vec![None; model.bodies.len()];
+        let actuated_order: Vec<_> = profile.actuated_joints().map(|j| j.id).collect();
+        let actuated_count = actuated_order.len();
         let mut unmodelled = 0usize;
 
         for (index, link_id) in order.into_iter().skip(1).enumerate() {
@@ -185,6 +201,7 @@ impl World {
                 .parent_joint_of(link_id)
                 .expect("every non-root link has a parent joint");
             effort[index] = joint.limits.effort.value();
+            actuated_index[index] = actuated_order.iter().position(|id| *id == joint.id);
             limits[index] = match (joint.kind, joint.limits.position) {
                 (JointKind::Revolute | JointKind::Prismatic, Some(range)) => {
                     Some((range.lo.value(), range.hi.value()))
@@ -237,6 +254,8 @@ impl World {
             .collect();
 
         Self {
+            actuated_index,
+            actuated_count,
             model,
             shapes,
             weld,
@@ -776,14 +795,18 @@ impl World {
     }
 
     /// Where each bounded single-degree-of-freedom joint sits in its range, as
-    /// a fraction from 0 at the lower bound to 1 at the upper, in **external**
-    /// degree-of-freedom order with `None` for a joint without a limit.
+    /// a fraction from 0 at the lower bound to 1 at the upper, indexed by
+    /// **actuated joint** with `None` for a joint without a limit.
+    ///
+    /// Indexed by actuated joint rather than by degree of freedom because that
+    /// is what the replay reads (`usd_replay` looks up `slot.actuated`), and
+    /// because a `Free` joint spans six degrees of freedom but one slot.
     ///
     /// Reported for the replay, which colours a joint by how close it is to its
     /// stop.
     #[must_use]
     pub fn limit_fractions(&self, q: &[f64]) -> Vec<Option<f64>> {
-        let mut out = vec![None; self.model.bodies.len()];
+        let mut out = vec![None; self.actuated_count];
         for (index, body) in self.model.bodies.iter().enumerate() {
             let Some((lo, hi)) = self.limits[index] else {
                 continue;
@@ -791,11 +814,18 @@ impl World {
             if body.qpos_num != 1 || body.qpos_adr >= q.len() {
                 continue;
             }
+            let Some(slot) = self.actuated_index[index] else {
+                continue;
+            };
+            // A zero-width range is reported as mid-range, as the legacy path
+            // does, rather than skipped: the joint *has* a limit, and the
+            // replay colours it by this number.
             let span = hi - lo;
             if span.abs() <= f64::EPSILON {
+                out[slot] = Some(0.5);
                 continue;
             }
-            out[body.ext_dof_adr] = Some((q[body.qpos_adr] - lo) / span);
+            out[slot] = Some((q[body.qpos_adr] - lo) / span);
         }
         out
     }
@@ -1441,8 +1471,28 @@ mod tests {
         assert_eq!(qe.len(), world.nq());
         let back = world.model().qpos_to_internal(&qe).unwrap();
         assert_eq!(back, state.q);
+        // The replay indexes this by actuated joint, so it must agree with the
+        // legacy path slot for slot -- not merely have the same length. The
+        // composite model numbers bodies parent-before-child while the replay
+        // numbers them by actuated joint, and nothing but a comparison catches
+        // the two drifting apart.
         let fractions = world.limit_fractions(&state.q);
-        assert_eq!(fractions.len(), world.model().bodies.len());
+        let legacy_body = crate::articulated::ArticulatedBody::from_profile(&g1());
+        let legacy_q = world.q_external(&state.q).unwrap();
+        let legacy = legacy_body.limit_fractions(&legacy_q).unwrap();
+        assert_eq!(fractions.len(), legacy.len(), "one slot per actuated joint");
+        for (i, (mine, theirs)) in fractions.iter().zip(&legacy).enumerate() {
+            match (mine, theirs) {
+                (Some(a), Some(b)) => assert!(
+                    (a - b).abs() < 1e-12,
+                    "actuated joint {i}: {a} against the legacy {b}"
+                ),
+                (None, None) => {}
+                _ => panic!(
+                    "actuated joint {i} disagrees on having a limit: {mine:?} against {theirs:?}"
+                ),
+            }
+        }
         // The zero posture sits inside every range it has one for.
         for f in fractions.iter().flatten() {
             assert!(

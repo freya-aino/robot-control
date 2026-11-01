@@ -261,7 +261,7 @@ that remain are named with what they need.
 | [M-14](#m-14) | **fixed** | Relative pivot tolerance |
 | [M-15](#m-15) | **fixed** | Bounding-sphere and world-AABB filters before the narrow phase, with `world_aabb` checked against the support function |
 | [M-16](#m-16) | **fixed** | `pair_can_collide`: bitmask, weld body, immovable pair and parent-child, replacing the global 3 mm allowance |
-| [M-17](#m-17) | **open** | See 1.6.1 |
+| [M-17](#m-17) | **fixed** in the third pass | See 1.7.1 and 1.7.5. `robot sim multibody` now runs the corrected path by default |
 | [M-18](#m-18) | **fixed** | `crb`, `factor_m`, `solve_ld` |
 | [M-19](#m-19) | **fixed** | `CompositeState::rk4_step` with the Runge-Kutta-Munthe-Kaas correction, asserted higher order rather than merely better |
 | [M-20](#m-20) | **fixed** | Battery schema v8 adds a plane force-balance, a friction-cone and a narrow-phase row (ADR 0008 amendment) |
@@ -453,6 +453,52 @@ that actually converges is what surfaced them. This is a general hazard in
 reading a simulation as validation of its own solver, and it is why the
 zero-friction case now has a regression test of its own rather than only a
 passing stance run.
+
+#### 1.7.5 The command moved over, with the before and after
+
+`robot sim multibody` now runs the corrected path by default. `--contact` keeps
+both legacy contact models reachable (`penalty`, `impedance`), because retiring
+them silently would throw away the only way to reproduce a number this command
+printed before, and because the articulated-body algorithm is the independent
+cross-check the composite recursions were validated against. The two paths sit
+behind one wrapper (`crates/robot-cli/src/commands/stepper.rs`) so the command
+has a single loop.
+
+The same run, G1 floating base with the stance hold, 4000 steps at 0.5 ms:
+
+| | legacy penalty | corrected |
+| --- | --- | --- |
+| pelvis height minimum | 0.7877 m at t=0.057 s | 0.7854 m at t=1.224 s |
+| lowest contact minimum | −0.0054 m | **−0.0044 m** |
+| max kinetic energy after 0.5 s | 0.1332 J | 0.2309 J |
+| stance qualification | PASS | PASS |
+
+Both qualify. Two differences are worth reading rather than just recording.
+Penetration is **smaller** on the corrected path, which is the contact
+constraint doing its job where a penalty spring has to be penetrated to push
+back. And the energy *decays*: on the corrected path it peaks around t=0.6 s and
+falls to 0.056 J by t=1.0 s, while on the legacy path it climbs monotonically
+through the whole run (0.0004 J to 0.1085 J at t=1.0 s). A supported stance
+settling should dissipate. A penalty contact that keeps adding energy for a
+second is the uncoupled-spring artefact [M-09](#m-09) describes, visible in the
+command's own output once there is something to compare against.
+
+Three things the migration needed, each now on `World` with its own test:
+`stable_damping` and `stance_torques` (the same `kd <= 0.5 / (M^-1_jj dt)` bound
+and effort clamp), `limit_fractions`, and `limit_torque` on the step report.
+The last is the better one: the legacy path computed a limit torque in a
+separate active-set pass that could disagree with the forces that actually
+integrated, where this is `J' f` over the limit rows of the one solve.
+
+One indexing trap, recorded because it cost a failing test and would have
+silently mis-coloured a replay. `limit_fractions` is indexed by **actuated
+joint**, not by degree of freedom and not by body: the vendored G1 has 39 bodies
+and 30 actuated joints, the difference being fixed joints that carry no degree
+of freedom and so appear in neither the actuated list nor the external layout.
+A first attempt inferred the mapping from the rank of a body's external position
+offset, which is wrong for exactly those fixed bodies. The mapping now comes
+from the profile, and a test compares the whole vector against the legacy path
+slot for slot rather than merely checking its length.
 
 ## 2. Entries
 

@@ -4,6 +4,7 @@ pub mod data;
 pub mod eval;
 pub mod motion;
 pub mod sim;
+pub mod stepper;
 pub mod usd_replay;
 
 /// Exit code for a command that ran and found a problem (a rejected

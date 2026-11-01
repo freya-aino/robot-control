@@ -692,3 +692,28 @@ force in 100 sweeps, so it under-estimated it and the degenerate rows never
 showed. Recorded in Appendix D section 1.7.4 with a regression test.
 
 Gate: 1061 tests, fmt and clippy clean.
+
+## 2026-11-01 — `robot sim multibody` runs the corrected path, closing M-17
+
+The command now runs composite dynamics, exact collision manifolds and the
+primal Newton constraint solver by default. `--contact penalty|impedance` keeps
+both legacy models reachable, behind one wrapper
+(`crates/robot-cli/src/commands/stepper.rs`) so there is a single step loop.
+
+Same run (G1 floating, stance hold, 4000 steps at 0.5 ms), both PASS the stance
+qualification. Penetration is smaller on the corrected path (-0.0044 m against
+-0.0054 m), and the kinetic energy decays -- peaking near t=0.6 s and falling to
+0.056 J by t=1.0 s -- where on the legacy path it climbs monotonically through
+the whole run. A supported stance settling should dissipate; a penalty contact
+still adding energy after a second is the uncoupled-spring artefact of M-09,
+now visible in the command's own output.
+
+The migration needed `stable_damping`, `stance_torques`, `limit_fractions` and
+`limit_torque` on `World`, all tested. One trap recorded in Appendix D 1.7.5:
+`limit_fractions` is indexed by actuated joint, and the G1 has 39 bodies against
+30 actuated joints, so inferring the mapping from an external offset is wrong
+for fixed joints. It now comes from the profile and is compared against the
+legacy path slot for slot.
+
+Gate: 1064 tests, fmt and clippy clean. Replay writing verified end to end on
+the new default path.

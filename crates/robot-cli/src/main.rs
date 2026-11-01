@@ -124,10 +124,13 @@ fn run_multibody(flags: &[String]) -> i32 {
         .position(|a| a == "--contact")
         .map(|i| flags.get(i + 1))
     {
-        None => robot_sim::articulated::ContactModel::Penalty,
-        Some(Some(value)) if value == "penalty" => robot_sim::articulated::ContactModel::Penalty,
+        // Absent means the corrected path, not a legacy contact model.
+        None => None,
+        Some(Some(value)) if value == "penalty" => {
+            Some(robot_sim::articulated::ContactModel::Penalty)
+        }
         Some(Some(value)) if value == "impedance" => {
-            robot_sim::articulated::ContactModel::Impedance
+            Some(robot_sim::articulated::ContactModel::Impedance)
         }
         Some(_) => {
             return invalid_flag("--contact expects penalty or impedance");

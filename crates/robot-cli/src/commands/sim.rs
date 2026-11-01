@@ -15,7 +15,7 @@
 use super::{EXIT_FAILURE, EXIT_USAGE};
 use robot_model::joint::JointKind;
 use robot_model::profile::RobotProfile;
-use robot_sim::articulated::{ArticulatedBody, ContactModel, MultibodyState};
+use robot_sim::articulated::ContactModel;
 use robot_sim::contact::GroundContact;
 use robot_sim::pendulum::{Pendulum, PendulumParams, PendulumState};
 use robot_types::time::{ClockId, Duration, Timestamp};
@@ -187,15 +187,7 @@ pub fn default_steps(dt_seconds: f64) -> Result<u32, String> {
 /// `finish` leaves the directory's earlier committed run intact.
 #[cfg(test)]
 fn multibody(steps: u32, dt_seconds: f64, floating: bool, zero_torque: bool) -> i32 {
-    multibody_scene_to(
-        steps,
-        dt_seconds,
-        floating,
-        zero_torque,
-        None,
-        None,
-        ContactModel::Penalty,
-    )
+    multibody_scene_to(steps, dt_seconds, floating, zero_torque, None, None, None)
 }
 
 /// [`multibody`] with an optional frame directory.
@@ -207,20 +199,19 @@ pub fn multibody_to(
     zero_torque: bool,
     out: Option<&Path>,
 ) -> i32 {
-    multibody_scene_to(
-        steps,
-        dt_seconds,
-        floating,
-        zero_torque,
-        out,
-        None,
-        ContactModel::Penalty,
-    )
+    multibody_scene_to(steps, dt_seconds, floating, zero_torque, out, None, None)
 }
 
 /// As [`multibody_to`], with the environment read from `scene` (a USD layer)
 /// instead of the default G1 ground scene. Every environment collider of the
 /// scene is simulated, or the run is refused.
+///
+/// `contact` selects which simulation path runs. `None` is the corrected path
+/// -- composite-frame dynamics, exact collision manifolds and the primal
+/// Newton constraint solver -- and is what `--contact` left off now gives.
+/// `Some` keeps one of the two legacy contact models reachable, because
+/// retiring them silently would throw away the only way to reproduce a number
+/// this command printed before.
 pub fn multibody_scene_to(
     steps: u32,
     dt_seconds: f64,
@@ -228,7 +219,7 @@ pub fn multibody_scene_to(
     zero_torque: bool,
     out: Option<&Path>,
     scene: Option<&Path>,
-    contact: ContactModel,
+    contact: Option<ContactModel>,
 ) -> i32 {
     let scene_path: std::path::PathBuf =
         scene.map_or_else(|| std::path::PathBuf::from(GROUND_SCENE), Path::to_path_buf);
@@ -297,22 +288,13 @@ pub fn multibody_scene_to(
             return EXIT_FAILURE;
         }
     };
-    let body = ArticulatedBody::from_profile(&profile).with_contact_model(contact);
-    let gravity = profile.gravity.acceleration();
+    let path = match contact {
+        None => super::stepper::Path::Corrected,
+        Some(ContactModel::Penalty) => super::stepper::Path::LegacyPenalty,
+        Some(ContactModel::Impedance) => super::stepper::Path::LegacyImpedance,
+    };
     let dt = Duration::from_secs_f64(dt_seconds);
     let dt_nanos = dt.nanos();
-    let mut frames = match out {
-        Some(dir) => match open_frames(dir, &profile, body.position_width()) {
-            Ok(opened) => Some(opened),
-            Err(message) => {
-                eprintln!("error: {message}");
-                return EXIT_FAILURE;
-            }
-        },
-        None => None,
-    };
-    let out_dir = out.map(Path::to_path_buf);
-
     // Every environment collider of the scene is simulated, or the run is refused:
     // the simulator has one contact law, for planes. Other tagged shapes are named.
     let environment = match robot_model::usd::import_environment(&scene_path) {
@@ -354,58 +336,56 @@ pub fn multibody_scene_to(
     // A small displacement from the zero posture, not a claim about any
     // real G1 standing pose: this is a demonstration of the solver, not
     // a balance controller. The floating base starts at an identity
-    // quaternion (q[3] = w = 1) at the origin.
-    let mut q = if floating {
-        vec![0.0; body.position_width()]
-    } else {
-        vec![0.01; body.position_width()]
-    };
+    // quaternion at the origin.
+    let mut sim = super::stepper::Stepper::new(path, &profile, ground, dt_seconds, floating);
     if floating {
-        q[3] = 1.0;
-        // Place the pelvis so the lowest contact sphere's bottom sits
-        // STANCE_CLEARANCE above the plane. The height is measured from the
-        // model, not assumed.
-        let lowest_at_origin = match body.lowest_contact_height(&q) {
-            Ok(Some(h)) => h,
-            Ok(None) => {
-                eprintln!("error: the floating G1 has no contact spheres");
-                return EXIT_FAILURE;
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                return EXIT_FAILURE;
-            }
-        };
-        // The stance starts above the environment plane, not above z = 0.
-        q[2] = ground.ground_height + STANCE_CLEARANCE - lowest_at_origin;
-    }
-    let mut state = MultibodyState {
-        q,
-        qd: vec![0.0; body.dof()],
-    };
-    let stance_kd = match body.stable_damping(&state.q, STANCE_KD, dt_seconds) {
-        Ok(kd) => kd,
-        Err(e) => {
-            eprintln!("error: {e}");
+        // Place the pelvis so the lowest contact point sits STANCE_CLEARANCE
+        // above the plane. The height is measured from the model, not assumed.
+        if let Err(message) = sim.place_above_plane(ground.ground_height, STANCE_CLEARANCE) {
+            eprintln!("error: {message}");
             return EXIT_FAILURE;
         }
+    }
+    // The frame dump needs the position width, which the stepper knows and the
+    // two paths disagree about, so it is opened once the stepper exists.
+    let mut frames = match out {
+        Some(dir) => match open_frames(dir, &profile, sim.position_width()) {
+            Ok(opened) => Some(opened),
+            Err(message) => {
+                eprintln!("error: {message}");
+                return EXIT_FAILURE;
+            }
+        },
+        None => None,
     };
-    let start_pelvis = state.q[2];
-    let mut tau = vec![0.0; body.dof()];
+    let out_dir = out.map(Path::to_path_buf);
+    if let Err(message) = sim.prepare_stance(STANCE_KD, dt_seconds) {
+        eprintln!("error: {message}");
+        return EXIT_FAILURE;
+    }
+    let start_pelvis = sim.pelvis_height();
 
     let mode = match (floating, zero_torque) {
-        (true, false) => "floating base, PD stance hold, sphere ground contact",
-        (true, true) => "floating base, zero torque (collapse reference), sphere ground contact",
+        (true, false) => "floating base, PD stance hold, ground contact",
+        (true, true) => "floating base, zero torque (collapse reference), ground contact",
         _ => "fixed base, no ground contact",
     };
     println!("G1 multibody simulation ({mode}): {steps} steps at {dt_seconds} s");
-    println!("  degrees of freedom:      {}", body.dof());
+    println!("  path:                    {}", path.describe());
+    println!("  degrees of freedom:      {}", sim.dof());
     if floating {
-        println!(
-            "  contact shapes:          {} sphere, {} not modelled",
-            body.contact_shape_count(),
-            body.unmodelled_collision_shape_count()
-        );
+        let (modelled, unmodelled) = sim.shape_counts();
+        println!("  contact shapes:          {modelled} modelled, {unmodelled} not modelled");
+        if !path.uses_scene_stiffness() {
+            // Said plainly rather than left to be inferred from unchanged
+            // output: the constraint formulation derives a contact force from
+            // an impedance, so a stiffness and a damping per plane have
+            // nowhere to go. Appendix D M-09 is the entry.
+            println!(
+                "  scene stiffness:         ignored on this path (impedance replaces it); height {:.3} m and friction {:.2} are used",
+                ground.ground_height, ground.friction
+            );
+        }
     }
 
     let report_every = (steps / 10).max(1);
@@ -415,48 +395,41 @@ pub fn multibody_scene_to(
     let mut min_contact = f64::INFINITY;
     let mut max_settled_energy: Option<f64> = None;
     for step in 0..steps {
-        if floating && !zero_torque {
-            if let Err(e) =
-                body.stance_torques(&state.q, &state.qd, STANCE_KP, &stance_kd, &mut tau)
-            {
-                eprintln!("error: step {step}: {e}");
+        let limit_torque = match sim.step(STANCE_KP, zero_torque || !floating) {
+            Ok(t) => t,
+            Err(message) => {
+                eprintln!("error: step {step}: {message}");
                 return EXIT_FAILURE;
             }
-        }
-        let limit_torque = if floating {
-            match state.step_with_ground_recording(&body, &tau, gravity, &ground, dt) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("error: step {step}: {e}");
-                    return EXIT_FAILURE;
-                }
-            }
-        } else {
-            if let Err(e) = state.step(&body, &tau, gravity, dt) {
-                eprintln!("error: step {step}: {e}");
+        };
+        // The replay and the pose dump both read the external ordering, so
+        // the corrected path converts here rather than at every use.
+        let (q_out, qd_out) = match (sim.q_external(), sim.qd_external()) {
+            (Ok(q), Ok(qd)) => (q, qd),
+            (Err(message), _) | (_, Err(message)) => {
+                eprintln!("error: step {step}: {message}");
                 return EXIT_FAILURE;
             }
-            vec![0.0; body.dof()]
         };
         if out.is_some() {
-            let limit_fraction = match body.limit_fractions(&state.q) {
+            let limit_fraction = match sim.limit_fractions() {
                 Ok(f) => f,
-                Err(e) => {
-                    eprintln!("error: step {step}: {e}");
+                Err(message) => {
+                    eprintln!("error: step {step}: {message}");
                     return EXIT_FAILURE;
                 }
             };
             captured.push(super::usd_replay::CapturedStep {
-                q: state.q.clone(),
-                qd: state.qd.clone(),
-                tau: tau.clone(),
+                q: q_out.clone(),
+                qd: qd_out,
+                tau: sim.applied_torque().to_vec(),
                 limit_torque,
                 limit_fraction,
             });
         }
         if let Some((dump, layout)) = frames.as_mut() {
             let time_ns = dt_nanos * (i64::from(step) + 1);
-            let frame = pose_frame(u64::from(step) + 1, time_ns, &state.q, layout);
+            let frame = pose_frame(u64::from(step) + 1, time_ns, &q_out, layout);
             if let Err(e) = dump.push(&frame) {
                 eprintln!("error: step {step}: {e}");
                 return EXIT_FAILURE;
@@ -464,33 +437,34 @@ pub fn multibody_scene_to(
         }
         if floating {
             let t = (step + 1) as f64 * dt_seconds;
-            if state.q[2] < min_pelvis {
-                min_pelvis = state.q[2];
+            let pelvis = sim.pelvis_height();
+            if pelvis < min_pelvis {
+                min_pelvis = pelvis;
                 min_pelvis_time = t;
             }
-            match body.lowest_contact_height(&state.q) {
+            match sim.lowest_contact_height() {
                 Ok(Some(h)) => min_contact = min_contact.min(h),
                 Ok(None) => {}
-                Err(e) => {
-                    eprintln!("error: step {step}: {e}");
+                Err(message) => {
+                    eprintln!("error: step {step}: {message}");
                     return EXIT_FAILURE;
                 }
             }
             if t >= SETTLE_SECONDS {
-                match body.kinetic_energy(&state.q, &state.qd) {
+                match sim.kinetic_energy() {
                     Ok(e) => max_settled_energy = Some(max_settled_energy.map_or(e, |m| m.max(e))),
-                    Err(e) => {
-                        eprintln!("error: step {step}: {e}");
+                    Err(message) => {
+                        eprintln!("error: step {step}: {message}");
                         return EXIT_FAILURE;
                     }
                 }
             }
         }
         if step % report_every == 0 || step + 1 == steps {
-            let energy = match body.kinetic_energy(&state.q, &state.qd) {
+            let energy = match sim.kinetic_energy() {
                 Ok(e) => e,
-                Err(e) => {
-                    eprintln!("error: step {step}: {e}");
+                Err(message) => {
+                    eprintln!("error: step {step}: {message}");
                     return EXIT_FAILURE;
                 }
             };
@@ -498,17 +472,18 @@ pub fn multibody_scene_to(
             if floating {
                 println!(
                     "  t={t:>7.3}s  kinetic_energy={energy:>10.4} J  pelvis_height={:.4} m",
-                    state.q[2]
+                    sim.pelvis_height()
                 );
             } else {
-                let max_q = state.q.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-                println!("  t={t:>7.3}s  kinetic_energy={energy:>10.4} J  max|q|={max_q:.4} rad");
+                println!(
+                    "  t={t:>7.3}s  kinetic_energy={energy:>10.4} J  max|q|={:.4} rad",
+                    sim.max_abs_position()
+                );
             }
         }
     }
 
-    let finite = state.q.iter().chain(&state.qd).all(|v| v.is_finite());
-    if !finite {
+    if !sim.is_finite() {
         println!("  result:                  FAIL (non-finite state)");
         return EXIT_FAILURE;
     }
