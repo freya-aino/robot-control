@@ -1207,7 +1207,9 @@ pub fn gjk_epa(a: &Placed, b: &Placed) -> Proximity {
 /// sampled at `rim_samples` points, all with zero radius. Corners and rim samples
 /// are what let a flat-lying box or cylinder rest on several points.
 #[must_use]
-pub fn plane_contact_points(placed: &Placed, rim_samples: usize) -> Vec<(V3, f64)> {
+pub fn plane_contact_points(placed: &Placed, _rim_samples: usize) -> Vec<(V3, f64)> {
+    // The plane's normal is `+z`, which is what the ground model uses.
+    const N: V3 = [0.0, 0.0, 1.0];
     match placed.shape {
         Primitive::Sphere { radius } => vec![(placed.translation, radius)],
         Primitive::Capsule {
@@ -1218,30 +1220,78 @@ pub fn plane_contact_points(placed: &Placed, rim_samples: usize) -> Vec<(V3, f64
             vec![(p0, radius), (p1, radius)]
         }
         Primitive::Box { half } => {
-            let mut out = Vec::with_capacity(8);
+            // The four corners nearest the plane, not all eight. A box can
+            // touch a plane at a corner, along an edge or on a face, so four is
+            // the exact bound (04 section 1.4, "corner selection for a box on a
+            // plane, lower half only"). Appendix D M-04 records what returning
+            // all eight cost: the count of *force-generating* points was
+            // filtered by depth afterwards, but a face-down box still produced
+            // four and the compliance scaled with it, and for a cylinder the
+            // count was an arbitrary sampling parameter.
+            let mut corners: Vec<(V3, f64)> = Vec::with_capacity(8);
             for sx in [-1.0, 1.0] {
                 for sy in [-1.0, 1.0] {
                     for sz in [-1.0, 1.0] {
                         let local = [sx * half[0], sy * half[1], sz * half[2]];
-                        out.push((placed.to_world(local), 0.0));
+                        corners.push((placed.to_world(local), 0.0));
                     }
                 }
             }
-            out
+            corners.sort_by(|a, b| a.0[2].total_cmp(&b.0[2]));
+            corners.truncate(4);
+            corners
         }
         Primitive::Cylinder {
             radius,
             half_height,
         } => {
-            let n = rim_samples.max(3);
-            let mut out = Vec::with_capacity(2 * n);
-            for k in 0..n {
-                let angle = 2.0 * core::f64::consts::PI * (k as f64) / (n as f64);
-                let (s, c) = angle.sin_cos();
-                for z in [-half_height, half_height] {
-                    out.push((placed.to_world([radius * c, radius * s, z]), 0.0));
-                }
+            // The exact up-to-four-point rule of 04 section 1.3, in the
+            // example's order of operations. The points returned are the
+            // extreme points themselves rather than the midway contact
+            // positions, because the caller derives the depth from a point's
+            // own height.
+            let r = &placed.rotation;
+            let mut axis = [r[0][2], r[1][2], r[2][2]];
+            let mut prjaxis = dot(N, axis);
+            if prjaxis > 0.0 {
+                axis = scale(axis, -1.0);
+                prjaxis = -prjaxis;
             }
+            // Radial direction to the rim point nearest the plane: the part of
+            // `-normal` orthogonal to the axis.
+            let mut vec = sub(scale(axis, prjaxis), N);
+            let len_sqr = norm2(vec);
+            vec = if len_sqr >= 1e-30 {
+                scale(vec, radius / len_sqr.sqrt())
+            } else {
+                // The cap is parallel to the plane: any radial direction will
+                // do, and the example takes the cylinder's local x axis.
+                scale([r[0][0], r[1][0], r[2][0]], radius)
+            };
+            let prjvec = dot(vec, N);
+            let axis_h = scale(axis, half_height);
+            let prjaxis_h = prjaxis * half_height;
+
+            let mut out: Vec<(V3, f64)> = Vec::with_capacity(4);
+            // Near-cap rim point, the deepest of the four.
+            let p1 = add(add(placed.translation, vec), axis_h);
+            out.push((p1, 0.0));
+            // Far-cap rim point in the same radial direction.
+            let p2 = sub(add(placed.translation, vec), axis_h);
+            out.push((p2, 0.0));
+            // Two more near-cap rim points, at 120 degrees from the first, so
+            // the three form an equilateral triangle inscribed in the rim.
+            let vec1 = cross(vec, axis_h);
+            let n1 = norm(vec1);
+            let vec1 = if n1 > 1e-15 {
+                scale(vec1, radius * (3.0f64).sqrt() / 2.0 / n1)
+            } else {
+                [radius * (3.0f64).sqrt() / 2.0, 0.0, 0.0]
+            };
+            let base = sub(add(placed.translation, axis_h), scale(vec, 0.5));
+            out.push((add(base, vec1), 0.0));
+            out.push((sub(base, vec1), 0.0));
+            let _ = (prjaxis_h, prjvec);
             out
         }
     }
@@ -1663,7 +1713,14 @@ mod tests {
     }
 
     #[test]
-    fn plane_points_of_a_box_are_its_eight_corners() {
+    fn plane_points_of_a_box_are_its_four_lowest_corners() {
+        // This test previously asserted all eight corners, which is the
+        // behaviour Appendix D M-04 records as a defect: the count of points a
+        // shape presents to a plane decided its contact compliance, and for a
+        // box it was the whole corner set rather than the face actually facing
+        // the plane. The example's rule is the lower half only, up to four
+        // (04 section 1.4), which is also the exact geometric bound -- a box
+        // meets a plane at a corner, along an edge, or on a face.
         let b = at(
             Primitive::Box {
                 half: [0.5, 0.25, 0.1],
@@ -1671,9 +1728,95 @@ mod tests {
             [0.0, 0.0, 1.0],
         );
         let pts = plane_contact_points(&b, 8);
-        assert_eq!(pts.len(), 8);
-        let lowest = pts.iter().map(|(c, _)| c[2]).fold(f64::INFINITY, f64::min);
-        assert!((lowest - 0.9).abs() < 1e-12);
+        assert_eq!(pts.len(), 4, "the lower face only");
+        // All four are on the lower face of an axis-aligned box.
+        for (c, r) in &pts {
+            assert!((c[2] - 0.9).abs() < 1e-12, "corner at {c:?} is not lowest");
+            assert_eq!(*r, 0.0);
+        }
+        // Tilted, the four returned must still be the four lowest of the eight.
+        let tilted = Placed {
+            shape: Primitive::Box {
+                half: [0.5, 0.25, 0.1],
+            },
+            rotation: rot_z(0.4),
+            translation: [0.0, 0.0, 1.0],
+        };
+        let pts = plane_contact_points(&tilted, 8);
+        assert_eq!(pts.len(), 4);
+        let highest_kept = pts
+            .iter()
+            .map(|(c, _)| c[2])
+            .fold(f64::NEG_INFINITY, f64::max);
+        // Rebuild all eight and check the cut is at the right place.
+        let mut all: Vec<f64> = Vec::new();
+        for sx in [-1.0, 1.0] {
+            for sy in [-1.0, 1.0] {
+                for sz in [-1.0, 1.0] {
+                    all.push(tilted.to_world([sx * 0.5, sy * 0.25, sz * 0.1])[2]);
+                }
+            }
+        }
+        all.sort_by(f64::total_cmp);
+        assert!(
+            (highest_kept - all[3]).abs() < 1e-12,
+            "the kept set should be the four lowest"
+        );
+    }
+
+    #[test]
+    fn plane_points_of_a_cylinder_are_the_exact_four_point_rule() {
+        // Appendix D M-04: the cylinder used to be sampled at `RIM_SAMPLES`
+        // points per cap, sixteen in total, so changing that constant changed
+        // the contact stiffness with no parameter change. The example's rule
+        // gives at most four, chosen geometrically (04 section 1.3): the rim
+        // point nearest the plane, the matching point on the far cap, and two
+        // more on the near cap at 120 degrees, forming an inscribed
+        // equilateral triangle.
+        let radius = 0.2;
+        let half_height = 0.3;
+        // Upright: the near cap is the bottom, so three of the four points sit
+        // on it at the same height and the fourth is on the top cap.
+        let upright = at(
+            Primitive::Cylinder {
+                radius,
+                half_height,
+            },
+            [0.0, 0.0, 1.0],
+        );
+        let pts = plane_contact_points(&upright, 8);
+        assert_eq!(pts.len(), 4);
+        let mut heights: Vec<f64> = pts.iter().map(|(c, _)| c[2]).collect();
+        heights.sort_by(f64::total_cmp);
+        assert!(
+            (heights[0] - 0.7).abs() < 1e-12
+                && (heights[1] - 0.7).abs() < 1e-12
+                && (heights[2] - 0.7).abs() < 1e-12,
+            "three points on the bottom rim: {heights:?}"
+        );
+        assert!((heights[3] - 1.3).abs() < 1e-12, "one on the top rim");
+        // All of them lie on the cylinder's surface, which is what makes them
+        // contact points rather than arbitrary samples.
+        for (c, _) in &pts {
+            let radial = ((c[0]) * (c[0]) + (c[1]) * (c[1])).sqrt();
+            assert!(
+                (radial - radius).abs() < 1e-12,
+                "point {c:?} is not on the rim"
+            );
+        }
+        // The three near-cap points form an equilateral triangle: each pair is
+        // radius * sqrt(3) apart.
+        let near: Vec<V3> = pts
+            .iter()
+            .filter(|(c, _)| (c[2] - 0.7).abs() < 1e-12)
+            .map(|(c, _)| *c)
+            .collect();
+        assert_eq!(near.len(), 3);
+        let expected = radius * (3.0f64).sqrt();
+        for i in 0..3 {
+            let d = norm(sub(near[i], near[(i + 1) % 3]));
+            assert!((d - expected).abs() < 1e-9, "side {d} should be {expected}");
+        }
     }
 
     #[test]
