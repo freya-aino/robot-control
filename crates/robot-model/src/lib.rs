@@ -28,6 +28,7 @@
 pub mod actuator;
 pub mod eig;
 pub mod fixtures;
+pub mod hull;
 pub mod importer;
 pub mod joint;
 pub mod kinematics;
