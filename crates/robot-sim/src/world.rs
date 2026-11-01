@@ -84,6 +84,42 @@ pub struct Ground {
     pub friction: f64,
 }
 
+/// How a model's declared actuators are driven.
+///
+/// A USD `PhysicsDriveAPI` with a stiffness, a damping and a `targetPosition`
+/// is a position servo, and applying it as declared holds the robot at that
+/// target. That is what Isaac Sim does on load and it is faithful to the asset,
+/// but it is also a **control decision baked into the model**, and for the G1
+/// the numbers that decision rests on are suspect: the layer sets
+/// `damping = 0.0004 * stiffness` on all 29 joints to float precision, and
+/// `targetPosition = 0` on every one. Nobody tunes twenty-nine joints to a
+/// uniform damping ratio; those are generated defaults. Converted to
+/// per-radian they give a stiffness of 132 to 13183 N m/rad at a damping ratio
+/// of 0.003 to 0.03 -- a very stiff, almost undamped servo, where the real
+/// robot's published joint gains are nearer 150 N m/rad.
+///
+/// So the mode is a caller's choice rather than a default this crate makes
+/// quietly. Loading a model does not have to mean switching its motors on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ActuationMode {
+    /// The declared drive, `kp (ctrl - q) - kd qd`, clamped to `maxForce`.
+    ///
+    /// Faithful to the asset and to what a simulator reading
+    /// `PhysicsDriveAPI` applies.
+    #[default]
+    Drives,
+    /// The declared damping only, with the stiffness dropped: `-kd qd`.
+    ///
+    /// A motor that resists motion without holding a position, which is what
+    /// an unpowered geared actuator does. No target is read.
+    Damping,
+    /// No actuator force at all.
+    ///
+    /// What loading a model into MuJoCo gives before any actuator is
+    /// commanded, and the honest baseline for watching the passive dynamics.
+    Zero,
+}
+
 /// One of the model's actuators, as the example's position-servo actuator.
 ///
 /// `specs/10-actuation-sensors-plugins.md` section 2.2 builds an actuator force
@@ -819,6 +855,45 @@ impl World {
             .collect()
     }
 
+    /// Whether the declared drive gains look machine-generated rather than
+    /// tuned, and why.
+    ///
+    /// Returns `Some(reason)` when every drive shares the same
+    /// damping-to-stiffness ratio. A tuned set does not: critical damping is
+    /// `kd = 2 sqrt(kp I)`, so the ratio `kd/kp = 2 sqrt(I/kp)` varies with
+    /// each joint's own inertia and stiffness. A single ratio across every
+    /// joint is a default someone wrote once, and holding a posture with it
+    /// says more about that default than about the robot.
+    #[must_use]
+    pub fn drive_gains_look_generated(&self) -> Option<String> {
+        if self.drives.len() < 3 {
+            return None;
+        }
+        let ratios: Vec<f64> = self
+            .drives
+            .iter()
+            .filter(|d| d.kp.abs() > f64::EPSILON)
+            .map(|d| d.kd / d.kp)
+            .collect();
+        if ratios.len() < 3 {
+            return None;
+        }
+        let first = ratios[0];
+        if first.abs() <= f64::EPSILON {
+            return None;
+        }
+        let spread = ratios
+            .iter()
+            .map(|r| (r - first).abs() / first.abs())
+            .fold(0.0f64, f64::max);
+        if spread > 1e-4 {
+            return None;
+        }
+        Some(format!(
+            "every drive shares damping/stiffness = {first:.3e} s, so the gains are generated defaults rather than tuned"
+        ))
+    }
+
     /// `mj_fwdActuation` for the model's own drives: the generalized force the
     /// declared actuators produce at `(q, qd)` for the position targets
     /// `ctrl`, written into `tau`.
@@ -846,6 +921,7 @@ impl World {
         q: &[f64],
         qd: &[f64],
         ctrl: &[f64],
+        mode: ActuationMode,
         tau: &mut [f64],
     ) -> Result<(), CompositeError> {
         let nv = self.model.nv();
@@ -864,6 +940,9 @@ impl World {
             }
         }
         tau.fill(0.0);
+        if mode == ActuationMode::Zero {
+            return Ok(());
+        }
         for (drive, target) in self.drives.iter().zip(ctrl) {
             let target = match drive.ctrl_range {
                 Some((lo, hi)) => target.clamp(lo, hi),
@@ -872,9 +951,15 @@ impl World {
             let length = q[drive.qpos];
             let velocity = qd[drive.dof];
             // The example's affine gain and affine bias, as a position servo.
+            // Dropping the stiffness leaves `-kd qd`, which is the damping
+            // mode: the same declared damping, with no position to hold.
+            let kp = match mode {
+                ActuationMode::Drives => drive.kp,
+                ActuationMode::Damping | ActuationMode::Zero => 0.0,
+            };
             let force = crate::passive::affine_actuator_force(
-                [drive.kp, 0.0, 0.0],
-                [0.0, -drive.kp, -drive.kd],
+                [kp, 0.0, 0.0],
+                [0.0, -kp, -drive.kd],
                 target,
                 length,
                 velocity,
@@ -1736,7 +1821,13 @@ mod tests {
         // At the zero posture with zero targets and zero velocity, every drive
         // is at its setpoint and applies nothing.
         world
-            .actuator_torques(&state.q, &state.qd, &vec![0.0; n], &mut tau)
+            .actuator_torques(
+                &state.q,
+                &state.qd,
+                &vec![0.0; n],
+                ActuationMode::Drives,
+                &mut tau,
+            )
             .unwrap();
         assert!(
             tau.iter().all(|t| t.abs() < 1e-12),
@@ -1750,7 +1841,7 @@ mod tests {
         let target = 0.05;
         ctrl[3] = target;
         world
-            .actuator_torques(&state.q, &state.qd, &ctrl, &mut tau)
+            .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Drives, &mut tau)
             .unwrap();
         let expected = (kp * target).clamp(-limit, limit);
         let non_zero: Vec<usize> = tau
@@ -1770,7 +1861,13 @@ mod tests {
         let (_, kd, _) = world.actuator_gains()[3];
         state.qd[non_zero[0]] = 1.0;
         world
-            .actuator_torques(&state.q, &state.qd, &vec![0.0; n], &mut tau)
+            .actuator_torques(
+                &state.q,
+                &state.qd,
+                &vec![0.0; n],
+                ActuationMode::Drives,
+                &mut tau,
+            )
             .unwrap();
         assert!(
             (tau[non_zero[0]] + kd).abs() < 1e-9,
@@ -1792,7 +1889,7 @@ mod tests {
         let mut tau = vec![0.0; world.nv()];
         let ctrl = vec![1e6; n];
         world
-            .actuator_torques(&state.q, &state.qd, &ctrl, &mut tau)
+            .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Drives, &mut tau)
             .unwrap();
         for (index, (_, _, limit)) in world.actuator_gains().iter().enumerate() {
             let applied = tau.iter().fold(0.0f64, |m, t| m.max(t.abs()));
@@ -1820,7 +1917,7 @@ mod tests {
         let mut tau = vec![0.0; world.nv()];
         let state = world.rest_state();
         world
-            .actuator_torques(&state.q, &state.qd, &[], &mut tau)
+            .actuator_torques(&state.q, &state.qd, &[], ActuationMode::Drives, &mut tau)
             .unwrap();
         assert!(tau.iter().all(|t| *t == 0.0));
     }
@@ -1868,7 +1965,7 @@ mod tests {
         let mut settled_energy = 0.0f64;
         for step in 0..4000 {
             world
-                .actuator_torques(&state.q, &state.qd, &ctrl, &mut tau)
+                .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Drives, &mut tau)
                 .expect("widths match");
             world.step(&mut state, &tau).expect("the step succeeds");
             assert!(
@@ -1889,6 +1986,139 @@ mod tests {
         assert!(
             settled_energy < 0.05,
             "residual kinetic energy {settled_energy} J after settling"
+        );
+    }
+    #[test]
+    fn the_g1s_declared_drive_gains_are_generated_defaults_and_are_reported_as_such() {
+        // The reason the robot is rigid under its own drives, stated as a
+        // check rather than a footnote. Every one of the 29 drives has
+        // `damping = 0.0004 * stiffness` to float precision and
+        // `targetPosition = 0`. A tuned set cannot look like that: critical
+        // damping is `kd = 2 sqrt(kp I)`, so `kd/kp` varies with each joint's
+        // own inertia. One ratio across every joint is a default.
+        let world = World::from_profile(&g1_usd(), SimOptions::default());
+        let reason = world
+            .drive_gains_look_generated()
+            .expect("the G1's drive gains share one damping ratio");
+        assert!(
+            reason.contains("4.000e-4") || reason.contains("4.000e-04"),
+            "the reported ratio should be 4e-4: {reason}"
+        );
+        // And the consequence: converted to per-radian these are very stiff
+        // and almost undamped.
+        let gains = world.actuator_gains();
+        let kp_hi = gains.iter().map(|g| g.0).fold(0.0f64, f64::max);
+        assert!(
+            kp_hi > 10_000.0,
+            "the stiffest drive is {kp_hi} N m/rad, which is the rigidity being reported"
+        );
+    }
+
+    #[test]
+    fn the_actuation_mode_chooses_between_holding_damping_and_nothing() {
+        // Loading a model should not silently switch its motors on. The three
+        // modes are the three honest answers: apply the declared servo, apply
+        // only its damping, or apply nothing.
+        let world = World::from_profile(&g1_usd(), SimOptions::default());
+        let mut state = world.rest_state();
+        let n = world.actuator_count();
+        let mut tau = vec![0.0; world.nv()];
+        let mut ctrl = vec![0.0; n];
+        ctrl[3] = 0.05;
+        // Give the joint a velocity so damping has something to act on.
+        let dof = world
+            .model()
+            .bodies
+            .iter()
+            .find(|b| b.dof_num == 1)
+            .map(|b| b.dof_adr)
+            .expect("a hinge exists");
+        state.qd[dof] = 1.0;
+
+        world
+            .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Zero, &mut tau)
+            .unwrap();
+        assert!(
+            tau.iter().all(|t| *t == 0.0),
+            "Zero must apply no actuator force at all"
+        );
+
+        world
+            .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Damping, &mut tau)
+            .unwrap();
+        let damping_total: f64 = tau.iter().map(|t| t.abs()).sum();
+        assert!(damping_total > 0.0, "Damping should resist the velocity");
+        // Damping ignores the target: a position error produces nothing.
+        let mut tau_no_target = vec![0.0; world.nv()];
+        world
+            .actuator_torques(
+                &state.q,
+                &state.qd,
+                &vec![0.0; n],
+                ActuationMode::Damping,
+                &mut tau_no_target,
+            )
+            .unwrap();
+        assert_eq!(
+            tau, tau_no_target,
+            "Damping must not read the position target"
+        );
+
+        world
+            .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Drives, &mut tau)
+            .unwrap();
+        let drive_total: f64 = tau.iter().map(|t| t.abs()).sum();
+        assert!(
+            drive_total > damping_total,
+            "Drives adds the stiffness term on top of the damping: {drive_total} against {damping_total}"
+        );
+    }
+
+    #[test]
+    fn under_damping_only_the_g1_collapses_which_is_the_passive_answer() {
+        // The counterpart to the drive-held stance: with the stiffness dropped
+        // the robot has nothing holding its joints and folds, exactly as the
+        // zero-torque run does. Worth asserting so the two modes cannot
+        // silently become the same thing.
+        let dt_seconds = 5e-4;
+        let options = SimOptions {
+            timestep: Duration::from_secs_f64(dt_seconds),
+            condim: 3,
+            ..SimOptions::default()
+        };
+        let mut world = World::from_profile(&g1_usd(), options).with_ground(Ground {
+            height: 0.0,
+            friction: 0.8,
+        });
+        let mut state = world.rest_state();
+        let lowest = world.lowest_contact_height(&state.q).unwrap().unwrap();
+        let free = world
+            .model()
+            .bodies
+            .iter()
+            .find(|b| b.kind == JointKind::Free)
+            .expect("Free joint")
+            .clone();
+        let pelvis = free.qpos_adr + 2;
+        state.q[pelvis] = 0.005 - lowest;
+        let start = state.q[pelvis];
+        let n = world.actuator_count();
+        let ctrl = vec![0.0; n];
+        let mut tau = vec![0.0; world.nv()];
+        for step in 0..2000 {
+            world
+                .actuator_torques(&state.q, &state.qd, &ctrl, ActuationMode::Damping, &mut tau)
+                .unwrap();
+            world.step(&mut state, &tau).unwrap();
+            assert!(
+                state.q.iter().chain(&state.qd).all(|v| v.is_finite()),
+                "step {step} diverged"
+            );
+        }
+        assert!(
+            state.q[pelvis] < start - 0.05,
+            "with damping only the robot should fold; pelvis went from {start} to {}",
+            state.q[pelvis]
         );
     }
 }

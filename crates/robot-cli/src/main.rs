@@ -136,15 +136,29 @@ fn run_multibody(flags: &[String]) -> i32 {
             return invalid_flag("--contact expects penalty or impedance");
         }
     };
-    commands::sim::multibody_scene_to(
+    let actuation = match flags
+        .iter()
+        .position(|a| a == "--actuation")
+        .map(|i| flags.get(i + 1))
+    {
+        None => robot_sim::world::ActuationMode::Drives,
+        Some(Some(v)) if v == "drives" => robot_sim::world::ActuationMode::Drives,
+        Some(Some(v)) if v == "damping" => robot_sim::world::ActuationMode::Damping,
+        Some(Some(v)) if v == "zero" => robot_sim::world::ActuationMode::Zero,
+        Some(_) => {
+            return invalid_flag("--actuation expects drives, damping or zero");
+        }
+    };
+    commands::sim::multibody_scene_to(commands::sim::MultibodyRun {
         steps,
         dt_seconds,
         floating,
         zero_torque,
-        out.as_deref(),
-        scene.as_deref(),
+        out: out.as_deref(),
+        scene: scene.as_deref(),
         contact,
-    )
+        actuation,
+    })
 }
 
 fn run_eval(args: &[String]) -> i32 {

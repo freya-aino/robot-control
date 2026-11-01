@@ -18,6 +18,7 @@ use robot_model::profile::RobotProfile;
 use robot_sim::articulated::ContactModel;
 use robot_sim::contact::GroundContact;
 use robot_sim::pendulum::{Pendulum, PendulumParams, PendulumState};
+use robot_sim::world::ActuationMode;
 use robot_types::time::{ClockId, Duration, Timestamp};
 use robot_viewer::pose::{FrameDump, PoseFrame};
 use std::path::Path;
@@ -99,6 +100,31 @@ const STANCE_KD: f64 = 30.0;
 /// Clearance (m) between the lowest contact sphere's bottom and the plane at
 /// t = 0. The pelvis height is derived from this, not hard-coded.
 const STANCE_CLEARANCE: f64 = 0.005;
+
+/// Everything one `robot sim multibody` run needs.
+///
+/// A struct rather than eight positional parameters: the run grew an actuation
+/// mode and a contact-path selector, and at that width a caller cannot tell
+/// `floating` from `zero_torque` at the call site.
+pub struct MultibodyRun<'a> {
+    /// Steps to simulate.
+    pub steps: u32,
+    /// Timestep in seconds.
+    pub dt_seconds: f64,
+    /// Whether the base is free.
+    pub floating: bool,
+    /// Whether to apply no actuator torque at all, the collapse reference.
+    pub zero_torque: bool,
+    /// Directory for the frame dump and the USD replays.
+    pub out: Option<&'a Path>,
+    /// Scene layer to read the environment from.
+    pub scene: Option<&'a Path>,
+    /// Legacy contact model to use, or `None` for the corrected path.
+    pub contact: Option<ContactModel>,
+    /// How the model's declared actuators are driven.
+    pub actuation: ActuationMode,
+}
+
 /// Duration (s) that the floating-base verdict covers. `robot sim multibody`
 /// defaults its step count to this divided by `dt`.
 pub const QUALIFICATION_SECONDS: f64 = 2.0;
@@ -187,7 +213,16 @@ pub fn default_steps(dt_seconds: f64) -> Result<u32, String> {
 /// `finish` leaves the directory's earlier committed run intact.
 #[cfg(test)]
 fn multibody(steps: u32, dt_seconds: f64, floating: bool, zero_torque: bool) -> i32 {
-    multibody_scene_to(steps, dt_seconds, floating, zero_torque, None, None, None)
+    multibody_scene_to(MultibodyRun {
+        steps,
+        dt_seconds,
+        floating,
+        zero_torque,
+        out: None,
+        scene: None,
+        contact: None,
+        actuation: ActuationMode::Drives,
+    })
 }
 
 /// [`multibody`] with an optional frame directory.
@@ -199,28 +234,40 @@ pub fn multibody_to(
     zero_torque: bool,
     out: Option<&Path>,
 ) -> i32 {
-    multibody_scene_to(steps, dt_seconds, floating, zero_torque, out, None, None)
+    multibody_scene_to(MultibodyRun {
+        steps,
+        dt_seconds,
+        floating,
+        zero_torque,
+        out,
+        scene: None,
+        contact: None,
+        actuation: ActuationMode::Drives,
+    })
 }
 
 /// As [`multibody_to`], with the environment read from `scene` (a USD layer)
 /// instead of the default G1 ground scene. Every environment collider of the
 /// scene is simulated, or the run is refused.
 ///
-/// `contact` selects which simulation path runs. `None` is the corrected path
+/// `actuation` chooses how the model's declared actuators are driven; see
+/// [`ActuationMode`]. `contact` selects which simulation path runs. `None` is the corrected path
 /// -- composite-frame dynamics, exact collision manifolds and the primal
 /// Newton constraint solver -- and is what `--contact` left off now gives.
 /// `Some` keeps one of the two legacy contact models reachable, because
 /// retiring them silently would throw away the only way to reproduce a number
 /// this command printed before.
-pub fn multibody_scene_to(
-    steps: u32,
-    dt_seconds: f64,
-    floating: bool,
-    zero_torque: bool,
-    out: Option<&Path>,
-    scene: Option<&Path>,
-    contact: Option<ContactModel>,
-) -> i32 {
+pub fn multibody_scene_to(run: MultibodyRun<'_>) -> i32 {
+    let MultibodyRun {
+        steps,
+        dt_seconds,
+        floating,
+        zero_torque,
+        out,
+        scene,
+        contact,
+        actuation,
+    } = run;
     let scene_path: std::path::PathBuf =
         scene.map_or_else(|| std::path::PathBuf::from(GROUND_SCENE), Path::to_path_buf);
     if out.is_some_and(|dir| dir.as_os_str().is_empty()) {
@@ -337,7 +384,8 @@ pub fn multibody_scene_to(
     // real G1 standing pose: this is a demonstration of the solver, not
     // a balance controller. The floating base starts at an identity
     // quaternion at the origin.
-    let mut sim = super::stepper::Stepper::new(path, &profile, ground, dt_seconds, floating);
+    let mut sim =
+        super::stepper::Stepper::new(path, &profile, ground, dt_seconds, floating, actuation);
     if floating {
         // Place the pelvis so the lowest contact point sits STANCE_CLEARANCE
         // above the plane. The height is measured from the model, not assumed.

@@ -31,7 +31,7 @@ use robot_model::profile::RobotProfile;
 use robot_sim::articulated::{ArticulatedBody, ContactModel, MultibodyState};
 use robot_sim::contact::GroundContact;
 use robot_sim::options::SimOptions;
-use robot_sim::world::{Ground, State, World};
+use robot_sim::world::{ActuationMode, Ground, State, World};
 use robot_types::frames::Vec3;
 use robot_types::time::Duration;
 
@@ -82,6 +82,8 @@ pub enum Stepper {
         /// Position target per declared actuator, in the profile's actuator
         /// order. Held at the zero posture for this command.
         ctrl: Vec<f64>,
+        /// How the declared actuators are driven.
+        mode: ActuationMode,
         /// Torques written each step.
         tau: Vec<f64>,
     },
@@ -118,6 +120,7 @@ impl Stepper {
         ground: GroundContact,
         dt_seconds: f64,
         floating: bool,
+        mode: ActuationMode,
     ) -> Self {
         match path {
             Path::Corrected => {
@@ -148,6 +151,7 @@ impl Stepper {
                     pelvis_z,
                     stance_kd: vec![0.0; nv],
                     ctrl: vec![0.0; actuators],
+                    mode,
                     tau: vec![0.0; nv],
                 }
             }
@@ -187,10 +191,13 @@ impl Stepper {
     #[must_use]
     pub fn actuation(&self) -> String {
         match self {
-            Self::Corrected { world, .. } => {
+            Self::Corrected { world, mode, .. } => {
                 let n = world.actuator_count();
                 if n == 0 {
                     return "no declared drives; hand-written PD hold".to_owned();
+                }
+                if *mode == ActuationMode::Zero {
+                    return format!("{n} model drives present, none applied (--actuation zero)");
                 }
                 let gains = world.actuator_gains();
                 let kp_lo = gains.iter().map(|g| g.0).fold(f64::INFINITY, f64::min);
@@ -199,9 +206,20 @@ impl Stepper {
                 let kd_hi = gains.iter().map(|g| g.1).fold(0.0, f64::max);
                 let f_lo = gains.iter().map(|g| g.2).fold(f64::INFINITY, f64::min);
                 let f_hi = gains.iter().map(|g| g.2).fold(0.0, f64::max);
-                format!(
-                    "{n} model drives (USD PhysicsDriveAPI): stiffness {kp_lo:.2}..{kp_hi:.2}, damping {kd_lo:.4}..{kd_hi:.4}, maxForce {f_lo:.0}..{f_hi:.0} N m"
-                )
+                let what = match mode {
+                    ActuationMode::Drives => format!(
+                        "stiffness {kp_lo:.2}..{kp_hi:.2} N m/rad, damping {kd_lo:.4}..{kd_hi:.4} N m s/rad, maxForce {f_lo:.0}..{f_hi:.0} N m"
+                    ),
+                    ActuationMode::Damping => format!(
+                        "damping only, {kd_lo:.4}..{kd_hi:.4} N m s/rad (stiffness dropped), maxForce {f_lo:.0}..{f_hi:.0} N m"
+                    ),
+                    ActuationMode::Zero => unreachable!("handled above"),
+                };
+                let mut line = format!("{n} model drives (USD PhysicsDriveAPI): {what}");
+                if let Some(reason) = world.drive_gains_look_generated() {
+                    line.push_str(&format!("\n  warning:                 {reason}"));
+                }
+                line
             }
             Self::Legacy { .. } => {
                 "hand-written PD hold (the legacy path cannot read the model's drives)".to_owned()
@@ -325,6 +343,7 @@ impl Stepper {
                 state,
                 stance_kd,
                 ctrl,
+                mode,
                 tau,
                 ..
             } => {
@@ -336,7 +355,7 @@ impl Stepper {
                     // is what importing the model into any simulator that
                     // reads `PhysicsDriveAPI` would do.
                     world
-                        .actuator_torques(&state.q, &state.qd, ctrl, tau)
+                        .actuator_torques(&state.q, &state.qd, ctrl, *mode, tau)
                         .map_err(|e| e.to_string())?;
                 } else {
                     // No declared drives (a URDF import carries none), so fall
