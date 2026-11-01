@@ -33,7 +33,7 @@ use robot_types::units::{Kilograms, NewtonMetres, Radians, RadiansPerSecond, Ran
 /// Battery identifier written into every report. Its version suffix tracks
 /// the battery contents (check set, canonical tolerances, horizons) and is
 /// bumped together with [`SCHEMA_VERSION`] whenever those change.
-pub const BATTERY: &str = "shared-analytic-v7";
+pub const BATTERY: &str = "shared-analytic-v8";
 /// Scope written into every report. The archival battery covers the analytic
 /// subset only: it contains no ground-contact check, so no report qualifies
 /// the floating-base G1 contact path (ADR 0010). See [`contact_applicability`].
@@ -41,7 +41,7 @@ pub const SCOPE: &str = "analytic-subset";
 /// Schema identifier written into every report.
 pub const SCHEMA: &str = "robot-sim.fidelity-report";
 /// Schema version written into every report.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 /// File name the report is written under.
 pub const REPORT_FILE: &str = "fidelity.toml";
 /// Largest total number of integration steps [`run_battery`] accepts for one
@@ -57,7 +57,7 @@ pub const INTEGRATOR_SEMI_IMPLICIT_EULER: &str = "semi-implicit-euler";
 /// The only solver the battery can run.
 pub const SOLVER_EXPLICIT_ABA: &str = "explicit-articulated-body";
 /// The checks the battery runs at every tier, in run order.
-pub const CHECK_NAMES: [&str; 7] = [
+pub const CHECK_NAMES: [&str; 10] = [
     "pendulum_period",
     "pendulum_trajectory",
     "pd_equilibrium",
@@ -65,11 +65,18 @@ pub const CHECK_NAMES: [&str; 7] = [
     "energy_drift",
     "articulated_energy_drift",
     "free_fall",
+    // Schema v8 adds the contact, friction and collision rows. Appendix D
+    // M-20 records that the battery had none of these, and that the same
+    // region held most of the audit's findings -- an uncovered subsystem is
+    // where divergence accumulates unnoticed.
+    "plane_normal_force_balance",
+    "friction_cone_bound",
+    "narrowphase_depth",
 ];
 /// The physical system each battery check exercises, in [`CHECK_NAMES`] order.
 /// A reader rejects any row whose `system` differs from this table, so a
 /// standalone pendulum result cannot be relabelled as articulated evidence.
-const CHECK_SYSTEMS: [&str; 7] = [
+const CHECK_SYSTEMS: [&str; 10] = [
     "standalone_pendulum",
     "standalone_pendulum",
     "standalone_pendulum",
@@ -77,6 +84,9 @@ const CHECK_SYSTEMS: [&str; 7] = [
     "standalone_pendulum",
     "double_pendulum_articulated",
     "free_body_articulated",
+    "free_body_plane",
+    "free_body_plane",
+    "convex_pair_geometry",
 ];
 /// Top-level keys a report may carry. Anything else is rejected.
 const REPORT_KEYS: [&str; 11] = [
@@ -1175,6 +1185,8 @@ pub enum BatteryError {
     Pendulum(NonFiniteInput),
     /// An articulated-body evaluation was rejected.
     Dynamics(DynamicsError),
+    /// A composite-frame or constraint-solver evaluation was rejected.
+    Composite(crate::composite::CompositeError),
     /// A forward-kinematics evaluation was rejected.
     Kinematics(KinematicsError),
     /// The tiers would need more integration steps than the limit allows.
@@ -1229,6 +1241,7 @@ impl fmt::Display for BatteryError {
             ),
             Self::Pendulum(e) => write!(f, "{e}"),
             Self::Dynamics(e) => write!(f, "{e}"),
+            Self::Composite(e) => write!(f, "{e}"),
             Self::Kinematics(e) => write!(f, "{e}"),
             Self::StepBudget { required, limit } => write!(
                 f,
@@ -1346,7 +1359,7 @@ fn check_steps(checks: &[&dyn FidelityCheck], tiers: &[Tier]) -> Result<u128, Ba
 }
 
 /// The built-in checks, in [`CHECK_NAMES`] order.
-const BUILTIN_CHECKS: [&dyn FidelityCheck; 7] = [
+const BUILTIN_CHECKS: [&dyn FidelityCheck; 10] = [
     &PendulumPeriod,
     &PendulumTrajectory,
     &PdEquilibrium,
@@ -1354,7 +1367,332 @@ const BUILTIN_CHECKS: [&dyn FidelityCheck; 7] = [
     &EnergyDrift,
     &ArticulatedEnergyDrift,
     &FreeFall,
+    &PlaneNormalForceBalance,
+    &FrictionConeBound,
+    &NarrowphaseDepth,
 ];
+
+/// Tolerance for the contact force-balance check: the total normal force must
+/// match the weight to this relative error.
+const PLANE_BALANCE_TOLERANCE: f64 = 0.05;
+/// Tolerance for the friction-cone check: the largest amount by which a solved
+/// friction force may exceed `mu` times its normal force, in newtons. The
+/// feasible set is enforced exactly, so this is a rounding allowance.
+const FRICTION_CONE_TOLERANCE: f64 = 1e-9;
+/// Tolerance for the narrow-phase depth check, in metres, against the analytic
+/// sphere and capsule depths.
+const NARROWPHASE_DEPTH_TOLERANCE: f64 = 1e-6;
+/// Horizon for the contact checks.
+const PLANE_HORIZON_NANOS: u64 = 2_000_000_000;
+
+/// A free body resting on a plane through the unified solver: the total normal
+/// force must balance the weight.
+///
+/// The analytic oracle is `m g`, which involves no simulation. Appendix D M-20
+/// records that the battery had no contact, collision or constraint row at all,
+/// and that this was the region where most of the audit's findings lived; this
+/// is the force-balance half of closing that.
+fn plane_normal_force_balance(dt: Duration) -> Result<Measurement, BatteryError> {
+    use crate::composite::{com_vel, forward_dynamics, position, CompositeModel, CompositeState};
+    use crate::solver::{contact_rows, default_solimp, default_solref, solve, SolverConfig};
+
+    let mass = 2.0;
+    let profile = free_body(mass, InertiaTensor::diagonal(0.02, 0.02, 0.02));
+    let model = CompositeModel::from_profile(&profile);
+    let mut state = CompositeState::identity(&model);
+    let tau = vec![0.0; model.nv()];
+    let dt_s = dt.as_secs_f64();
+    let steps = steps_for(PLANE_HORIZON_NANOS, dt);
+    let mut warm: Option<Vec<f64>> = None;
+    let mut total = 0.0;
+    for _ in 0..steps {
+        let pos = position(&model, &state.q).map_err(BatteryError::Composite)?;
+        let (cvel, cdof_dot) = com_vel(&model, &pos, &state.qd).map_err(BatteryError::Composite)?;
+        let qacc_smooth =
+            forward_dynamics(&model, &pos, &state.qd, &tau).map_err(BatteryError::Composite)?;
+        let mut rows = Vec::new();
+        let point = [state.q[0], state.q[1], state.q[2]];
+        let depth = -point[2];
+        if depth > 0.0 {
+            contact_rows(
+                &model,
+                &pos,
+                &cvel,
+                &cdof_dot,
+                &state.qd,
+                point,
+                [0.0, 0.0, 1.0],
+                depth,
+                0,
+                None,
+                1,
+                0.0,
+                default_solref(),
+                default_solimp(),
+                0.0,
+                &mut rows,
+            )
+            .map_err(BatteryError::Composite)?;
+        }
+        let solution = solve(
+            &model,
+            &pos,
+            &state.qd,
+            &qacc_smooth,
+            &rows,
+            dt_s,
+            SolverConfig::default(),
+            warm.as_deref(),
+        )
+        .map_err(BatteryError::Composite)?;
+        total = solution.force.iter().sum();
+        warm = Some(solution.force.clone());
+        for (v, a) in state.qd.iter_mut().zip(&solution.qacc) {
+            *v += dt_s * a;
+        }
+        let qd = state.qd.clone();
+        crate::composite::integrate_pos(&model, &mut state.q, &qd, dt_s)
+            .map_err(BatteryError::Composite)?;
+    }
+    let weight = mass * GRAVITY;
+    Ok(Measurement::new(
+        (total - weight).abs() / weight,
+        steps as usize,
+    ))
+}
+
+/// A body sliding on a plane under friction: every solved friction force must
+/// lie inside the cone.
+///
+/// The oracle is the feasible set itself, `|f_t| <= mu f_n`, which is a
+/// property of the solution rather than a reference trajectory. Appendix D
+/// M-10 records that friction used to be applied outside the solve and so was
+/// never bounded by the normal force it was supposed to come from.
+fn friction_cone_bound(dt: Duration) -> Result<Measurement, BatteryError> {
+    use crate::composite::{com_vel, forward_dynamics, position, CompositeModel, CompositeState};
+    use crate::solver::{contact_rows, default_solimp, default_solref, solve, SolverConfig};
+
+    let mu = 0.8;
+    let profile = free_body(2.0, InertiaTensor::diagonal(0.02, 0.02, 0.02));
+    let model = CompositeModel::from_profile(&profile);
+    let mut state = CompositeState::identity(&model);
+    state.qd[0] = 1.0;
+    let tau = vec![0.0; model.nv()];
+    let dt_s = dt.as_secs_f64();
+    let steps = steps_for(PLANE_HORIZON_NANOS, dt);
+    let mut warm: Option<Vec<f64>> = None;
+    let mut worst = 0.0f64;
+    let mut worst_at = 0usize;
+    for step in 0..steps {
+        let pos = position(&model, &state.q).map_err(BatteryError::Composite)?;
+        let (cvel, cdof_dot) = com_vel(&model, &pos, &state.qd).map_err(BatteryError::Composite)?;
+        let qacc_smooth =
+            forward_dynamics(&model, &pos, &state.qd, &tau).map_err(BatteryError::Composite)?;
+        let mut rows = Vec::new();
+        let point = [state.q[0], state.q[1], state.q[2]];
+        let depth = -point[2];
+        if depth > 0.0 {
+            contact_rows(
+                &model,
+                &pos,
+                &cvel,
+                &cdof_dot,
+                &state.qd,
+                point,
+                [0.0, 0.0, 1.0],
+                depth,
+                0,
+                None,
+                3,
+                mu,
+                default_solref(),
+                default_solimp(),
+                0.0,
+                &mut rows,
+            )
+            .map_err(BatteryError::Composite)?;
+        }
+        let solution = solve(
+            &model,
+            &pos,
+            &state.qd,
+            &qacc_smooth,
+            &rows,
+            dt_s,
+            SolverConfig::default(),
+            warm.as_deref(),
+        )
+        .map_err(BatteryError::Composite)?;
+        if !solution.force.is_empty() {
+            let normal = solution.force[0].max(0.0);
+            for ft in &solution.force[1..] {
+                let excess = ft.abs() - mu * normal;
+                if excess > worst {
+                    worst = excess;
+                    worst_at = step as usize;
+                }
+            }
+        }
+        warm = Some(solution.force.clone());
+        for (v, a) in state.qd.iter_mut().zip(&solution.qacc) {
+            *v += dt_s * a;
+        }
+        let qd = state.qd.clone();
+        crate::composite::integrate_pos(&model, &mut state.q, &qd, dt_s)
+            .map_err(BatteryError::Composite)?;
+    }
+    Ok(Measurement::new(worst.max(0.0), worst_at))
+}
+
+/// The narrow phase against analytic penetration depths, over a deterministic
+/// sweep of separations, testing each path where it is meant to be exact.
+///
+/// Two oracles, both closed forms:
+///
+/// - The **analytic** sphere path against `ra + rb - d`, which is what
+///   `proximity` uses for any sphere or capsule pair and which should be exact
+///   to rounding.
+/// - The **general** signed-volume GJK and expanding-polytope path against the
+///   separating-axis depth of a box pair. Boxes are polyhedral, so the
+///   expansion terminates on an exact face rather than approximating a curve,
+///   and this is where the general path can be held to a tight bound.
+///
+/// Deliberately *not* measured here: the general path on a curved surface. EPA
+/// polyhedralises the boundary, so its accuracy there is bounded by the face
+/// budget, measured at 1.6e-4 on a deeply overlapping sphere pair with the
+/// default budget. That is a real limit of the method rather than a defect, it
+/// is configurable through `options::CcdConfig`, and in production no sphere or
+/// capsule pair reaches the general path because `proximity` routes them to the
+/// analytic one. Holding the battery to a bound the method cannot meet would
+/// make the row meaningless.
+///
+/// This check is geometry only, so it is independent of the timestep and
+/// reports the same value at every tier. Appendix D M-20 records that the
+/// battery had no collision row at all; writing this one immediately found a
+/// genuine gap, the missing two-vertex polytope construction, which made a
+/// head-on sphere collision report no contact.
+fn narrowphase_depth(_dt: Duration) -> Result<Measurement, BatteryError> {
+    use crate::collision::{box_sat, gjk_epa, proximity, Placed, Primitive, Proximity};
+
+    const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let depth_of = |p: Proximity| match p {
+        Proximity::Overlap(c) => c.depth,
+        Proximity::Apart { .. } => 0.0,
+    };
+    let mut worst = 0.0f64;
+    let mut worst_at = 0usize;
+    let mut note = |err: f64, at: usize| {
+        if err > worst {
+            worst = err;
+            worst_at = at;
+        }
+    };
+
+    // The analytic sphere path against the closed form.
+    let (ra, rb) = (0.3, 0.2);
+    for i in 0..50usize {
+        let d = 0.05 + 0.009 * (i as f64);
+        let a = Placed {
+            shape: Primitive::Sphere { radius: ra },
+            rotation: IDENTITY,
+            translation: [0.0, 0.0, 0.0],
+        };
+        let b = Placed {
+            shape: Primitive::Sphere { radius: rb },
+            rotation: IDENTITY,
+            translation: [d, 0.0, 0.0],
+        };
+        let analytic = (ra + rb - d).max(0.0);
+        note((depth_of(proximity(&a, &b)) - analytic).abs(), i);
+    }
+
+    // The general path on boxes against the separating-axis depth, which is
+    // computed by a different routine from a different formulation.
+    for i in 0..50usize {
+        let d = 0.2 + 0.016 * (i as f64);
+        let a = Placed {
+            shape: Primitive::Box {
+                half: [0.5, 0.4, 0.3],
+            },
+            rotation: IDENTITY,
+            translation: [0.0, 0.0, 0.0],
+        };
+        let b = Placed {
+            shape: Primitive::Box {
+                half: [0.5, 0.4, 0.3],
+            },
+            rotation: IDENTITY,
+            translation: [d, 0.07, -0.05],
+        };
+        let Some((sat_depth, _)) = box_sat(&b, &a) else {
+            continue;
+        };
+        note((depth_of(gjk_epa(&b, &a)) - sat_depth).abs(), 50 + i);
+    }
+
+    Ok(Measurement::new(worst, worst_at))
+}
+
+struct PlaneNormalForceBalance;
+
+impl FidelityCheck for PlaneNormalForceBalance {
+    fn name(&self) -> &'static str {
+        "plane_normal_force_balance"
+    }
+    fn system(&self) -> &'static str {
+        system_of(self.name())
+    }
+    fn tolerance(&self) -> f64 {
+        PLANE_BALANCE_TOLERANCE
+    }
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(plane_normal_force_balance(tier.timestep)?))
+    }
+    fn steps(&self, tier: &Tier) -> u64 {
+        steps_for(PLANE_HORIZON_NANOS, tier.timestep)
+    }
+}
+
+struct FrictionConeBound;
+
+impl FidelityCheck for FrictionConeBound {
+    fn name(&self) -> &'static str {
+        "friction_cone_bound"
+    }
+    fn system(&self) -> &'static str {
+        system_of(self.name())
+    }
+    fn tolerance(&self) -> f64 {
+        FRICTION_CONE_TOLERANCE
+    }
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(friction_cone_bound(tier.timestep)?))
+    }
+    fn steps(&self, tier: &Tier) -> u64 {
+        steps_for(PLANE_HORIZON_NANOS, tier.timestep)
+    }
+}
+
+struct NarrowphaseDepth;
+
+impl FidelityCheck for NarrowphaseDepth {
+    fn name(&self) -> &'static str {
+        "narrowphase_depth"
+    }
+    fn system(&self) -> &'static str {
+        system_of(self.name())
+    }
+    fn tolerance(&self) -> f64 {
+        NARROWPHASE_DEPTH_TOLERANCE
+    }
+    fn measure(&self, tier: &Tier) -> Result<Option<Measurement>, BatteryError> {
+        Ok(Some(narrowphase_depth(tier.timestep)?))
+    }
+    fn steps(&self, _tier: &Tier) -> u64 {
+        // Geometry only: no integration, so no steps to budget.
+        0
+    }
+}
 
 fn tier_checks(tier: &Tier, max_steps: u64) -> Result<Vec<Check>, BatteryError> {
     run_checks_inner(&BUILTIN_CHECKS, tier, false, max_steps)
@@ -2263,11 +2601,11 @@ mod tests {
     }
 
     #[test]
-    fn v7_report_round_trips_the_per_check_sample_index() {
+    fn v8_report_round_trips_the_per_check_sample_index() {
         let report = declared();
         let text = report.to_toml();
-        assert!(text.contains("schema_version = 7"));
-        assert!(text.contains("battery = \"shared-analytic-v7\""));
+        assert!(text.contains("schema_version = 8"));
+        assert!(text.contains("battery = \"shared-analytic-v8\""));
         let parsed = FidelityReport::from_toml(&text).unwrap();
         assert_eq!(parsed, report);
         let stored = declared_check("reference", "aba_rne_closed_form");
@@ -2413,11 +2751,11 @@ mod tests {
     }
 
     #[test]
-    fn v7_reader_refuses_a_v6_report() {
+    fn v8_reader_refuses_a_v7_report() {
         let text = declared()
             .to_toml()
-            .replace("schema_version = 7", "schema_version = 6")
-            .replace("shared-analytic-v7", "shared-analytic-v6");
+            .replace("schema_version = 8", "schema_version = 7")
+            .replace("shared-analytic-v8", "shared-analytic-v7");
         assert!(matches!(
             FidelityReport::from_toml(&text),
             Err(ReportError::Invalid(_))
@@ -2962,9 +3300,12 @@ mod tests {
 
     #[test]
     fn declared_tiers_fit_the_battery_step_budget() {
+        // Schema v8 adds the two contact checks, each over a 2 s horizon at
+        // both declared tiers, which is where the increase from v7's 539 000
+        // comes from. The narrow-phase check integrates nothing.
         let required = battery_steps(&declared_tiers()).unwrap();
-        assert_eq!(required, 539_000);
-        assert_eq!(required + u128::from(G1_PROBE_MAX_STEPS), 543_000);
+        assert_eq!(required, 583_000);
+        assert_eq!(required + u128::from(G1_PROBE_MAX_STEPS), 587_000);
         assert!(required <= u128::from(MAX_BATTERY_STEPS));
     }
 
@@ -2988,7 +3329,9 @@ mod tests {
     #[test]
     fn explicit_step_limit_is_enforced_exactly() {
         let coarse = [declared_tiers()[1].clone()];
-        let required = 49_000 + G1_PROBE_MAX_STEPS;
+        // v7's 49 000 plus the two schema-v8 plane-contact checks, each a 2 s
+        // horizon at the coarse tier's 1 ms step.
+        let required = 53_000 + G1_PROBE_MAX_STEPS;
         assert!(matches!(
             run_battery_with_limit(&coarse, required - 1),
             Err(BatteryError::StepBudget {
@@ -3058,6 +3401,13 @@ mod tests {
             assert!(!c.reason.contains("qualified at") || c.reason.contains("not qualified"));
         }
         assert_eq!(report_scope_text(), SCOPE);
+        // No battery check may be named "contact": the report's own
+        // `[[contact]]` rows are about whether G1 ground-contact qualification
+        // applies at a tier, and a check whose name collided with that could be
+        // read as claiming it. Schema v8 adds plane-contact and friction rows
+        // to the battery, and they are named for what they measure
+        // (`plane_normal_force_balance`, `friction_cone_bound`) precisely so
+        // this guard keeps its meaning.
         assert!(CHECK_NAMES.iter().all(|name| !name.contains("contact")));
     }
 

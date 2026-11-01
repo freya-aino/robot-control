@@ -638,6 +638,32 @@ fn test_tetra(p: [V3; 4]) -> bool {
         && same_side(p[3], p[0], p[1], p[2])
 }
 
+/// `rayTriangle` of 05 section 6.1: whether the segment `v1..v2` passes through
+/// the triangle `v3, v4, v5`, by the sign agreement of three signed volumes.
+fn ray_triangle(v1: V3, v2: V3, v3: V3, v4: V3, v5: V3) -> bool {
+    let d12 = sub(v2, v1);
+    let d13 = sub(v3, v1);
+    let d14 = sub(v4, v1);
+    let d15 = sub(v5, v1);
+    let vol1 = det3(d13, d14, d12);
+    let vol2 = det3(d14, d15, d12);
+    let vol3 = det3(d15, d13, d12);
+    let all_pos = vol1 >= 0.0 && vol2 >= 0.0 && vol3 >= 0.0;
+    let all_neg = vol1 <= 0.0 && vol2 <= 0.0 && vol3 <= 0.0;
+    all_pos || all_neg
+}
+
+/// Rodrigues rotation of `v` by 120 degrees about the unit axis `u`
+/// (`rotmat` of 05 section 6.1, with the example's own sine and cosine).
+fn rotate_120(u: V3, v: V3) -> V3 {
+    const S: f64 = 0.866_025_403_78;
+    const C: f64 = -0.5;
+    // v*c + (u x v)*s + u*(u.v)*(1-c)
+    let uxv = cross(u, v);
+    let ud = dot(u, v);
+    add(add(scale(v, C), scale(uxv, S)), scale(u, ud * (1.0 - C)))
+}
+
 /// The initial polytope for the expansion: its vertices and the index triples
 /// of its faces, from 05 section 6.1.
 ///
@@ -715,6 +741,65 @@ fn build_polytope(
                 [3, 1, 0],
                 [3, 0, 2],
                 [3, 2, 1],
+            ];
+            Some((verts, faces))
+        }
+        2 => {
+            // polytope2: a segment. Three support points taken at 120 degrees
+            // around the segment direction give a hexahedron over five
+            // vertices.
+            //
+            // This case is not an exotic one, which is why leaving it out was a
+            // real gap rather than a documented limitation. A head-on
+            // collision between two convex shapes -- two spheres on a line,
+            // the most ordinary contact there is -- reduces the simplex to
+            // exactly two points straddling the origin, and the randomised
+            // capsule fuzz never produces it because random orientations are
+            // never collinear. It was the deterministic narrow-phase oracle
+            // added for Appendix D M-20 that surfaced it, on its very first
+            // sample.
+            let (v1, v2) = (simplex[0].w, simplex[1].w);
+            let diff = sub(v2, v1);
+            let dn = norm(diff);
+            if dn <= 1e-300 {
+                return None;
+            }
+            let u = scale(diff, 1.0 / dn);
+            // The coordinate axis least aligned with the segment, so the first
+            // probe direction is well conditioned.
+            let axis = {
+                let mut k = 0;
+                for i in 1..3 {
+                    if diff[i].abs() < diff[k].abs() {
+                        k = i;
+                    }
+                }
+                let mut e = [0.0; 3];
+                e[k] = 1.0;
+                e
+            };
+            let d1 = cross(axis, diff);
+            if norm2(d1) <= 1e-300 {
+                return None;
+            }
+            let d2 = rotate_120(u, d1);
+            let d3 = rotate_120(u, d2);
+            let v3 = msupport(a, b, d1);
+            let v4 = msupport(a, b, d2);
+            let v5 = msupport(a, b, d3);
+            // "P2_NONCONVEX": the segment must pass through the triangle the
+            // three probes span, or the hexahedron does not contain the origin.
+            if !ray_triangle(v1, v2, v3.w, v4.w, v5.w) {
+                return None;
+            }
+            let verts = vec![simplex[0], simplex[1], v3, v4, v5];
+            let faces = vec![
+                [0, 2, 3],
+                [0, 4, 2],
+                [0, 3, 4],
+                [1, 3, 2],
+                [1, 2, 4],
+                [1, 4, 3],
             ];
             Some((verts, faces))
         }

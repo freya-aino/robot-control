@@ -259,3 +259,58 @@ and tolerances aligned with the archival reader's canonical tables.
   currently a copy of the `articulated.rs` test fixtures in `fidelity.rs`, not a
   shared module; consolidating them into one `pub(crate)` fixture module is an
   open follow-up.
+
+## Amendment: schema v8, the contact, friction and collision rows (2026-11-01)
+
+`shared-analytic-v7` becomes `shared-analytic-v8`, `SCHEMA_VERSION` becomes 8,
+and a v8 reader refuses a v7 report, as each earlier bump has done. The change
+is a check-set change, which this record's own rule says requires a new battery
+identifier and a new schema version.
+
+**What changed.** Three checks are added, taking the battery from seven to ten:
+
+| Check | System | Oracle | Tolerance |
+| --- | --- | --- | --- |
+| `plane_normal_force_balance` | `free_body_plane` | `m g`, a closed form | 0.05 relative |
+| `friction_cone_bound` | `free_body_plane` | the feasible set `abs(f_t) <= mu f_n` | 1e-9 N |
+| `narrowphase_depth` | `convex_pair_geometry` | sphere-pair closed form, and the separating-axis depth of a box pair | 1e-6 m |
+
+All three are oracles of the kinds `crates/robot-sim/specs/04-fidelity-loop.md`
+already admits: two closed forms and one feasible-set property. None compares
+against a foreign simulator, and nothing in this amendment changes an existing
+check, tolerance or horizon.
+
+**Why.** `crates/robot-sim/specs/appendix-d-mathematical-challenges.md` entry
+M-20 recorded that every one of the seven v7 checks exercised a one-degree-of-
+freedom pendulum, a single free body, or a PD equilibrium, and that nothing in
+the battery touched a contact force, a collision routine, the joint-limit solve
+or the constraint solver. Eleven of that audit's twenty-four entries were in
+exactly that uncovered region. The appendix argued the two facts were related,
+and writing these rows bore that out immediately: the first sample of
+`narrowphase_depth` exposed a missing two-vertex polytope construction that made
+a head-on collision between two convex shapes report no contact at all. The
+randomised fuzz tests had never produced that configuration because random
+orientations are never collinear.
+
+**Step budget.** The declared tiers now need 583 000 steps against v7's 539 000.
+The two plane-contact checks run a 2 s horizon at each declared tier;
+`narrowphase_depth` is geometry only and integrates nothing, so it declares zero
+steps. The total remains inside `MAX_BATTERY_STEPS`.
+
+**Naming.** A battery check may not have "contact" in its name, and a test
+enforces it. The report's own `[[contact]]` rows are about whether G1
+ground-contact qualification applies at a tier, and a check whose name collided
+with that could be read as claiming it. The new rows are therefore named for
+what they measure, which is why the force-balance check is
+`plane_normal_force_balance` rather than anything shorter.
+
+**What these rows do not claim.** They qualify the solver and the narrow phase
+on single-body analytic setups. They are not G1 ground-contact qualification,
+they do not exercise the legacy penalty contact path, and the
+`narrowphase_depth` row deliberately measures each collision path only where it
+is meant to be exact: the analytic path on spheres, and the general
+signed-volume path on boxes. The general path on a curved surface is bounded by
+the expanding polytope's face budget, measured at 1.6e-4 on a deeply
+overlapping sphere pair at the default budget, which is a property of the method
+and is configurable through `robot_sim::options::CcdConfig`. Holding the battery
+to a bound the method cannot meet would make the row meaningless.
