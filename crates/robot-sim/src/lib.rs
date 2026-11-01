@@ -68,6 +68,7 @@ pub mod env;
 pub mod fidelity;
 pub mod integrators;
 pub mod multibody_env;
+pub mod newton;
 pub mod options;
 pub mod oracle;
 pub mod passive;
