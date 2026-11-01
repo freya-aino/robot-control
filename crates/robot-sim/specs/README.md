@@ -6,8 +6,9 @@ Status: proposed architecture for `robot-sim`'s physics layer. Not ratified; no 
 
 | Field | Value |
 | --- | --- |
-| Document version | 0.1.6-draft |
+| Document version | 0.1.7-draft |
 | Last revised | 2026-11-01 |
+| Change in 0.1.7-draft | **M-27 resolved**: mesh colliders are reduced to their convex hull at import (`robot_model::hull`) and contacted through the support query `argmax_i (v_i . d)` that `mjc_meshSupport` computes. The G1 reports 33 collision shapes modelled and 0 not modelled, exactly what its layer declares, and `usd::PROXY_LINKS` is gone with the two boxes it fabricated. The reduction is exact rather than an approximation, because the support function of a point set equals the support function of its convex hull — every hull test asserts that directly, in 144 directions, rather than asserting a vertex count. Two costs remain and are stated as such: the support query still scans (the example hill-climbs a vertex adjacency graph above ten vertices), and a plane-hull contact is one point because the three extra contacts of `mjc_PlaneConvex` need polygon topology a vertex hull does not carry |
 | Change in 0.1.6-draft | The example's specifications are **MUST**, in the normative sense of `SPECS.md`: where pre-existing mathematics works differently it is **overwritten**, not recorded as a deviation. [Appendix D](appendix-d-mathematical-challenges.md) section 1.0.2 states the rule and the three categories a reader must tell apart — a competing formulation (defect, overwritten), a second implementation used as an oracle (kept, and not a deviation), and a stricter input contract (kept, re-labelled validation). Overwritten under it: the per-point penalty contact and the `--contact` selector that reached it are gone, and `contact::plane_sphere_contact` takes the plane's own frame instead of assuming `+z`. `articulated`'s articulated-body recursions and `constraint::solve_equality` are kept and labelled in their own module documentation as oracles, because removing them would leave the primary path unvalidatable |
 | Change in 0.1.5-draft | Reworks every step file against the example's implementation of these dynamics and against the problems now measured. The switch-over is done: `world::World` runs composite dynamics, exact collision manifolds and the unified constraint solver, and `robot sim multibody` runs it by default (M-17 closed). `newton` adds the primal solver of example `08` section 6 and is the **default**, on a measured convergence argument rather than a preference — Gauss-Seidel needs 1011 sweeps on sixteen pyramidal rows where Newton needs one. The friction cone is corrected to the example's generator-direction pyramid, which is the inscribed diamond, not the circumscribed square an earlier pass built (41 per cent too much diagonal friction). The model's declared actuators are simulated (M-25) in the model's own units (M-26). Four entries open: **M-22** GPU f32 and degree-of-freedom cap, **M-27** 15 of the G1's 33 colliders unsimulated plus two fabricated bounding-box proxies, **M-28** the declared drive gains are generated defaults. [Appendix D](appendix-d-mathematical-challenges.md) section 1.7 is the current status and supersedes 1.6 |
 | Change in 0.1.4-draft | Records the second correction pass. Fourteen of Appendix D's twenty-four entries are now closed; [Appendix D](appendix-d-mathematical-challenges.md) section 1.6 is the current status table and supersedes 1.5, with 1.6.1 and 1.6.2 stating what the two remaining entries need. New in `robot-sim`: `solver` (the unified constraint problem of `07` and `08`) and `options` (the per-run fidelity knobs of Section 12.1). The battery moves to schema v8 with a plane force-balance, a friction-cone and a narrow-phase row (ADR 0008 amendment) |
@@ -38,15 +39,17 @@ Each step file links back to this index in its first line. Cross-references to o
 
 Four Appendix D entries are open. In the order the dependencies run:
 
-1. **M-27 — mesh collision** ([07](07-collision-pipeline.md) item 2 and
-   [08](08-model-compilation-and-sensors.md) item 3, both MUSTs). 15 of the G1's
-   33 colliders are meshes and are not collided at all; two axis-aligned
-   bounding boxes the model does not declare stand in on the pelvis and torso.
-   Every contact claim about a link the model describes only by mesh is
-   currently a claim about geometry that is not there. The fix is bounded:
-   `collision::gjk_epa` already accepts any shape answering a support query, so
-   a convex hull is a vertex cloud and `argmax_i (v_i . d)`. Open decision
-   S-11 (hull or decomposition).
+1. **Narrow-phase support cost** ([07](07-collision-pipeline.md)). M-27 is
+   resolved and every one of the G1's 33 colliders is now simulated, but the
+   support query over a hull is still an exhaustive scan and the pelvis hull is
+   5583 vertices. Example 04 section 1.5 answers this with
+   `mjc_hillclimbSupport`, walking a vertex adjacency graph above a ten-vertex
+   threshold. A cost, not a different answer: a 2-second G1 stance at 0.5 ms
+   runs in 8.5 s of wall clock today, so this is the first thing that will stop
+   being affordable. The same change would supply the polygon topology
+   `mjc_PlaneConvex` needs for its three extra plane-hull contacts, so a hull
+   lying flat on the plane stops getting a single contact it cannot resist
+   tipping about.
 2. **M-28 — the declared drive gains** ([05](05-passive-forces-and-actuators.md)).
    Not a code defect: the actuators are simulated correctly, at correct units,
    and the gains they carry are generated defaults. Open decision S-10 (what a
@@ -100,7 +103,7 @@ Appendices:
 | [appendix-a-citations.md](appendix-a-citations.md) | Appendix A — Citation ledger |
 | [appendix-b-open-questions.md](appendix-b-open-questions.md) | Appendix B — Open questions (S-01 to S-06; S-07 to S-09 resolved) |
 | [appendix-c-existing-code.md](appendix-c-existing-code.md) | Appendix C — Relationship to existing `robot-sim` code |
-| [appendix-d-mathematical-challenges.md](appendix-d-mathematical-challenges.md) | Appendix D — Mathematical and algorithmic challenges to the current implementation (M-01 to M-28; 24 closed, M-22, M-27 and M-28 open) |
+| [appendix-d-mathematical-challenges.md](appendix-d-mathematical-challenges.md) | Appendix D — Mathematical and algorithmic challenges to the current implementation (M-01 to M-28; 26 closed, M-22 and M-28 open) |
 
 ## Old-to-new section map
 

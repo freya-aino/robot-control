@@ -307,6 +307,17 @@ fn replay_shape(index: usize, shape: &robot_model::link::CollisionShape) -> Repl
             },
             format!("cylinder_{index}"),
         ),
+        // A reduced hull is written as a reference to the mesh it came from,
+        // so the replay shows the asset's own geometry. The hull's vertices are
+        // what the simulation contacted, and they are a subset of that mesh's,
+        // so the reference is accurate about provenance without claiming the
+        // replay renders the exact collision shape.
+        CollisionGeometry::ConvexHull { source, .. } => (
+            ReplayShapeKind::MeshReference {
+                path: source.clone(),
+            },
+            format!("hull_{index}"),
+        ),
         CollisionGeometry::Mesh { content_id, .. } => (
             ReplayShapeKind::MeshReference {
                 path: content_id.clone(),

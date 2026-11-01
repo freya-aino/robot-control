@@ -57,11 +57,27 @@ use robot_types::frames::Vec3;
 use robot_types::rng::{Rng, SeedStream};
 use robot_types::time::Duration;
 
+/// How a shape's geometry is stored.
+///
+/// A closed-form primitive carries its own parameters. A hull carries an index
+/// into [`World::hulls`] instead of the vertex slice itself, because a `World`
+/// owning both the vertices and a slice into them would be
+/// self-referential. [`World::place`] takes `&self` and hands out a
+/// `Placed<'_>` borrowing from that store, which ties the borrow to exactly the
+/// right scope.
+#[derive(Clone, Copy, Debug)]
+enum ShapeGeom {
+    /// A sphere, box, capsule or cylinder: no borrow.
+    Closed(Primitive<'static>),
+    /// A convex hull, by index into the world's hull store.
+    Hull(usize),
+}
+
 /// A collision shape attached to a body, in that body's own frame.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     body: usize,
-    shape: Primitive,
+    geom: ShapeGeom,
     rotation: [[f64; 3]; 3],
     translation: [f64; 3],
     contype: u32,
@@ -212,8 +228,10 @@ pub struct World {
     options: SimOptions,
     /// Previous step's constraint forces, for warm starting.
     warm: Vec<f64>,
-    /// Collision shapes that could not be modelled (meshes).
+    /// Collision shapes that could not be modelled (raw, unreduced meshes).
     unmodelled: usize,
+    /// Hull vertices, one entry per hull shape, in that shape's own frame.
+    hulls: Vec<Vec<[f64; 3]>>,
 }
 
 /// Position and velocity in the composite model's internal ordering.
@@ -261,6 +279,7 @@ impl World {
         let model = CompositeModel::from_profile(profile);
         let order = profile.topological_link_order();
         let mut shapes = Vec::new();
+        let mut hulls: Vec<Vec<[f64; 3]>> = Vec::new();
         let mut limits = vec![None; model.bodies.len()];
         let mut effort = vec![0.0; model.bodies.len()];
         let mut actuated_index: Vec<Option<usize>> = vec![None; model.bodies.len()];
@@ -289,26 +308,39 @@ impl World {
             };
             for shape in &link.collision {
                 let primitive = match &shape.geometry {
-                    CollisionGeometry::Sphere { radius } => {
-                        Some(Primitive::Sphere { radius: *radius })
+                    // A reduced hull is a convex shape the narrow phase can
+                    // contact, through the same support query every other
+                    // primitive answers. A raw, unreduced mesh is not convex
+                    // and must not reach a convex-convex routine
+                    // (`specs/07` item 2), so it stays uncounted.
+                    CollisionGeometry::ConvexHull { points, .. } => {
+                        hulls.push(points.iter().map(|p| [p.x, p.y, p.z]).collect());
+                        Some(ShapeGeom::Hull(hulls.len() - 1))
                     }
-                    CollisionGeometry::Box { half_extents } => Some(Primitive::Box {
-                        half: [half_extents.x, half_extents.y, half_extents.z],
-                    }),
-                    CollisionGeometry::Cylinder { radius, length } => Some(Primitive::Cylinder {
-                        radius: *radius,
-                        half_height: 0.5 * length,
-                    }),
+                    CollisionGeometry::Sphere { radius } => {
+                        Some(ShapeGeom::Closed(Primitive::Sphere { radius: *radius }))
+                    }
+                    CollisionGeometry::Box { half_extents } => {
+                        Some(ShapeGeom::Closed(Primitive::Box {
+                            half: [half_extents.x, half_extents.y, half_extents.z],
+                        }))
+                    }
+                    CollisionGeometry::Cylinder { radius, length } => {
+                        Some(ShapeGeom::Closed(Primitive::Cylinder {
+                            radius: *radius,
+                            half_height: 0.5 * length,
+                        }))
+                    }
                     CollisionGeometry::Mesh { .. } => None,
                 };
                 match primitive {
-                    Some(p) => {
+                    Some(geom) => {
                         let q = shape.pose.rotation;
                         let c = shape.pose.translation;
                         let r = crate::spatial::rotation_from_quat(q.w, q.x, q.y, q.z);
                         shapes.push(Shape {
                             body: index,
-                            shape: p,
+                            geom,
                             rotation: [[r[0], r[1], r[2]], [r[3], r[4], r[5]], [r[6], r[7], r[8]]],
                             translation: [c.x, c.y, c.z],
                             contype: 1,
@@ -373,6 +405,7 @@ impl World {
         }
 
         Self {
+            hulls,
             drives,
             actuated_index,
             actuated_count,
@@ -526,7 +559,7 @@ impl World {
     }
 
     /// The world placement of a shape.
-    fn place(&self, s: &Shape, pos: &Position) -> Placed {
+    fn place(&self, s: &Shape, pos: &Position) -> Placed<'_> {
         let rb = pos.xmat[s.body];
         let tb = pos.xpos[s.body];
         let mut rotation = [[0.0; 3]; 3];
@@ -541,7 +574,12 @@ impl World {
             rb[6] * s.translation[0] + rb[7] * s.translation[1] + rb[8] * s.translation[2] + tb[2],
         ];
         Placed {
-            shape: s.shape,
+            shape: match s.geom {
+                ShapeGeom::Closed(p) => p,
+                ShapeGeom::Hull(i) => Primitive::Hull {
+                    points: &self.hulls[i],
+                },
+            },
             rotation,
             translation,
         }

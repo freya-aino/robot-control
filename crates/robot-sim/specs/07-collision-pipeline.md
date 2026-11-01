@@ -2,10 +2,10 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md)
 
-**Status**: **Implemented for primitives; mesh collision is the open gap and it
-is a MUST.** Items 1, 3, 4 and the GJK/EPA half of item 2 are met. Item 2's
-convex-hull requirement for meshes is **not**, and Appendix D M-27 records what
-that costs on the G1.
+**Status**: **Implemented, including mesh collision.** Items 1 to 4 are met
+except the mid-phase bounding-volume tree. The G1 reports 33 collision shapes
+modelled and 0 not modelled, which is exactly what its layer declares; Appendix
+D M-27 is resolved.
 
 What runs:
 
@@ -27,9 +27,25 @@ What runs:
   rule — instead of sampling a shape into points.
 - **Margin and gap** per run (item 4), through `options::SimOptions`.
 
-Still absent: the **mid-phase bounding-volume tree** (item 1's third stage),
-which only meshes need, and **mesh convex hulls** (item 2, and
-[08](08-model-compilation-and-sensors.md) item 3).
+- **Mesh colliders**: reduced to their convex hull at import by
+  `robot_model::hull`, and contacted through the same support query every other
+  primitive answers — `argmax_i (v_i . d)`, which is `mjc_meshSupport`
+  (example 04 section 1.5). `collision::Primitive::Hull` borrows the vertices
+  rather than owning them, so a hull costs no allocation per query.
+
+Still absent, and each a cost rather than a wrong answer:
+
+- The **mid-phase bounding-volume tree** (item 1's third stage).
+- **Hill-climbing support** (`mjc_hillclimbSupport`). The example scans
+  exhaustively below ten vertices and walks a vertex adjacency graph above it;
+  this implementation scans at every size. The pelvis hull is 5583 vertices, so
+  the scan is the dominant narrow-phase cost on a mesh pair. A 2-second G1
+  stance at 0.5 ms runs in 8.5 s of wall clock today, so it is affordable and
+  it is the first thing that will stop being so.
+- **The three extra plane-hull contacts** of `mjc_PlaneConvex`, which need the
+  mesh's polygon topology. A hull reduced to vertices gets the one contact the
+  example's own no-polygon branch returns, so a hull lying flat on the plane
+  cannot resist tipping about it.
 
 **Retired, not kept as an option.** Item 1 said the single hard-coded
 point-vs-plane penalty model "remains a separate, smaller benchmark". Under the
@@ -70,7 +86,7 @@ containing it, the box-box edge-edge contact placed at a corner, the absent
 broad phase, and the fixed `ADJACENT_OVERLAP_ALLOWANCE` standing in for an
 exclusion mechanism.
 
-**M-27 (divergence) is open, and it is the one that matters now.** Audited by
+**M-27 is resolved** (details in Appendix D). It was found by
 flattening the G1 layer and counting colliders *through the instance
 prototypes*, since the model instances its collision geometry and a naive count
 reads prototypes rather than instances. Every prototype is instanced exactly
@@ -90,11 +106,10 @@ reading this layer collides its convex hull. A torso modelled as its own AABB is
 a different robot from the waist up, and it is why the pelvis has any contact
 geometry in these runs.
 
-The fix is bounded rather than open-ended, and it closes both halves at once:
-`collision::gjk_epa` already works against any shape that can answer a support
-query, so a convex hull needs a vertex cloud and `argmax_i (v_i . d)`. The 15
-dropped meshes become real geometry and the 2 fabricated proxies become
-unnecessary. That is the next piece of work this step owns.
+It was closed by reducing each mesh to its hull at import and answering the
+support query over the hull's vertices. The reduction is exact, not an
+approximation, because the support function of a point set equals the support
+function of its convex hull.
 
 Appendix D section 3.2 also records that several degeneracy thresholds were set
 as absolute lengths, squared lengths and volumes, embedding a metre-scale

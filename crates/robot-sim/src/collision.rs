@@ -71,7 +71,7 @@ fn mat_t_vec(m: &Mat3, v: V3) -> V3 {
 
 /// A convex primitive in its own frame. Capsules and cylinders are along Z.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Primitive {
+pub enum Primitive<'a> {
     /// A sphere of this radius.
     Sphere {
         /// Radius in metres.
@@ -97,23 +97,58 @@ pub enum Primitive {
         /// Half height, metres.
         half_height: f64,
     },
+    /// A convex hull, as its own vertices in the shape frame.
+    ///
+    /// The vertices are **borrowed** rather than owned, so a hull costs no
+    /// allocation per query and the shape stays `Copy` like every other
+    /// primitive. They live with the model, which is where
+    /// `specs/08-model-compilation-and-sensors.md` item 3 puts the reduction:
+    /// at compile time, never at simulation time.
+    ///
+    /// The support function is `argmax_i (v_i . d)`, which is what
+    /// `mjc_meshSupport` computes exhaustively below ten vertices
+    /// (`04` section 1.5). Above ten the example hill-climbs a vertex
+    /// adjacency graph instead; this implementation is exhaustive at every
+    /// size, which is the same answer for more work and is noted as a cost in
+    /// `specs/07-collision-pipeline.md`.
+    Hull {
+        /// Hull vertices in the shape frame.
+        points: &'a [V3],
+    },
 }
 
 /// A primitive placed in the world.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Placed {
+pub struct Placed<'a> {
     /// The shape.
-    pub shape: Primitive,
+    pub shape: Primitive<'a>,
     /// Rotation from the shape frame to the world.
     pub rotation: Mat3,
     /// Position of the shape frame in the world.
     pub translation: V3,
 }
 
-impl Placed {
+impl Placed<'_> {
     /// The point of the shape farthest in a direction given in the shape frame.
     fn local_support(&self, d: V3) -> V3 {
+        if let Primitive::Hull { points } = self.shape {
+            // `mjc_meshSupport`: exhaustive over vertices, strict `>` so the
+            // first index wins a tie, matching the example's tie-breaking.
+            let mut best = [0.0; 3];
+            let mut best_d = f64::NEG_INFINITY;
+            for v in points {
+                let h = v[0] * d[0] + v[1] * d[1] + v[2] * d[2];
+                if h > best_d {
+                    best_d = h;
+                    best = *v;
+                }
+            }
+            return best;
+        }
         match self.shape {
+            // Handled by the early return above; a hull has no closed-form
+            // support, only its vertex list.
+            Primitive::Hull { .. } => unreachable!("handled before this match"),
             Primitive::Sphere { radius } => scale(normalized_or(d, [1.0, 0.0, 0.0]), radius),
             Primitive::Capsule {
                 half_height,
@@ -193,6 +228,32 @@ impl Placed {
         // Column j of the rotation is shape axis j in world.
         let axis_abs = |k: usize| [r[0][k].abs(), r[1][k].abs(), r[2][k].abs()];
         match self.shape {
+            // Exact: a hull's extent is the box of its own world vertices, and
+            // every vertex is extreme in some direction so none can be skipped.
+            Primitive::Hull { points } => {
+                let mut lo = [f64::INFINITY; 3];
+                let mut hi = [f64::NEG_INFINITY; 3];
+                for v in points {
+                    let w = self.to_world(*v);
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(w[k]);
+                        hi[k] = hi[k].max(w[k]);
+                    }
+                }
+                let centre = [
+                    0.5 * (lo[0] + hi[0]),
+                    0.5 * (lo[1] + hi[1]),
+                    0.5 * (lo[2] + hi[2]),
+                ];
+                (
+                    centre,
+                    [
+                        0.5 * (hi[0] - lo[0]),
+                        0.5 * (hi[1] - lo[1]),
+                        0.5 * (hi[2] - lo[2]),
+                    ],
+                )
+            }
             Primitive::Sphere { radius } => (self.translation, [radius, radius, radius]),
             Primitive::Capsule {
                 half_height,
@@ -239,7 +300,19 @@ impl Placed {
     /// A bounding sphere `(centre, radius)` in the world.
     #[must_use]
     pub fn bounding_sphere(&self) -> (V3, f64) {
+        if let Primitive::Hull { points } = self.shape {
+            // Centred on the shape origin, as every other primitive's bounding
+            // sphere is, with the radius of the farthest vertex. A tighter
+            // sphere exists but would move the centre, and the broad phase
+            // compares centre distances.
+            let mut r2 = 0.0f64;
+            for v in points {
+                r2 = r2.max(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            }
+            return (self.translation, r2.sqrt());
+        }
         let r = match self.shape {
+            Primitive::Hull { .. } => unreachable!("handled before this match"),
             Primitive::Sphere { radius } => radius,
             Primitive::Capsule {
                 half_height,
@@ -1295,6 +1368,30 @@ pub fn plane_contact_points(placed: &Placed, _rim_samples: usize) -> Vec<(V3, f6
     // The plane's normal is `+z`, which is what the ground model uses.
     const N: V3 = [0.0, 0.0, 1.0];
     match placed.shape {
+        // `mjc_PlaneConvex` (04 section 1.5), first clause: the support point
+        // along `-n` is the deepest vertex, and that is the contact.
+        //
+        // The example adds up to three more from the polygon incident to that
+        // vertex, which needs the mesh's polygon topology (`mesh_polymap` and
+        // per-polygon vertex lists). A hull reduced to vertices alone does not
+        // carry it, so this returns the one contact the example's own
+        // `return 1` branch returns for a shape with no polygon data. The
+        // consequence is honest and worth knowing: a hull resting flat on the
+        // plane gets a single contact point and so cannot resist tipping about
+        // it. The G1's feet are boxes and spheres with exact manifolds, so this
+        // affects a torso or a forearm touching the ground, not a stance.
+        Primitive::Hull { points } => {
+            let mut deepest = placed.translation;
+            let mut lowest = f64::INFINITY;
+            for v in points {
+                let w = placed.to_world(*v);
+                if w[2] < lowest {
+                    lowest = w[2];
+                    deepest = w;
+                }
+            }
+            vec![(deepest, 0.0)]
+        }
         Primitive::Sphere { radius } => vec![(placed.translation, radius)],
         Primitive::Capsule {
             half_height,

@@ -201,7 +201,32 @@ pub enum CollisionGeometry {
         /// Length in metres.
         length: f64,
     },
+    /// The convex hull of a mesh collider, as the hull's own vertices in the
+    /// shape's frame.
+    ///
+    /// `specs/08-model-compilation-and-sensors.md` item 3 requires a mesh
+    /// collider to be reduced to a convex hull before any narrow-phase routine
+    /// sees it, and at compile time rather than at simulation time. This is
+    /// that reduction's result. It carries vertices and not faces because a
+    /// support query -- which is all the narrow phase asks of a convex shape --
+    /// is `argmax_i (v_i . d)`, and the support function of a point set equals
+    /// the support function of its convex hull.
+    ///
+    /// `source` keeps the originating mesh's content identity, so a hull can
+    /// still be traced back to the asset it came from.
+    ConvexHull {
+        /// Hull vertices in the shape's frame, scale already applied.
+        points: Vec<Vec3>,
+        /// Content identity of the mesh this hull was built from.
+        source: String,
+    },
     /// A reference to an externally stored mesh, by content identity.
+    ///
+    /// Retained for an importer that has not reduced the mesh. Nothing in the
+    /// collision pipeline can contact this variant: a concave mesh is not a
+    /// convex shape and must not be handed to a convex-convex routine
+    /// (`specs/07` item 2). An importer producing this variant is declaring
+    /// that the shape is not simulated.
     Mesh {
         /// Content identity text, e.g. `sha256:...`.
         content_id: String,
@@ -226,6 +251,14 @@ impl CollisionGeometry {
             Self::Cylinder { radius, length } => {
                 radius.is_finite() && *radius > 0.0 && length.is_finite() && *length > 0.0
             }
+            // A hull needs four vertices to enclose a volume, and every one
+            // must be finite: an infinite vertex would make every support
+            // query select it.
+            Self::ConvexHull { points, source } => {
+                !source.trim().is_empty()
+                    && points.len() >= 4
+                    && points.iter().all(|p| p.is_finite())
+            }
             Self::Mesh { content_id, scale } => !content_id.trim().is_empty() && scale.is_finite(),
         }
     }
@@ -237,6 +270,7 @@ impl CollisionGeometry {
             Self::Sphere { .. } => "sphere",
             Self::Box { .. } => "box",
             Self::Cylinder { .. } => "cylinder",
+            Self::ConvexHull { .. } => "convex_hull",
             Self::Mesh { .. } => "mesh",
         }
     }

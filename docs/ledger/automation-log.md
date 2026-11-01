@@ -857,3 +857,39 @@ the exact-`A_ii` choice is restated as the example's own DIAGEXACT path rather
 than a divergence from it. Specs at 0.1.6-draft.
 
 Gate: 1073 tests, fmt and clippy clean. One simulation path verified end to end.
+
+## 2026-11-01 — M-27 resolved: mesh colliders are real geometry
+
+The G1 now reports **33 collision shapes modelled and 0 not modelled**, which is
+exactly the 33 its layer declares. Before: 18 primitives, 15 meshes dropped
+entirely, and 2 axis-aligned bounding boxes the model does not declare
+fabricated on the pelvis and torso. `usd::PROXY_LINKS` is gone.
+
+`robot_model::hull::hull_vertices` reduces each mesh to its convex hull at
+import -- where specs/08 item 3 requires it, at compile time and never at
+simulation time -- and `collision::Primitive::Hull` answers the support query
+`argmax_i (v_i . d)` that `mjc_meshSupport` computes.
+
+The reduction is exact, not an approximation: the support function of a point
+set equals the support function of its convex hull, so a discarded point could
+never have won an argmax. Every hull test asserts that property directly,
+comparing the support function over the reduced set against the whole cloud in
+144 directions, rather than asserting a vertex count.
+
+Why conflict lists mattered: without them each quickhull round rescans every
+point against every live face, about 3e9 dot products for one 19000-vertex G1
+mesh. With them a round only redistributes the points of the faces it deleted.
+
+Measured: 15 mesh colliders, median 19116 raw vertices each, reduce to 27061
+hull vertices in total -- about tenfold -- with none degenerate. The stance is
+unchanged (pelvis minimum 0.7882 m, penetration -0.0046 m, settled energy
+0.0114 J, PASS), which is the expected outcome: the pelvis and torso do not
+touch the ground in a stance, so this was about the geometry being right rather
+than about a number moving. A 2-second run at 0.5 ms takes 8.5 s of wall clock.
+
+Two costs remain and are recorded as costs rather than defects: the support
+query still scans, where the example hill-climbs a vertex adjacency graph above
+ten vertices, and a plane-hull contact is one point because `mjc_PlaneConvex`'s
+three extra contacts need polygon topology a vertex hull does not carry.
+
+Specs at 0.1.7-draft. Gate: 1080 tests, fmt and clippy clean.

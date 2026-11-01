@@ -259,13 +259,13 @@ struct ContactShape {
     /// Collision affinity bitmask (`conaffinity`).
     conaffinity: u32,
     body: usize,
-    shape: Primitive,
+    shape: Primitive<'static>,
     rotation: [f64; 9],
     translation: [f64; 3],
 }
 
 /// The world pose of a contact shape, given its body's world pose.
-fn place_shape(cs: &ContactShape, body_world: &Pose) -> Placed {
+fn place_shape(cs: &ContactShape, body_world: &Pose) -> Placed<'static> {
     let (rb, tb) = *body_world;
     let rotation = mat3_mul(rb, cs.rotation);
     let translation = add3(mat3_mul_vec(rb, cs.translation), tb);
@@ -585,7 +585,11 @@ impl ArticulatedBody {
                         radius: *radius,
                         half_height: 0.5 * length,
                     }),
-                    CollisionGeometry::Mesh { .. } => None,
+                    // This path's contact law is retired (see the module
+                    // documentation), so it does not grow hull support. A hull
+                    // is counted as not modelled here, which is accurate: no
+                    // command reaches this contact path.
+                    CollisionGeometry::ConvexHull { .. } | CollisionGeometry::Mesh { .. } => None,
                 };
                 match primitive {
                     Some(shape_primitive) => {

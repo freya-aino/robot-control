@@ -21,12 +21,19 @@ and `robot_model::usd` imports it. Audited against the flattened layer on
   stiffness and damping converted from per-degree to per-radian (Appendix D
   M-26; see [05](05-passive-forces-and-actuators.md)).
 
-**Item 3 is violated.** It is a MUST that mesh collision geometry be reduced to
-a convex hull before any narrow-phase routine sees it. Instead the 15 mesh
-colliders are dropped and two axis-aligned bounding boxes the model does not
-declare are fabricated on `pelvis` and `torso_link` by `usd::PROXY_LINKS`.
-Appendix D M-27 records the count and the consequence; the owning work is
-[07](07-collision-pipeline.md)'s support-query hull.
+**Item 3 is met.** `robot_model::hull::hull_vertices` reduces each mesh collider
+to its convex hull **at import**, which is where this item requires it ("at
+compile time, never at simulation time"), and `CollisionGeometry::ConvexHull`
+carries the result. The 15 mesh colliders reduce from a median of 19116 raw
+vertices each to 27061 hull vertices in total, about tenfold, with none
+degenerate. `usd::PROXY_LINKS` and the two bounding boxes it fabricated are
+gone. Appendix D M-27 is resolved.
+
+The `Mesh` variant survives for an importer that has not reduced its meshes, and
+nothing in the collision pipeline contacts it: a concave mesh is not a convex
+shape and must not reach a convex-convex routine
+([07](07-collision-pipeline.md) item 2). An importer producing it is declaring
+the shape unsimulated, and a run's output says how many such shapes it had.
 
 **Item 1 is moot for this model and still open for URDF.** The G1 USD carries
 explicit inertias for every link, so geometry-based inference is not needed to
@@ -61,13 +68,12 @@ Evidence tag: `unverified` for every behavioural claim in this step, including t
 
 **Done when**: Inertia inference is opt-in and never changes the default import behavior. Static fusing is a caller-selected transform. Mesh collision is always reduced to a convex hull at compile time. Sensor noise is generated at a declared point and recorded as such.
 
-**Status against Done when**: mesh collision is **not** reduced to a convex
-hull; it is dropped, with a bounding-box proxy substituted on two links. The
-other three clauses are untouched. A run's own output states which collision
-shapes were modelled and which were not, so the gap is visible rather than
-silent.
+**Status against Done when**: mesh collision **is** reduced to a convex hull at
+compile time. The other three clauses are untouched. A run's own output states
+which collision shapes were modelled and which were not, and on the G1 it now
+reads 33 modelled and 0 not modelled.
 
-**Challenges**: Appendix D **M-27** (**divergence**) — see above and
+**Challenges**: Appendix D **M-27** (**resolved**) — see above and
 [07](07-collision-pipeline.md). **M-26** (**defect**, closed) — an angular
 drive's stiffness and damping are per degree, and this importer converted the
 joint limits and the maximum velocity from degrees but not the gains, so every

@@ -227,7 +227,7 @@ repository.
 | [M-24](#m-24) | `inverse_inertia_diagonal` costs `nv` forward-dynamics passes and runs inside the stance loop | cost | [02](02-pure-dynamics-core.md) |
 | [M-25](#m-25) | The model's declared actuators are not simulated; the stepper applies invented gains | defect | [05](05-passive-forces-and-actuators.md) |
 | [M-26](#m-26) | A USD angular drive's stiffness and damping are per degree and were read as per radian | defect | [05](05-passive-forces-and-actuators.md) |
-| [M-27](#m-27) | 15 of the G1's 33 colliders are dropped, and two boxes the model does not declare are fabricated | divergence | [07](07-collision-pipeline.md) |
+| [M-27](#m-27) | 15 of the G1's 33 colliders are dropped, and two boxes the model does not declare are fabricated | divergence (**resolved**) | [07](07-collision-pipeline.md) |
 | [M-28](#m-28) | The model's declared drive gains are generated defaults, and holding a posture with them says nothing about the robot | divergence | [05](05-passive-forces-and-actuators.md) |
 
 ### 1.5 Status after the 2026-11-01 corrections
