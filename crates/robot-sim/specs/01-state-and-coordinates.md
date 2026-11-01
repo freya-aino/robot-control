@@ -2,7 +2,29 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md) · [Appendix B](appendix-b-open-questions.md)
 
-**Status**: Partially implemented. The `Free` joint is implemented (`robot_model::joint::JointKind::Free`) and validated. `Ball` is not implemented and is deferred (see Appendix B, S-04).
+**Status**: **`Free` implemented in the example's convention; `Ball` deferred.**
+`composite` stores a `Free` joint's velocity as **world-frame linear in the
+first three degrees of freedom and body-frame angular in the last three,
+translation first**, which is
+[example 02](../../../docs/example-system-specs/02_kinematics_dynamics_smooth.md)
+section 2.1's layout (`cdof[da+3] = cdof[da+10] = cdof[da+17] = 1`), with
+`xanchor = xpos` for the free joint itself. World linear momentum is conserved
+to below 1e-14 on a force-free body, against 3.93e-3 before — Appendix D M-01
+closed, Appendix B S-07 resolved.
+
+`crate::articulated` keeps its own layout, angular first and both halves
+body-local, and the two are **not interchangeable**: a `q` or `qd` vector cannot
+be passed between them without conversion, which `World::from_articulated_velocity`
+exists to do deliberately. This is a specification-level fact about the crate,
+not an implementation detail, because it determines what an observation vector
+means — `WorldEnv` reports `cpu-world` and `MultibodyEnv` reports
+`cpu-multibody` for exactly this reason, and a policy trained against one has
+not been trained against the other.
+
+A joint axis is normalised at one accessor (`unit_axis()`), so the velocity map
+and the position map cannot disagree — Appendix D M-02 closed.
+
+`Ball` is not implemented and is deferred (see Appendix B, S-04).
 
 **Goal**: Track generalized coordinates with distinct position (`nq`) and velocity (`nv`) widths, including a floating base (`Free`) and, later, spherical joints (`Ball`). Covers old §3.
 
@@ -26,7 +48,10 @@
 
 ## 3. State representation and coordinates
 
-**Implementation status (2026-10-26, see Appendix B row S-04): item 1's `Free` joint is implemented** (`robot_model::joint::JointKind::Free`), `ArticulatedBody`'s ABA/RNE are generalized to it and validated (closed-form, conservation and RNE/ABA round-trip checks on an isolated free body, then the real G1 via `robot_model::fixtures::unitree_g1_29dof_floating_base`, which genuinely falls under gravity through `robot sim multibody --floating`). `Ball` remains unimplemented and deferred. This status note does not relax the requirement text below, which continues to state the target this document specifies, not merely what exists.
+**Implementation status (2026-10-26, see Appendix B row S-04): item 1's `Free` joint is implemented** (`robot_model::joint::JointKind::Free`), `ArticulatedBody`'s ABA/RNE are generalized to it and validated (closed-form, conservation and RNE/ABA round-trip checks on an isolated free body, then the real G1 via `robot_model::fixtures::unitree_g1_29dof_floating_base`, which genuinely falls under gravity when nothing holds its joints — note that
+`robot sim multibody --floating` now applies the model's own drives and so holds
+a stance instead, and `--actuation zero` is the command that reproduces the
+fall). `Ball` remains unimplemented and deferred. This status note does not relax the requirement text below, which continues to state the target this document specifies, not merely what exists.
 
 1. `robot-model`'s `JointKind` enum (currently `Revolute | Continuous | Prismatic | Fixed`, each ≤1 DOF) MUST gain `Free` (6 DOF: 3 translation + 3 rotation, quaternion-valued orientation) and SHOULD gain `Ball` (3 DOF, quaternion-valued, no translation) to represent a floating base and spherical joints respectively. This is the single largest structural gap identified against the reference simulator [the reference simulator §1]: without it, `robot_sim::articulated::ArticulatedBody` cannot represent anything but a base rigidly welded to world, which is why the existing G1 simulation runs "bolted at the pelvis."
 2. A profile's position-coordinate count (`nq`-equivalent) and velocity/DOF count (`nv`-equivalent) MUST be tracked as distinct quantities once `Free`/`Ball` joints exist, mirroring the reference's own `qpos`/`qvel` width mismatch for exactly the same reason (a unit quaternion needs 4 numbers to represent 3 rotational DOF) [the reference simulator §1]. `robot_types::frames::Quat` already exists and already forbids the bare four-element array the reference's own convention would otherwise invite (`SPECS.md` §7.2); the new joint types MUST use it, not a raw `[f64; 4]`.

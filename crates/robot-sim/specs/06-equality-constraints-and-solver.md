@@ -2,7 +2,74 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md)
 
-**Status**: Partially implemented (pure CPU subset). `robot_sim::constraint` ports the `mjEQ_JOINT` equality build (scalar joints, one or two joints with the quartic coupling), the `solref`/`solimp` impedance and stiffness/damping, the `2*timestep` time-constant clamp, and a closed-form linear solve of an equality-only problem. `robot_sim::contact::plane_sphere_contact` ports the plane-sphere geometry (`+z` plane). Both are standalone pure functions and are not wired into `MultibodyState::step`. Not ported: the contact solver with friction cones, the iterative `mj_solNewton`/`mj_solCG`/`mj_solPGS`, `mjEQ_CONNECT`/`mjEQ_WELD`/`mjEQ_TENDON`, limit and friction rows, warm-starting. The single-point `GroundContact` penalty model is unchanged and remains the baseline (Appendix C).
+**Status**: **Implemented, both algorithms, and running.** `robot_sim::solver`
+and `robot_sim::newton` solve contact, joint-limit and equality rows as one
+convex problem, and `World` runs it as the stepper behind `robot sim multibody`.
+Every item of old Section 5 is met except the elliptic cone (item 4's second
+half) and `condim` 4 and 6.
+
+The two algorithms item 5 requires both exist, and they are each other's
+cross-check — they solve the same problem by different routes and agree on the
+acceleration to 1e-8:
+
+- **Dual, projected Gauss-Seidel** (`solver::solve`), over constraint forces:
+  `min_{f in Omega} 0.5 f' (A + R) f + f' (a_u - a_ref)` per
+  [example 07](../../../docs/example-system-specs/07_constraints.md) section 2.3,
+  with `A = J M^-1 J'` from the composite factorization,
+  `R_ii = (1-d)/d A_ii` on the exact diagonal, `a_ref = -B (Jv) - K d (pos -
+  margin)`, `a_u = J qacc_smooth + Jdot v`, and warm starting.
+- **Primal Newton** (`newton::solve_newton`), over the acceleration, per
+  [example 08](../../../docs/example-system-specs/08_solvers_islands.md) section
+  6: `min_a 0.5 (a - a0)' M (a - a0) + s(J a - a_ref)` with the
+  piecewise-quadratic constraint cost of section 2, gradient
+  `M a - qfrc_smooth - J' f`, Hessian `M + J' diag(D_q) J` (section 6.10), and
+  an exact line search. **This is the default**, for a measured reason below.
+
+Both carry the same per-row impedance, built once by `solver::row_impedance`:
+the dual needs all of `A`, the primal only its diagonal, because that is the
+only place `A` enters `R`.
+
+**Why Newton is the default, measured.** The pyramidal representation makes the
+dual's rows redundant by construction — four non-negative coefficients encode
+three force components and every edge of a contact contains the normal — so four
+contacts on a six-degree-of-freedom body give sixteen rows for a rank-six
+problem. Gauss-Seidel needs **1011 sweeps** there to bring the per-sweep force
+change below 1e-10, against a default budget of 100 at which the residual is
+still 1.1e-2. Newton reaches the same answer in **one** iteration at a scaled
+gradient norm of 4.9e-14, because its variable is the acceleration, one per
+degree of freedom however many contacts there are, and its Hessian is positive
+definite because `M` is. At 100 sweeps the dual's *acceleration* is already
+within 2e-4 relative, so the budget was never wrong for stepping — it is the
+forces that were unsettled. Appendix D section 1.7.3 records the measurement.
+
+This is a stronger statement than item 5's, which cites the batched backend's
+"often just one iteration" as a fidelity claim about RL training. Here it is a
+convergence requirement on the CPU reference as well.
+
+**The friction cone is the example's pyramid, not a box.** An earlier pass
+emitted one normal row plus two tangential rows and clamped each tangential
+force to `mu f_n` inside the solver. That is a cone, and it couples friction to
+the normal solve, but it is the pyramid whose cross-section is a **square** of
+half-width `mu f_n`, which circumscribes the true circular cone and admits up to
+`sqrt(2) mu f_n` diagonally — about 41 per cent too much friction, in the
+direction a foot slides. Example 07 section 9.2 builds the rows as the cone's
+**generator directions** instead: for `k = 1..dim-1`,
+`row+- = jac[0] +- friction[k-1] jac[k]`, so `J = n +- mu t_k`, giving
+`2(condim-1)` rows that each carry a non-negative coefficient and all carry
+`pos = dist`. With `lambda >= 0` the realised force satisfies
+`|f_t1| + |f_t2| <= mu f_n` — the inscribed diamond, conservative rather than
+permissive. `solver::decode_pyramid` inverts it.
+
+A consequence worth stating as specification rather than implementation detail:
+**every row kind is now either unbounded or non-negative**, because the cone
+lives entirely in the row Jacobians. Neither solver contains a cone projection.
+
+Not implemented: the elliptic cone and its `H_c` Hessian block, `condim` 4 and
+6, conjugate gradient (item 5 is satisfied by Newton plus Gauss-Seidel, so CG is
+optional rather than owed), islands, adhesion, friction-loss rows, and the
+sparse Hessian — `newton` forms a dense `nv x nv` Hessian and refactorises it
+each iteration rather than updating it rank-1 as `HessianIncremental` does, a
+cost and not a difference of result.
 
 **Goal**: Solve contact and equality constraints as one convex problem, with soft-constraint impedance (`solref`/`solimp` equivalent), a time-constant safety check, at least two solver algorithms, and warm-starting. Covers old §5 in full and §7 items 2–3.
 
@@ -21,7 +88,11 @@ Evidence tags: `code_inspected` for the bodies of the ported functions (read at 
 
 **Done when**: Contact and equality constraints share one solver. The time-constant check rejects or reports a constraint whose time-constant is below about twice `dt`. Newton-style and CG-style solvers both exist, and warm-start is measured against the cold start.
 
-**Step 6 status against Done when**: the time-constant check is implemented and reports clamped rows (`effective_timeconst`, `EqualitySolution::clamped_rows`). The equality-only linear solve exists. The shared contact-plus-equality solver, Newton, CG and warm-start are not implemented.
+**Status against Done when**: all four clauses are met. Contact and equality
+constraints share one solver; the time-constant check reports clamped rows
+(`effective_timeconst`, `Solution::clamped_rows`); a Newton-style and a
+Gauss-Seidel-style solver both exist and agree to 1e-8; and warm start is
+measured against the cold start. CG is not implemented and is no longer owed.
 
 **Deviations from the pinned source (recorded per FR-4)**:
 - `R` uses the exact diagonal `A_ii` of `J M^-1 J^T`. This matches the `mjENBL_DIAGEXACT` path (`mj_makeYNumeric`, `mj_projectConstraint`), not the default `mj_diagApprox` (`engine_core_constraint.c` line 1605). For `mjEQ_JOINT` rows `mj_diagApprox` sums `dof_invweight0`, the inverse inertia at `qpos0` with no `poly'(d)^2` factor. So `R` differs from the default path whenever `|poly'(d)| != 1` or `M(q) != M(qpos0)`, even for diagonal `M`.
@@ -34,19 +105,52 @@ Evidence tags: `code_inspected` for the bodies of the ported functions (read at 
 
 **Open questions**: none blocking for the CPU solver. Appendix B S-02 (CubeCL control flow for an iterative solver) concerns the GPU backend and is owned by [11](11-gpu-batched-backend.md).
 
-**Status (updated 2026-11-01)**: the shared solver **exists**. `robot_sim::solver` solves contact, joint-limit and equality rows as one convex problem over constraint forces, per `07` sections 2.3 and 2.4: `A = J M^-1 J^T` from the composite factorization, `R_ii = (1-d)/d A_ii` with the exact diagonal, `a_ref = -B (Jv) - K d (pos - margin)`, `a_u = J qacc_smooth + Jdot v`, and a projected Gauss-Seidel sweep over the per-row feasible sets with warm starting. Items 1, 2, 3, 6 and 7 are met; item 4 is met for the pyramidal cone only, and item 5 for the Gauss-Seidel half only. Appendix D M-08 to M-13 and M-23 are closed and Appendix B S-09 is resolved. Not implemented: the elliptic cone, `condim` 4 and 6, the Newton and conjugate-gradient algorithms of `08`, islands, adhesion and friction-loss rows. The solver is not yet the path `MultibodyState::step` runs (Appendix D M-17).
+**Challenges**: this step owned more of
+[Appendix D](appendix-d-mathematical-challenges.md) than any other, and the
+ported equality algebra was confirmed correct from the start — the impedance
+sigmoid and its derivative, the stiffness/damping map, the `2*timestep` clamp,
+and the substitution giving `(A + diag(R)) f = aref - J qacc_smooth`
+(Appendix D section 1.1).
 
-**Challenges (as first recorded)**: this step owns more of [Appendix D](appendix-d-mathematical-challenges.md) than any other. The ported equality algebra is confirmed correct — the impedance sigmoid and its derivative, the stiffness/damping map, the `2*timestep` clamp, and the substitution giving `(A + diag(R)) f = aref - J qacc_smooth` (Appendix D section 1.1). The challenges are in the **contact** path, which shares none of it:
+**All of M-08 to M-13 and M-23 are closed**, each by the unified problem above
+rather than by a local patch:
 
-- M-09 (**divergence**): contact impedance is referred to the constant `CONTACT_REFERENCE_MASS = 1.0` instead of the row's own `A_ii`, the form item 2 requires and the form `solve_equality` already implements for equality rows. The G1's effective masses span about five orders of magnitude (Appendix D M-22), so one constant cannot stand in across them. The matrix `contact_externals` already builds has `A_ii` on its diagonal, so this is a one-line correction.
-- M-10 (**divergence**): friction is applied *after* the normal solve from the solved normal force, so there is no friction cone of either kind and no `condim` — items 1 and 4. Link-against-link rows are frictionless outright, and the tangent plane is hard-coded to `z`.
-- M-11 (**divergence**): the unconstrained acceleration `a_u` omits the `Jdot qd` term (recorded in the code) **and** the spatial-to-classical acceleration conversion (not recorded). The matrix is unaffected; the right-hand side is biased at `O(|qd|^2)`.
-- M-12 (**divergence**): `apply_hard_limits` builds its response matrix with the ground argument `None`, so when a limit and a contact are active in the same step neither force accounts for the other — the concrete cost of the two-solver architecture item 1 rules out.
-- M-08 (**divergence**): hard limits are an acceleration-level active set (sound) plus a position clamp that zeroes outward velocity, discarding kinetic energy with no accounting and admitting no restitution — against item 2, which explicitly motivates the direct stiffness/damping case by elastic restitution.
-- M-13 (**divergence**): `stiffness_damping` selects the `solref` format with `solref[0] > 0` for the stiffness and `solref[1] > 0` for the damping. Latent, because `effective_timeconst` refuses mixed formats on the only path through the crate, but the function is `pub` and validates nothing.
-- M-23 (**cost**): `solve_equality` copies and refactorises `M` once per row, `O(m nv^3)` where `O(nv^3 + m nv^2)` suffices.
+- M-09, contact impedance referred to a constant 1 kg instead of the row's own
+  `A_ii`: the exact diagonal is used for every row kind.
+- M-10, friction applied outside the coupled solve with no cone and no
+  `condim`: friction rows are in the same problem, as pyramid edges, with the
+  contact frame from `mju_makeFrame` rather than a hard-coded `z`.
+- M-11, the unconstrained acceleration omitting `Jdot qd`: `a_u` carries it.
+- M-12, the limit solve and the contact solve not seeing each other: one
+  problem, one solve.
+- M-08, the hard-limit position clamp discarding kinetic energy: limits are rows
+  with the same impedance as any other, and `SimOptions::limit_margin` gives
+  them room to act. Measured: a G1 joint driven at 50 N m into its bound
+  overshoots by 0.177 rad with no margin and by **exactly zero** with a 0.2 rad
+  margin, because with no margin a row appears only once `dist < 0` and the
+  constraint brakes the joint after it has crossed.
+- M-13, two different `solref`-format predicates: one predicate.
+- M-23, refactorising `M` once per row: factor once, substitute per row.
 
-Warm-starting (item 7) remains unimplemented, and nothing in the crate searches for the term.
+Two findings came out of making the solver actually run, and they are the live
+content of this step rather than history:
+
+- **`mju_cholFactor` clamps, it does not fail** (example 08 section 7.1): a
+  pivot below `mindiag` is set to `mindiag`, the rank is decremented and that
+  column below the diagonal is zeroed. `D = 1/R` reaches 1e15 when a row's
+  regularisation sits on its floor, so `M + J' D_q J` can lose a pivot to
+  cancellation even though it is positive definite exactly.
+- **A contact with zero friction must be `dim == 1`.** `condim = 3` with
+  `mu = 0` builds four *identical* pyramid edges, since `n +- mu t_k` all
+  collapse onto `n`, while `Rpy = 2 mu^2 R0` is zero so `D` saturates at
+  `1/MINVAL`. Example 07 section 9.2 already says what to do: a frictionless
+  contact gets one row along the normal.
+
+And one methodological point, recorded because it shaped the debugging: **the
+dual solver's non-convergence had been acting as damping.** It never reached the
+true force in 100 sweeps, so it under-estimated it, and that under-estimate
+masked the degenerate rows above. A solver that converges is what surfaced them.
+A simulation that does not blow up is weak evidence about its own solver.
 
 ---
 

@@ -2,7 +2,30 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md) · [Appendix C](appendix-c-existing-code.md)
 
-**Status**: Partially implemented. `robot_sim::articulated::ArticulatedBody` is a single-instance CPU backend, and `robot_sim::env::Environment` (`observation_width`, `action_width`, `reset`, `step`) exists. The narrow `init`/`step` backend trait does not exist yet.
+**Status**: **Two CPU backends behind one interface.** `robot_sim::env::Environment`
+(`observation_width`, `action_width`, `reset`, `step`) and `backend::Backend`
+exist, and two backends implement them:
+
+- `world::WorldEnv`, reporting **`cpu-world`** — the corrected path: composite
+  dynamics, exact collision manifolds, the unified constraint solver and the
+  model's own actuators.
+- `multibody_env::MultibodyEnv`, reporting **`cpu-multibody`** — the legacy
+  articulated-body path with its penalty contact.
+
+Both names are reported rather than one being implied, because the two are
+genuinely different backends and a run record should say which produced it. They
+are also not substitutable at the observation level: a `Free` joint's velocity
+means different things in the two layouts
+([01](01-state-and-coordinates.md)), so a policy trained against one has not
+been trained against the other. That is why the corrected path was added as a
+second backend rather than as a change of behaviour inside the first.
+
+`ArticulatedBody` is retained deliberately as the correctness oracle this step
+asks for: it is an independent algorithm (body-local articulated-body and RNE)
+that the composite recursions are validated against to 1e-10, and replacing it
+with a second copy of the same mathematics would remove the only cross-check.
+
+The narrow `init`/`step` backend trait beyond `Environment` does not exist yet.
 
 **Goal**: Keep a single-instance CPU reference backend as the correctness oracle for every GPU backend, and put every caller behind one backend-agnostic `Environment` interface. Covers old §11.4 and old §13 in full.
 

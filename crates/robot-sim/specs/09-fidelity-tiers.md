@@ -2,7 +2,36 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md) · [Appendix B](appendix-b-open-questions.md)
 
-**Status**: Not started. No fidelity knob is queryable at run time today. The analytic fidelity harness (`fidelity.rs`, schema v7) runs seven checks at fixed tiers, including the 1 rad pendulum trajectory against the closed form, which is the nearest existing mechanism.
+**Status**: **Knobs implemented; named tiers still open.** `options::SimOptions`
+carries every knob old Section 12 enumerates as a per-run parameter —
+`timestep`, `integrator`, `solver`, `solver_iterations`, `solver_tolerance`,
+`condim`, `contact_slots`, `margin`, `gap`, `limit_margin`, `warm_start`,
+`solref`, `solimp` and the convex-collision budget (`CcdConfig`: tolerance,
+iterations, `max_faces`). They are **validated rather than clamped**: an invalid
+combination is refused, not silently adjusted. `SimOptions::record()` emits them
+as key/value pairs so a run carries the configuration that produced it, which is
+Section 12.1's requirement. Appendix D M-21 is closed.
+
+Three knobs were added by measurement rather than by enumeration, and each has
+its number in its own documentation: `limit_margin`, separate from the collision
+`margin` as the example keeps `jnt_margin` separate from `geom_margin` (0.177
+rad of overshoot at zero margin against exactly zero at 0.2 rad);
+`CcdConfig::max_faces`, which is a **termination condition** and not a budget
+(one EPA query took 2.9 s without it, because the face count of a non-hull
+polytope grows geometrically); and the solver algorithm, where the default is
+Newton for the convergence reason recorded in
+[06](06-equality-constraints-and-solver.md).
+
+An actuation mode is a fourth such knob and is **not** in `SimOptions`:
+`ActuationMode` is a parameter of the actuation call rather than of the run,
+because it selects how a model's declared drives are read rather than how
+accurately they are integrated. Whether it belongs in a named tier is open; see
+[05](05-passive-forces-and-actuators.md) and Appendix D M-28.
+
+The analytic fidelity harness (`fidelity.rs`) is at schema v8 and runs ten
+checks, now including a plane force balance, a friction-cone bound and a
+narrow-phase depth row (Appendix D M-20 closed, ADR 0008 amended). The named
+tiers themselves remain open under Appendix B S-03.
 
 **Goal**: Make each fidelity knob (timestep, integrator, solver algorithm, iteration budget, `condim`, contact-slot budget, collision margin/gap) an explicit per-run parameter, and define named tiers as bundles of those knobs. Covers old §12 in full.
 

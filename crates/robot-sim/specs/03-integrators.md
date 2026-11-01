@@ -2,7 +2,41 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md)
 
-**Status**: Partially implemented (Step 5). Pure ports exist in `robot_sim::integrators` for semi-implicit Euler (`mj_advance` order), the `mj_EulerSkip` damping branch (`implicit_damping_euler_step`, diagonal damping only, `None` on invalid input or a non-SPD system) and RK4 (`mj_RungeKutta`, N=4). `MultibodyState::step` in `robot_sim::articulated` is still the original stepper and is not wired to these functions. Full `implicit` and `implicitfast` (sparse `M`, non-diagonal derivatives) are not ported. The zero-torque floating G1 at `dt=5e-4` is recorded as a measured schema-v7 `[[probe]]` failure in `fidelity.rs` (`SingularJointInertia`, step 2236); it is not a passing analytic check or a claim of the reference simulator parity. The probe's attribution includes missing pelvis and torso collision geometry and does not isolate the integrator's contribution.
+**Status**: **Running, selectable per run; the implicit family is the gap.**
+`World::step` integrates with whichever integrator `options::SimOptions` names,
+so item 5 is met, and it is the stepper `robot sim multibody` runs — Appendix D
+M-17 is closed.
+
+Implemented: semi-implicit Euler (`mj_advance` order, velocity first then the
+position update with the new velocity) and RK4 (`mj_RungeKutta`, N = 4). RK4
+takes a `Free` joint, with the Munthe-Kaas correction
+(`rk_correct_free_velocity`, `mju_derivExpmap`, the Bortz coefficients), which is
+the configuration item 4 specifies it *for* — M-19 closed. `M(q)` now exists
+from CRBA, so `implicit_damping_euler_step` is reachable — M-18 closed.
+
+Under RK4 the constraint problem is solved at **every stage**, as
+`mj_forwardSkip` is per stage in
+[example 01](../../../docs/example-system-specs/01_pipeline_integrators_datamodel.md)
+section 9.4. Solving once and reusing the force would quietly reduce the method
+to first order, which is worth stating as specification: an integrator's order
+is a claim about the whole right-hand side, and in contact the constraint force
+is part of it.
+
+**Not ported, and now the substantive gap**: `mj_implicit` / `mj_implicitSkip`
+and the sparse `implicit`/`implicitfast` Jacobian path — non-diagonal
+derivatives and the Coriolis derivative. Item 4 makes `implicitfast` a MUST
+before any claim of "stable at a usable timestep on a real humanoid", and that
+claim is not yet available.
+
+Two things changed what this gap costs. A drive's damping is applied explicitly
+rather than folded into the `qH` term of `mj_EulerSkip`
+([05](05-passive-forces-and-actuators.md)), so a stiffer gain set than the G1's
+declared one would need this path first. And the `dt = 5e-4` divergence this
+step was partly written around no longer reproduces: the G1 holds a stance for
+2 s at `dt = 1e-4` and at `dt = 5e-4` on the corrected path, with the contact
+constraint rather than a penalty spring and the model's own drives rather than a
+hand-written hold. The original divergence is therefore not attributable to the
+integrator alone, and the step should stop implying it is.
 
 **Goal**: Provide an integrator family (at least `implicitfast`-equivalent, with `implicit`-equivalent and RK4 as options) selected per run. Covers old §4, items 3–5. Items 1–2 are in step 02.
 
@@ -22,13 +56,40 @@ Documentation: `doc/computation.rst` §Numerical integration (location only, not
 
 **Inputs/outputs**: Input: state `(q, qd)`, timestep `dt`, the integrator choice, and passive-force derivatives (step 05). Output: the next state.
 
-**Done when**: Each integrator option is selectable per run, the `dt = 5e-4` divergence is reproduced as a measured result rather than hidden, and the implicit variant has a documented damping-derivative path.
+**Done when**: Each integrator option is selectable per run, the `dt = 5e-4`
+divergence is reproduced as a measured result rather than hidden, and the
+implicit variant has a documented damping-derivative path.
 
-**Step 5 status (pure CPU subset)**: The three functions above are ported with hand-derived tests. The 1-DOF stiff-damping oracle shows the implicit step stays bounded where the explicit step with the same damper diverges (`M = 1`, `B = 1000`, `h = 0.1`: the implicit `qd1 = 1/101`, the explicit `qd1 = -99`). Input contract: `dt` and every `damping` entry must be finite and non-negative; every `bias` and `mass` entry must be finite; `M` must be symmetric (only the lower triangle is read, so an asymmetric `M` is refused and `None` is returned). Not yet wired into `MultibodyState::step`. The G1 `dt = 5e-4` row is measured and recorded as `fail` in the fidelity report, step 2236, `SingularJointInertia`.
+**Status against Done when**: selectable per run, yes. The `dt = 5e-4` row is
+measured, and the measurement has moved: it no longer diverges, so what is
+recorded is a passing stance rather than a failure, and the earlier failure is
+attributed to the contact model and the actuation rather than to the integrator
+(see Status). The implicit damping-derivative path exists for diagonal damping
+only and is not wired to a drive's damping, so this clause is not met.
 
-**Open questions**: none blocking. The integrator-per-tier mapping is owned by [09](09-fidelity-tiers.md) (Appendix B S-03).
+**Step 5 status (pure CPU subset)**: the ported functions have hand-derived
+tests. The 1-DOF stiff-damping oracle shows the implicit step stays bounded
+where the explicit step with the same damper diverges (`M = 1`, `B = 1000`,
+`h = 0.1`: implicit `qd1 = 1/101`, explicit `qd1 = -99`). Input contract: `dt`
+and every `damping` entry finite and non-negative; every `bias` and `mass` entry
+finite; `M` symmetric, since only the lower triangle is read.
 
-**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) confirms `semi_implicit_euler_step`, `implicit_damping_euler_step`, `rk4_step` and `cholesky_solve` all correct as written (section 1.1), including that RK4's position update uses the `B`-weighted mean velocity. The challenges are about reach, not formulation. M-18 (**gap**): `implicit_damping_euler_step` needs a dense `M`, nothing in the workspace produces one, so this step's "Done when" and its item 4 MUST are blocked on step 02's unimplemented CRBA — a dependency neither step stated. Appendix D names three routes and notes that forming `M` from `nv` inverse-dynamics passes would unblock the *measurement* without the CRBA work. M-19 (**gap**): `rk4_step` asserts `q.len() == qd.len()` and advances stage positions by `q + h*v`, so it cannot integrate a `Free` joint — the one configuration item 4 specifies RK4 *for*. The 1.9 % energy gain Appendix D measures on an anisotropic spinning free body is the quantity RK4 was wanted for and cannot currently be taken with it. M-17 (**gap**): none of the three ported functions is reachable from `MultibodyState::step`, which runs its own inline semi-implicit Euler.
+**Open questions**: none blocking. The integrator-per-tier mapping is owned by
+[09](09-fidelity-tiers.md) (Appendix B S-03).
+
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) confirms
+`semi_implicit_euler_step`, `implicit_damping_euler_step`, `rk4_step` and
+`cholesky_solve` all correct as written (section 1.1), including that RK4's
+position update uses the `B`-weighted mean velocity.
+
+**M-17, M-18 and M-19 are closed**: the ported functions are reachable and are
+what runs, `M(q)` exists, and RK4 integrates a `Free` joint. The 1.9 per cent
+energy gain Appendix D measured on an anisotropic spinning free body — the
+quantity RK4 was wanted for — is now takeable with it, and is measured at more
+than 100 times smaller under RK4 than under the semi-implicit step.
+
+Nothing in this step is open as a defect. What remains is the unported implicit
+family, which is a gap against item 4 and is stated in the Status above.
 
 ---
 

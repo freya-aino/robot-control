@@ -778,3 +778,40 @@ tractable because `gjk_epa` already works against anything that answers a
 support query.
 
 Gate: 1072 tests, fmt and clippy clean.
+
+## 2026-11-01 — specs reworked to 0.1.5-draft
+
+Every step file reworked against the example's implementation of these dynamics
+and against the problems now measured, rather than against what was planned.
+
+Three statuses were materially false and are corrected. Step 05 said the
+actuation that runs is `stance_torques`; the model's own drives run. Step 08 said
+"Not started" while its convex-hull MUST was being actively violated. Step 06
+carried layered status blocks that contradicted each other on whether warm
+starting existed. Steps 01, 02, 03, 04, 07, 09, 10, 11 and 12 all had statuses
+predating the switch-over.
+
+The specs now state the example's algorithm where it governs: the primal Newton
+problem of example 08 section 6 and why it is the default (1011 Gauss-Seidel
+sweeps against one Newton iteration on sixteen pyramidal rows); the
+generator-direction pyramid of example 07 section 9.2 and why the circumscribed
+square an earlier pass built was 41 per cent too permissive diagonally; the
+world-orientation composite frame of example 02 and the fact that the example
+has no articulated-body algorithm; the position-servo factoring of example 10
+section 2.2 with its force and target clamps.
+
+Four entries open, and the index now carries them as ordered priorities: M-27
+(mesh collision, two MUSTs, with a bounded fix via a support-query hull), M-28
+(declared gains are generated defaults), the implicit integrator family, and
+M-22 (GPU). Appendix B gains S-10 (what a tier pins for actuation, and whether
+to carry a published gain set as a declared override rather than editing the
+vendored asset) and S-11 (hull or decomposition), and S-09 is marked resolved.
+
+Step 04 carries the general lesson as specification: a passing run is evidence
+about the run, not about the component you believe it exercises. A hand-written
+hold with invented gains masked a factor-of-57 unit error for weeks, and the
+dual solver's non-convergence was acting as damping that hid four degenerate
+rows.
+
+All internal links verified to resolve, and every code identifier cited checked
+to exist. Gate: 1072 tests, fmt clean.

@@ -2,7 +2,34 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md)
 
-**Status**: Partially implemented (primitive subset only). `robot_sim::contact::plane_sphere_contact` handles plane-sphere geometry with a fixed `+z` plane. The broad/mid/narrow collision pipeline is not implemented; the single-point ground-plane model in `robot_sim::contact::ContactBody` remains a separate benchmark.
+**Status**: **Implemented for primitives; mesh collision is the open gap and it
+is a MUST.** Items 1, 3, 4 and the GJK/EPA half of item 2 are met. Item 2's
+convex-hull requirement for meshes is **not**, and Appendix D M-27 records what
+that costs on the G1.
+
+What runs:
+
+- **Broad phase**: bounding-sphere then world-AABB rejection
+  ([example 03](../../../docs/example-system-specs/03_collision_driver_broadphase.md)
+  sections 2.2 and 2.4).
+- **Pair exclusion**: the example's own filters rather than a length allowance —
+  `contype`/`conaffinity` bitmask, weld body, immovable pair and parent-child
+  (example 03 sections 2.1 and 2.5).
+- **Narrow phase**: the signed-volume GJK of
+  [example 05](../../../docs/example-system-specs/05_collision_convex_gjk_epa.md)
+  with the S1D/S2D/S3D subdistance of Montanari et al., and EPA with the
+  polytope2, polytope3 and polytope4 constructions of section 6.1. Four non-zero
+  barycentric weights is strict origin enclosure, which is EPA's precondition —
+  the enclosure invariant comes from GJK's subdistance, not from EPA.
+- **Plane contact**: the exact bounded manifolds of
+  [example 04](../../../docs/example-system-specs/04_collision_primitives.md)
+  sections 1.3 and 1.4 — a box's four lowest corners, a cylinder's four-point
+  rule — instead of sampling a shape into points.
+- **Margin and gap** per run (item 4), through `options::SimOptions`.
+
+Still absent: the **mid-phase bounding-volume tree** (item 1's third stage),
+which only meshes need, and **mesh convex hulls** (item 2, and
+[08](08-model-compilation-and-sensors.md) item 3).
 
 **Goal**: A multi-stage pipeline (broad phase, mid phase, narrow phase dispatch), exact primitive routines, a convex fallback via GJK/EPA, body-pair exclusion, and per-geometry-pair margin and gap. Covers old §6 in full.
 
@@ -21,18 +48,46 @@ Evidence tag: `unverified` for every stage-level and dispatch-level claim in thi
 
 **Open questions**: none blocking. SDF collision is a non-goal ([00](00-target-and-constraints.md), Section 1.6).
 
-**Status (updated 2026-11-01)**: the pipeline has a **broad phase** (bounding-sphere then world-AABB rejection, `03` sections 2.2 and 2.4) and a **pair-exclusion filter** (`03` sections 2.1 and 2.5: bitmask, weld body, immovable pair, parent-child), so items 1 and 3 are met except for the mid-phase bounding-volume tree, which meshes need and which is still absent. The narrow phase is the example's signed-volume GJK with the polytope2, polytope3 and polytope4 constructions of `05` section 6.1, and plane contact uses the exact bounded manifolds of `04` sections 1.3 and 1.4 instead of sampling. Item 2's convex fallback is GJK with EPA as required; mesh convex-hull reduction (item 2 and step 08) is still absent. Appendix D M-04 to M-07, M-15 and M-16 are closed.
+**Challenges**: [Appendix D](appendix-d-mathematical-challenges.md) confirms the
+support maps of all four primitives, Ericson's closest-point-on-triangle and the
+plane-sphere rule correct as written (section 1.1).
 
-**Challenges (as first recorded)**: [Appendix D](appendix-d-mathematical-challenges.md) confirms the support maps of all four primitives, Ericson's closest-point-on-triangle, and the plane-sphere rule correct as written (section 1.1). Six challenges sit above them:
+**M-04 to M-07, M-15 and M-16 are closed**: the sampled penalty manifold whose
+stiffness scaled with the sample count, the EPA seed simplex that was not
+required to enclose the origin, the degenerate tetrahedron reported as
+containing it, the box-box edge-edge contact placed at a corner, the absent
+broad phase, and the fixed `ADJACENT_OVERLAP_ALLOWANCE` standing in for an
+exclusion mechanism.
 
-- M-04 (**defect**): `plane_contact_points` samples a shape into points (eight box corners, `2 * RIM_SAMPLES` cylinder rim points) and the penalty law is applied to each independently, so a body resting on `n` co-planar points carries `n` springs in parallel. Its rest penetration is `m g / (n k)`, its contact stiffness is `n k`, and changing `RIM_SAMPLES` changes the physics with no parameter change. The coupled model does not remove the `1/n`. The exact bounded manifolds of the example (`04` §1.3, §1.4), already listed as candidate work in `docs/example-system-mapping.md` §2.6, are the fix; this entry supplies the reason it is a correctness matter rather than an accuracy one.
-- M-05 (**defect**): `complete_simplex` grows the EPA seed simplex to affine independence but never to origin **enclosure**, so face distances can be negative, the closest-face selection picks the wrong face, and `depth.max(0.0)` turns the failure into a zero depth with an arbitrary normal. `epa` also exhausts its 128-iteration budget without a convergence flag.
-- M-06 (**defect**): `reduce`'s containment test is `s_origin * s_opp < 0.0`, so a zero product leaves `inside` at `true`. A flat tetrahedron zeroes all four products and is reported as containing the origin — a false overlap, reachable by construction in the symmetric face-parallel configurations a humanoid on a plane produces constantly. M-05 and M-06 are two halves of one weakness.
-- M-07 (**defect**): `box_box_contacts`' edge-edge fallback places the contact at the deepest **corner** of each box rather than on the crossing edges, so the depth is right and the moment arm is wrong.
-- M-15 (**gap**): item 1 is a MUST for three separate stages; `contact_rows` has one. Every shape pair goes straight to `collision::proximity` (full GJK, EPA on overlap) with no bounding test. `Placed::bounding_sphere` is written, exact for all four primitives, and called from nowhere in the workspace — so the mid-phase test this item requires already exists and is merely unwired.
-- M-16 (**gap**): item 3's exclusion mechanism is stood in for by `ADJACENT_OVERLAP_ALLOWANCE = 0.003` m subtracted from parent-child depths. One global length, no per-pair or per-shape mask, and no allowance at all for the sibling and grandparent pairs a shoulder or hip produces.
+**M-27 (divergence) is open, and it is the one that matters now.** Audited by
+flattening the G1 layer and counting colliders *through the instance
+prototypes*, since the model instances its collision geometry and a naive count
+reads prototypes rather than instances. Every prototype is instanced exactly
+once, so the scene has **33 colliders: 15 Mesh, 10 Sphere, 6 Cylinder, 2 Cube**,
+and the two cubes are the feet.
 
-Appendix D section 3.2 also records that `complete_simplex`, `box_sat` and `box_box_contacts` set their degeneracy thresholds as absolute lengths, squared lengths and volumes, which embeds a metre-scale assumption.
+The import produces 35 shapes: the 18 primitives, all correct; the 15 meshes,
+kept as references and **never collided**, so the arms, head, thighs and shins
+have no contact geometry at all; and **2 axis-aligned bounding boxes the model
+does not declare**, fitted to the pelvis and torso collision meshes by
+`usd::PROXY_LINKS`.
+
+The proxies are deliberate and documented — this step has no mesh support, so a
+link described only by mesh would otherwise have none — but a bounding box is
+not the shape. It strictly *encloses* the mesh, where every other simulator
+reading this layer collides its convex hull. A torso modelled as its own AABB is
+a different robot from the waist up, and it is why the pelvis has any contact
+geometry in these runs.
+
+The fix is bounded rather than open-ended, and it closes both halves at once:
+`collision::gjk_epa` already works against any shape that can answer a support
+query, so a convex hull needs a vertex cloud and `argmax_i (v_i . d)`. The 15
+dropped meshes become real geometry and the 2 fabricated proxies become
+unnecessary. That is the next piece of work this step owns.
+
+Appendix D section 3.2 also records that several degeneracy thresholds were set
+as absolute lengths, squared lengths and volumes, embedding a metre-scale
+assumption; the ones on the GJK/EPA path are now relative.
 
 ---
 

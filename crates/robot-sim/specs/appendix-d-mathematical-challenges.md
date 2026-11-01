@@ -408,7 +408,7 @@ test had been comparing two unconverged iterates and reading the difference as
 disagreement; it now sets its own budget and tests what it claims.
 
 This is the quantitative case for the Newton solver of
-[specs/08](../../../docs/example-system-specs/08_solvers.md), which
+[specs/08](../../../docs/example-system-specs/08_solvers_islands.md), which
 [M-22](#m-22) already records as outstanding for the GPU backend on the separate
 ground that Gauss-Seidel does not vectorise. It is now also outstanding on
 accuracy grounds on the CPU, which is a stronger reason and a measured one.

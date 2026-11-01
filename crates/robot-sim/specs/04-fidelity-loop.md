@@ -2,7 +2,13 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md) · [Appendix B](appendix-b-open-questions.md)
 
-**Status**: Partially implemented in plan Step 4 and Step 5. `crates/robot-sim/src/oracle.rs` provides `pendulum_closed_form`, `energy_drift` and `compare_series` (std only, unit-tested). The archival battery in `crates/robot-sim/src/fidelity.rs` uses schema v7 (`shared-analytic-v7`): its seven analytic checks include the 1-rad pendulum trajectory; rows carry real sample indices; v5 and v6 reports are refused. Schema v7 adds the measured G1 zero-torque probe rows (section 2.6), which are recorded as `fail` when they fail and do not change `all_pass`. Scalar tolerances retain their original meanings, and the trajectory's pointwise absolute/relative tolerances are recorded by tier (section 2.5). No the reference simulator output, trace, binding or profile exists in this repository, and none is part of this spec.
+**Status**: Partially implemented in plan Step 4 and Step 5. `crates/robot-sim/src/oracle.rs` provides `pendulum_closed_form`, `energy_drift` and `compare_series` (std only, unit-tested). The archival battery in `crates/robot-sim/src/fidelity.rs` is at schema v8
+(`shared-analytic-v8`): **ten** analytic checks, rows carrying real sample
+indices, and v5 to v7 reports refused. Schema v7 added the measured G1
+zero-torque probe rows (section 2.6), recorded as `fail` when they fail without
+changing `all_pass`; schema v8 adds the three contact and collision rows the
+battery had none of — `plane_normal_force_balance`, `friction_cone_bound` and
+`narrowphase_depth` (ADR 0008 amendment, Appendix D M-20 closed). Scalar tolerances retain their original meanings, and the trajectory's pointwise absolute/relative tolerances are recorded by tier (section 2.5). No the reference simulator output, trace, binding or profile exists in this repository, and none is part of this spec.
 
 **Numbering in this file.** "plan Step N" refers to the implementation plan (Steps 1 to 7). "spec NN" refers to the step file `NN-*.md` in this directory. Section numbers (1 to 5) refer to this file.
 
@@ -88,7 +94,7 @@ Step 4 runs the pendulum trajectory oracle at both declared tiers. Its v6 check 
 | Hand-derived values | per test | hand-derived | per test | set in each test | rule in section 3; these are test assertions, not battery rows |
 | G1 zero-torque fall, floating base, sphere ground, `dt = 5e-4` s (section 2.6) | one fixed scenario (no tier) | measured probe: `SingularJointInertia` at a step, or pass | first failing step (recorded window 2100 to 2400, 4000-step cap) and error kind | none; recorded `fail` row | measured probe row, not a battery check |
 
-### 2.6 G1 zero-torque probe (schema v7)
+### 2.6 G1 zero-torque probe (schema v7, retained at v8)
 
 - Scenario: the floating G1 (`robot_model::fixtures::unitree_g1_29dof_floating_base`), zero applied torque, sphere ground with the `robot-cli` `FLOATING_GROUND` constants, start pose with the pelvis 5 mm above the first contact height, `dt = 5e-4` s, at most 4000 steps. The scenario runner is `fidelity.rs` (`g1_zero_torque_probe`, which calls the private `g1_zero_torque_fall`). The algorithm module `articulated.rs` holds only the array-based dynamics. The row's `scenario` key is `g1-zero-torque-dt-5e-4`. It is one fixed scenario, not a per-tier run, so the report does not imply the coarse tier was measured.
 - Setup failures (fixture load, no contact sphere, a dynamics error during setup) are `ProbeError` values and fail the battery. They are never recorded as a `pass` row. A non-finite `q` or `qd` during the fall is `NotFinite`, not `SingularJointInertia`.
@@ -144,9 +150,48 @@ tests had never produced because random orientations are never collinear.
 
 [Appendix D](appendix-d-mathematical-challenges.md) M-20 (**gap**) is owned here, and Appendix D section 3.1 argues it is the entry that matters most of the twenty-four.
 
-The battery's seven checks — `aba_rne_closed_form`, `articulated_energy_drift`, `energy_drift`, `free_fall`, `pd_equilibrium`, `pendulum_period`, `pendulum_trajectory` — plus the G1 zero-torque probe rows of section 2.6 all exercise a one-degree-of-freedom pendulum, a single free body, or a PD equilibrium. None exercises a contact force, a collision routine, the joint-limit solve, the equality solver, or a multi-degree-of-freedom tree with coupled inertia. Those subsystems have unit tests, but unit tests are not the battery: they carry no tier-indexed tolerance and do not appear in the report this step defines as the record.
+**As first recorded**, the battery's seven checks — `aba_rne_closed_form`,
+`articulated_energy_drift`, `energy_drift`, `free_fall`, `pd_equilibrium`,
+`pendulum_period`, `pendulum_trajectory` — plus the G1 zero-torque probe rows of
+section 2.6 all exercised a one-degree-of-freedom pendulum, a single free body
+or a PD equilibrium. None exercised a contact force, a collision routine, the
+joint-limit solve, the equality solver, or a multi-degree-of-freedom tree with
+coupled inertia.
 
-That matters because eleven of Appendix D's twenty-four entries, plus the pipeline feeding them, are in the contact and collision path — exactly the region with no archival oracle. The two facts are related: an uncovered subsystem is where divergence accumulates unnoticed. The ordering Appendix D suggests is to extend the battery before or alongside fixing those entries, so each fix is measured rather than asserted.
+**Schema v8 closes the contact half of that**: `plane_normal_force_balance`
+checks that a resting body's contact rows carry its weight,
+`friction_cone_bound` that the decoded tangential force stays inside the
+pyramid, and `narrowphase_depth` that the narrow phase reports the depth an
+analytic configuration has. Writing them was worth more than running them: the
+first sample of `narrowphase_depth` found a real defect — `build_polytope`
+returned `None` for a 2-simplex, so two spheres approaching **head-on along a
+line** reported *no contact at all*, and random capsule fuzzing had never found
+it because random orientations are never collinear. Error 0.45 to 1.6e-4 once
+`polytope2` was implemented.
+
+Still uncovered by the battery: the joint-limit solve, the equality solver, and
+a multi-degree-of-freedom tree with coupled inertia. Those have unit tests, and
+unit tests are not the battery — they carry no tier-indexed tolerance and do not
+appear in the report this step defines as the record.
+
+That mattered because eleven of Appendix D's then twenty-four entries, plus the
+pipeline feeding them, were in the contact and collision path — exactly the
+region with no archival oracle. The two facts were related: an uncovered
+subsystem is where divergence accumulates unnoticed, and the ordering Appendix D
+suggested was to extend the battery alongside fixing those entries so each fix
+was measured rather than asserted.
+
+Two later findings confirmed the principle more sharply than the original
+observation did, and both are recorded in Appendix D sections 1.7.4 and 1.7.6. A
+hand-written joint hold with invented gains produced a *passing* stance for weeks
+while masking a factor-of-57 unit error in the model import; and the dual
+solver's failure to converge within its sweep budget was systematically
+under-estimating the contact force, which masked four degenerate constraint rows
+until a solver that converges was put behind it. Neither was findable by reading
+the code. The general rule this step should carry: **a passing run is evidence
+about the run, not about the component you believe it exercises** — so a check
+must be written against the quantity being claimed, not against the absence of a
+blow-up.
 
 Nothing new is needed in the oracle *kinds* to do it. This step's three kinds all apply: analytic rest penetration under a declared penalty stiffness is a closed form, and would have failed immediately on Appendix D M-04; frictionless sliding at penalty equilibrium is a conservation law; an analytic sphere-sphere or plane-box penetration depth is a hand-derived reference value for the narrow phase. Two of the three already exist as unit tests in `articulated.rs` and `collision.rs` and would need tier tolerances and a battery entry rather than new derivations.
 

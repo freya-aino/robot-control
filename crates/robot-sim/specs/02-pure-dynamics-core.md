@@ -4,7 +4,33 @@
 
 **Status (updated 2026-11-01)**: CRBA and `M(q)` **are now implemented**, in `robot_sim::composite`: the composite-rigid-body mass matrix, its `L' D L` factorization over the degree-of-freedom tree, back-substitution, a dense view, and the bias force, all transferred from 02 §2.3, §2.9, §2.10, §2.11 and §3.3. They work in the example's world-orientation-at-tree-centre-of-mass frame rather than the body-local frame the paragraph below records, so both conventions now exist in the crate and the §4 item 2 divergence note is a statement about `articulated` only. The new path is cross-validated against the old one: `M` agrees with the mass matrix built column by column from local-frame inverse dynamics to 1e-10 on the 29-degree-of-freedom G1, and the bias force agrees to 1e-9. That is two different algorithms in two different frames, not a restatement. `InertiaTensor::is_physically_plausible` now tests the principal moments (Appendix D M-03). Original status below.
 
-**Status**: Partially implemented. The existing spatial algebra and articulated ABA/RNE algorithm paths are now refactored to plain fixed-size `f64` arrays, with boundary adapters and the public `ArticulatedBody` API retained. CRBA / M(q) is not implemented; see Appendix C. Refactor regressions pass the closed-form, round-trip, energy, adapter and dense-solver tests, without establishing measured parity with the reference simulator.
+**Status**: **Implemented, in the example's frame convention, and
+cross-validated.** `composite` is the example's own dynamics path: all of
+`cdof`, `cinert`, `cvel` and `cacc` in **world orientation** with the reference
+point at `subtree_com[body_rootid[b]]`, spatial six-vectors ordered `[omega; v]`,
+per [example 02](../../../docs/example-system-specs/02_kinematics_dynamics_smooth.md).
+It provides the position stage, CRBA (`mj_crb`), the `L' D L` factorization over
+the degree-of-freedom tree (`mj_factorM`), back-substitution (`mj_solveLD`), the
+velocity stage (`mj_comVel`), RNE bias forces, and forward dynamics as
+`qacc = M^-1 (tau - qfrc_bias)`.
+
+That last point is a design fact worth stating here rather than leaving
+implicit: the example has **no articulated-body algorithm**. It forms `M`,
+factorises it and solves. That execution model is what makes the correct
+`Free`-joint convention expressible without a separate `S qdd` term, and it is
+what supplies the dense `M` the implicit integrator of
+[03](03-integrators.md) needs — Appendix D M-18 closed.
+
+Validated by **cross-algorithm agreement** rather than assertion: `M(q)` from
+CRBA against `M` built column-by-column from the independently-verified
+local-frame recursion agrees to 1e-10 on the 29-degree-of-freedom G1; bias
+forces to 1e-9; forward composed with inverse dynamics to 1e-8 on the 35-degree-
+of-freedom floating G1; and the point Jacobian against a central finite
+difference. `crate::articulated` keeps the body-local ABA/RNE path and is
+retained precisely as that cross-check.
+
+`inverse_inertia_diagonal` no longer costs `nv` forward-dynamics passes —
+Appendix D M-24 closed.
 
 **Goal**: Keep the mass-matrix-and-bias-force structure (CRBA for `M`, RNE with zero acceleration for the bias `c`) and state the local-frame convention. Covers old §4, items 1–2. Items 3–5 (integration) are in step 03.
 

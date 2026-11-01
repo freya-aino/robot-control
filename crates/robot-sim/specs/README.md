@@ -6,8 +6,9 @@ Status: proposed architecture for `robot-sim`'s physics layer. Not ratified; no 
 
 | Field | Value |
 | --- | --- |
-| Document version | 0.1.4-draft |
+| Document version | 0.1.5-draft |
 | Last revised | 2026-11-01 |
+| Change in 0.1.5-draft | Reworks every step file against the example's implementation of these dynamics and against the problems now measured. The switch-over is done: `world::World` runs composite dynamics, exact collision manifolds and the unified constraint solver, and `robot sim multibody` runs it by default (M-17 closed). `newton` adds the primal solver of example `08` section 6 and is the **default**, on a measured convergence argument rather than a preference — Gauss-Seidel needs 1011 sweeps on sixteen pyramidal rows where Newton needs one. The friction cone is corrected to the example's generator-direction pyramid, which is the inscribed diamond, not the circumscribed square an earlier pass built (41 per cent too much diagonal friction). The model's declared actuators are simulated (M-25) in the model's own units (M-26). Four entries open: **M-22** GPU f32 and degree-of-freedom cap, **M-27** 15 of the G1's 33 colliders unsimulated plus two fabricated bounding-box proxies, **M-28** the declared drive gains are generated defaults. [Appendix D](appendix-d-mathematical-challenges.md) section 1.7 is the current status and supersedes 1.6 |
 | Change in 0.1.4-draft | Records the second correction pass. Fourteen of Appendix D's twenty-four entries are now closed; [Appendix D](appendix-d-mathematical-challenges.md) section 1.6 is the current status table and supersedes 1.5, with 1.6.1 and 1.6.2 stating what the two remaining entries need. New in `robot-sim`: `solver` (the unified constraint problem of `07` and `08`) and `options` (the per-run fidelity knobs of Section 12.1). The battery moves to schema v8 with a plane force-balance, a friction-cone and a narrow-phase row (ADR 0008 amendment) |
 | Change in 0.1.3-draft | Records the precedence change of [Appendix D](appendix-d-mathematical-challenges.md) section 1.0.1: `docs/example-system-specs/` is now the single source of truth for the mathematics and execution model of multi-body simulation, while this project's goals, scope, language, dependency policy, evidence discipline and GPU-bound target are unchanged. Appendix D gains a status section (1.5) recording which of M-01 to M-24 are fixed, and 1.5.1 recording what M-05 and M-06 turned out to need. Appendix B **S-07** and **S-08** are resolved |
 | Change in 0.1.2-draft | Adds [Appendix D](appendix-d-mathematical-challenges.md), the record of a full implementation audit against these step files and against the non-normative `docs/example-system-specs/`, and adds a **Challenges** field to the steps it found entries against (01–07, 09, 11, 12). Opens Appendix B **S-07** to **S-09** for the three entries needing a specification decision. No requirement, acceptance row or deviations list is changed by this revision; the audit records where the code does not meet the text already here |
@@ -28,27 +29,66 @@ Every step file uses the same header fields:
 - **Inputs/outputs** — the data the step consumes and produces.
 - **Done when** — the observable completion criteria.
 - **Open questions** — Appendix B entries that block the step, or `none blocking`. Non-blocking items are not listed here.
-- **Challenges** — present only on a step the implementation audit of [Appendix D](appendix-d-mathematical-challenges.md) found something in. It names the Appendix D entries that step owns, with their severity, and is a statement about the code, never a change to the requirement above it. A step with no such field had nothing found against it; `08` and `10` are in that position, and `00` states the target rather than an algorithm.
+- **Challenges** — present only on a step the implementation audit of [Appendix D](appendix-d-mathematical-challenges.md) found something in. It names the Appendix D entries that step owns, with their severity, and is a statement about the code, never a change to the requirement above it. A step with no such field had nothing found against it; `10` is in that position, and `00` states the target rather than an algorithm. `08` acquired one in 0.1.5-draft, when the USD import was audited against the layer.
 
 Each step file links back to this index in its first line. Cross-references to other steps and to appendices are Markdown links. The old spec's requirements and content are mapped below into step files and appendices; wording is adjusted where implementation status or superseded history requires clarification. Step 04 adds the source-faithful oracle plan.
+
+## Current priorities
+
+Four Appendix D entries are open. In the order the dependencies run:
+
+1. **M-27 — mesh collision** ([07](07-collision-pipeline.md) item 2 and
+   [08](08-model-compilation-and-sensors.md) item 3, both MUSTs). 15 of the G1's
+   33 colliders are meshes and are not collided at all; two axis-aligned
+   bounding boxes the model does not declare stand in on the pelvis and torso.
+   Every contact claim about a link the model describes only by mesh is
+   currently a claim about geometry that is not there. The fix is bounded:
+   `collision::gjk_epa` already accepts any shape answering a support query, so
+   a convex hull is a vertex cloud and `argmax_i (v_i . d)`. Open decision
+   S-11 (hull or decomposition).
+2. **M-28 — the declared drive gains** ([05](05-passive-forces-and-actuators.md)).
+   Not a code defect: the actuators are simulated correctly, at correct units,
+   and the gains they carry are generated defaults. Open decision S-10 (what a
+   named tier pins, and whether to carry a published gain set as a declared
+   override).
+3. **The implicit integrator family** ([03](03-integrators.md) item 4, a MUST).
+   Needed before any "stable at a usable timestep on a real humanoid" claim,
+   and needed sooner if a stiffer gain set than the G1's declared one is ever
+   used, because a drive's damping is currently explicit rather than folded
+   into the `qH` term.
+4. **M-22 — the GPU backend** ([11](11-gpu-batched-backend.md),
+   [12](12-cpu-gpu-agreement.md)). The solver prerequisite has landed; what
+   remains is a sparse Hessian, the sparse tree factorization of example `12`
+   section 7.2, and the `f32`/`MAX_DOF` questions against the G1's 35 degrees of
+   freedom at `cond(M) ~ 1e5`.
+
+One methodological point earned the hard way and recorded in
+[Appendix D](appendix-d-mathematical-challenges.md) sections 1.7.4 and 1.7.6,
+because it bears on how any of the above should be validated: **a simulation
+that looks plausible is weak evidence about the component you are testing.** A
+hand-written joint hold with invented gains produced a passing stance for weeks
+while masking a factor-of-57 unit error in the model import, and the dual
+solver's failure to converge was acting as damping that hid four degenerate
+constraint rows. Both were found by making the thing under test actually run and
+converge, not by reading it.
 
 ## Step index
 
 | Step file | Step | Status | Depends on |
 | --- | --- | --- | --- |
 | [00-target-and-constraints.md](00-target-and-constraints.md) | Target, constraints, evidence base | Specification only | — |
-| [01-state-and-coordinates.md](01-state-and-coordinates.md) | Generalized coordinates, `Free` / `Ball` joints | `Free` implemented; `Ball` deferred. Both audit defects fixed: the velocity convention is the example's in `composite` (D/M-01, B/S-07 resolved, momentum now exact to 1e-14) and joint axes are normalised at one accessor (D/M-02) | 00 |
-| [02-pure-dynamics-core.md](02-pure-dynamics-core.md) | Mass matrix (CRBA), bias forces (RNE), frame convention | **CRBA and M(q) implemented** in `composite` (world-orientation frame), cross-validated against the local-frame recursion to 1e-10 on the G1; `articulated` keeps the body-local ABA/RNE path. D/M-18 and D/M-24 closed | 01 |
-| [03-integrators.md](03-integrators.md) | Integrator family (`implicitfast`, `implicit`, RK4) | `M(q)` now exists (D/M-18 closed) and RK4 takes a `Free` joint with the Munthe-Kaas correction (D/M-19 closed). Still not the stepper the CLI runs (D/M-17), and the sparse `implicit`/`implicitfast` path is unported | 02 |
-| [04-fidelity-loop.md](04-fidelity-loop.md) | Source-faithful oracle plan: oracle definitions, tolerance table per tier, derivation rules | Schema v8: the battery now carries a plane force-balance, a friction-cone and a narrow-phase row (D/M-20 closed, ADR 0008 amended). Writing them found a real collision defect on the first sample | 02, 03 |
-| [05-passive-forces-and-actuators.md](05-passive-forces-and-actuators.md) | Passive forces, actuators, tendons (deferred) | Partially implemented (linear scalar-joint spring/damper and affine direct-joint actuator subset), correct but unreachable: the actuation that runs is `stance_torques`, which bypasses the gain/bias factoring and `ActuatorSpec` entirely (D/M-17) | 02, 03 |
-| [06-equality-constraints-and-solver.md](06-equality-constraints-and-solver.md) | Contact and equality constraint solver | **Implemented** in `solver`: contact, limit and equality rows in one convex problem, exact `A_ii` impedance, pyramidal friction cone, warm start (D/M-08 to M-13 and M-23 closed; B/S-09 resolved). Missing: the elliptic cone, `condim` 4 and 6, and the Newton and conjugate-gradient algorithms of `08` | 03, 05 |
-| [07-collision-pipeline.md](07-collision-pipeline.md) | Broad, mid and narrow phase collision | Broad phase, pair-exclusion filter, signed-volume GJK with the polytope2/3/4 constructions, exact plane manifolds and the edge-edge fix all landed (D/M-04 to M-07, M-15, M-16 closed). Missing: a mid-phase bounding-volume tree, mesh convex hulls | 01 |
-| [08-model-compilation-and-sensors.md](08-model-compilation-and-sensors.md) | Model compilation, asset import, sensors | Not started | 01, 02 |
-| [09-fidelity-tiers.md](09-fidelity-tiers.md) | Enumerated fidelity knobs and named tiers | Knobs implemented as `options::SimOptions`: all seven per-run, validated rather than clamped, and recorded per run (D/M-21 closed). The named tiers themselves remain open under B/S-03 | 03, 06, 07 |
-| [10-cpu-reference-backend.md](10-cpu-reference-backend.md) | CPU reference backend and backend-agnostic interface | Partially implemented (single-instance backend, `Environment`) | 02, 03 |
-| [11-gpu-batched-backend.md](11-gpu-batched-backend.md) | GPU-batched execution architecture | Partial: CubeCL f32 kernel subset in `crates/robot-sim-gpu` (`cubecl` feature; ADR 0012); G1/ABA and full contact solver not ported. Audit: `MAX_DOF = 6` against the G1's 35, and `cond(M) >~ 1e5` against f32 (D/M-22), both measured arguments bearing on S-01 | 10 |
-| [12-cpu-gpu-agreement.md](12-cpu-gpu-agreement.md) | Validation, evidence and cross-backend agreement | Partial: feature-gated CubeCL f32 CPU/GPU agreement subset (ADR 0012); no full G1/ABA agreement. Audit: the measured G1 conditioning sets what an f32 tolerance can be (D/M-22), and the CPU reference is itself unoracled for contact (D/M-20) | 10, 11 |
+| [01-state-and-coordinates.md](01-state-and-coordinates.md) | Generalized coordinates, `Free` / `Ball` joints | `Free` implemented **in the example's convention** (world linear first, body angular second), momentum exact to 1e-14; axes normalised at one accessor. `Ball` deferred. D/M-01, M-02 closed; B/S-07 resolved. The layout is not interchangeable with `articulated`'s | 00 |
+| [02-pure-dynamics-core.md](02-pure-dynamics-core.md) | Mass matrix (CRBA), bias forces (RNE), frame convention | **Implemented**: CRBA, `L' D L` factorization, back-substitution and RNE in `composite`, world-orientation frame. Cross-validated against the independent local-frame recursion to 1e-10 on the G1. The example has no articulated-body algorithm; it forms `M` and solves. D/M-18, M-24 closed | 01 |
+| [03-integrators.md](03-integrators.md) | Integrator family (`implicitfast`, `implicit`, RK4) | **Running and selectable per run** (D/M-17 closed). Semi-implicit Euler and RK4, the latter taking a `Free` joint with the Munthe-Kaas correction (D/M-19 closed) and solving the constraint problem at every stage. The `implicit`/`implicitfast` family is the remaining gap against item 4 | 02 |
+| [04-fidelity-loop.md](04-fidelity-loop.md) | Source-faithful oracle plan: oracle definitions, tolerance table per tier, derivation rules | Schema v8: ten checks including a plane force-balance, a friction-cone bound and a narrow-phase depth row (D/M-20 closed, ADR 0008 amended). Writing them found a real collision defect on the first sample | 02, 03 |
+| [05-passive-forces-and-actuators.md](05-passive-forces-and-actuators.md) | Passive forces, actuators, tendons (deferred) | **The model's own actuators are simulated and run** — `mj_fwdActuation` as the example's position servo, with the force clamp, the target clamp and the transmission (D/M-17, M-25, M-26 closed). D/M-28 open: the G1's declared gains are generated defaults, so `ActuationMode` makes applying them a choice. Activation dynamics, tendons and the non-spring passive terms unported | 02, 03 |
+| [06-equality-constraints-and-solver.md](06-equality-constraints-and-solver.md) | Contact and equality constraint solver | **Implemented, both algorithms, running.** One convex problem over contact, limit and equality rows; the example's generator-direction pyramid cone; primal Newton (example `08` §6) as the **default** with projected Gauss-Seidel as its cross-check, agreeing to 1e-8. D/M-08 to M-13 and M-23 closed; B/S-09 resolved. Missing: elliptic cone, `condim` 4 and 6, islands | 03, 05 |
+| [07-collision-pipeline.md](07-collision-pipeline.md) | Broad, mid and narrow phase collision | Broad phase, pair filter, signed-volume GJK with the polytope2/3/4 constructions, exact plane manifolds and the edge-edge fix all landed (D/M-04 to M-07, M-15, M-16 closed). **D/M-27 open and it is a MUST**: 15 of the G1's 33 colliders are meshes and are not collided, and two bounding-box proxies the model does not declare are fabricated. The fix is a support-query convex hull | 01 |
+| [08-model-compilation-and-sensors.md](08-model-compilation-and-sensors.md) | Model compilation, asset import, sensors | **USD import exists and is audited exact** on masses (33.341142 kg to the digit), all 30 inertia tensors through `principalAxes` to 1e-6, and all 29 joint limits, velocities, efforts and axes with zero mismatches. **Item 3 violated** (D/M-27): mesh collision is dropped rather than hulled. Sensors not started | 01, 02 |
+| [09-fidelity-tiers.md](09-fidelity-tiers.md) | Enumerated fidelity knobs and named tiers | Knobs implemented as `options::SimOptions`: per-run, validated rather than clamped, recorded per run (D/M-21 closed). Three were added by measurement — `limit_margin`, `max_faces` as a termination condition, and the solver algorithm. Named tiers remain open under B/S-03 | 03, 06, 07 |
+| [10-cpu-reference-backend.md](10-cpu-reference-backend.md) | CPU reference backend and backend-agnostic interface | **Two backends behind one interface**: `cpu-world` (corrected path) and `cpu-multibody` (legacy). Both names reported, because their observation layouts differ for a `Free` joint. `ArticulatedBody` retained deliberately as the independent oracle | 02, 03 |
+| [11-gpu-batched-backend.md](11-gpu-batched-backend.md) | GPU-batched execution architecture | Partial: CubeCL f32 kernel subset (ADR 0012). **The CPU prerequisite has landed** — the primal Newton solver the batched path needs now exists, for two independent reasons (Gauss-Seidel neither vectorises nor converges). Still needed: a sparse Hessian and the sparse tree factorization of example `12` §7.2. D/M-22 open: `MAX_DOF = 6` against 35, f32 against `cond(M) ~ 1e5` | 10 |
+| [12-cpu-gpu-agreement.md](12-cpu-gpu-agreement.md) | Validation, evidence and cross-backend agreement | Partial: feature-gated CubeCL f32 agreement subset (ADR 0012). **The CPU reference is no longer unoracled for contact** (D/M-20 closed) and the two CPU solvers cross-check to 1e-8, so a GPU backend now has something to agree with. D/M-22 sets the f32 tolerance; D/M-27 means a contact agreement test has no geometry to use | 10, 11 |
 
 Dependencies are derived from the cross-references in the old spec; they are a starting point to be confirmed at each step's review.
 
@@ -57,9 +97,9 @@ Appendices:
 | File | Content |
 | --- | --- |
 | [appendix-a-citations.md](appendix-a-citations.md) | Appendix A — Citation ledger |
-| [appendix-b-open-questions.md](appendix-b-open-questions.md) | Appendix B — Open questions (S-01 to S-06) |
+| [appendix-b-open-questions.md](appendix-b-open-questions.md) | Appendix B — Open questions (S-01 to S-06; S-07 to S-09 resolved) |
 | [appendix-c-existing-code.md](appendix-c-existing-code.md) | Appendix C — Relationship to existing `robot-sim` code |
-| [appendix-d-mathematical-challenges.md](appendix-d-mathematical-challenges.md) | Appendix D — Mathematical and algorithmic challenges to the current implementation (M-01 to M-24) |
+| [appendix-d-mathematical-challenges.md](appendix-d-mathematical-challenges.md) | Appendix D — Mathematical and algorithmic challenges to the current implementation (M-01 to M-28; 24 closed, M-22, M-27 and M-28 open) |
 
 ## Old-to-new section map
 

@@ -2,7 +2,47 @@
 
 [Index](README.md) · [Appendix A](appendix-a-citations.md)
 
-**Status**: Not started. `robot_model::urdf::parse_link` treats a missing `<inertial>` element as `MassProperties::MASSLESS` (see §10 item 1). The sensor-noise injection point is undecided (Appendix B S-06).
+**Status**: **USD import exists and is audited; one of this step's MUSTs is
+violated.** Sensors are not started.
+
+The official OpenUSD G1 description is the project's model standard (ADR 0015),
+and `robot_model::usd` imports it. Audited against the flattened layer on
+2026-11-01, the following is **exact**:
+
+- 30 links, with masses identical to the layer and a total of 33.341142 kg to
+  the digit;
+- all 30 inertia tensors matching `physics:diagonalInertia` rotated by
+  `physics:principalAxes` to within 1e-6, so the principal-axes handling is
+  right;
+- all 29 joints matching on kind, lower and upper limit, maximum velocity,
+  effort and axis, with **zero mismatches** — angular quantities converted from
+  degrees, which the layer states them in;
+- 29 drives, read into `ActuatorSpec::gains` and the joint effort limit, with
+  stiffness and damping converted from per-degree to per-radian (Appendix D
+  M-26; see [05](05-passive-forces-and-actuators.md)).
+
+**Item 3 is violated.** It is a MUST that mesh collision geometry be reduced to
+a convex hull before any narrow-phase routine sees it. Instead the 15 mesh
+colliders are dropped and two axis-aligned bounding boxes the model does not
+declare are fabricated on `pelvis` and `torso_link` by `usd::PROXY_LINKS`.
+Appendix D M-27 records the count and the consequence; the owning work is
+[07](07-collision-pipeline.md)'s support-query hull.
+
+**Item 1 is moot for this model and still open for URDF.** The G1 USD carries
+explicit inertias for every link, so geometry-based inference is not needed to
+load it. `robot_model::urdf::parse_link` still treats a missing `<inertial>` as
+`MassProperties::MASSLESS`, which is the gap item 1 names, and it still applies
+to any URDF import.
+
+**Item 2 is unimplemented and now has a measured argument.** The G1 USD gives 30
+links and 29 joints where the vendored URDF fixture gives 39 and 38 — the
+difference is fixed joints, and it is exactly what a static-fusing pass would
+collapse. That count is also why [`World`](../src/world.rs) must take the
+actuated-joint mapping from the profile rather than infer it from a degree-of-
+freedom offset, which is recorded in Appendix D section 1.7.5.
+
+Sensors: not started. The sensor-noise injection point is undecided
+(Appendix B S-06).
 
 **Goal**: Geometry-based inertia inference as an opt-in import mode, an optional static-body fusing pass, convex-hull reduction for meshes, a sensor type set, and an explicit sensor-noise policy. Covers old §9 and §10.
 
@@ -20,6 +60,20 @@ Evidence tag: `unverified` for every behavioural claim in this step, including t
 **Inputs/outputs**: Input: URDF link inertial and collision geometry, compiler options. Output: a compiled model with inferred or explicit mass properties, optional fused bodies, and convex hulls for mesh collision.
 
 **Done when**: Inertia inference is opt-in and never changes the default import behavior. Static fusing is a caller-selected transform. Mesh collision is always reduced to a convex hull at compile time. Sensor noise is generated at a declared point and recorded as such.
+
+**Status against Done when**: mesh collision is **not** reduced to a convex
+hull; it is dropped, with a bounding-box proxy substituted on two links. The
+other three clauses are untouched. A run's own output states which collision
+shapes were modelled and which were not, so the gap is visible rather than
+silent.
+
+**Challenges**: Appendix D **M-27** (**divergence**) — see above and
+[07](07-collision-pipeline.md). **M-26** (**defect**, closed) — an angular
+drive's stiffness and damping are per degree, and this importer converted the
+joint limits and the maximum velocity from degrees but not the gains, so every
+drive was understated by 180/pi. A gain is a torque per unit *angle* and
+converts the opposite way to an angle; that asymmetry is the whole error, and it
+is worth stating here because this step owns the import.
 
 **Open questions**: Appendix B S-05 (exact inference algorithm) and S-06 (sensor-noise location) are both blocking for this step's sensor-noise and inference items. Both are listed in [Appendix B](appendix-b-open-questions.md).
 
