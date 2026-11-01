@@ -240,9 +240,13 @@ pub fn point_jacobian_dot(
     cdof_dot: &[[f64; 6]],
     point: [f64; 3],
     body: usize,
-) -> Vec<f64> {
+) -> (Vec<f64>, Vec<f64>) {
     let nv = model.tree.nv;
     let mut jacp = vec![0.0; 3 * nv];
+    // The rotational Jacobian is `jacr[:, i] = cdof[i][0:3]`, so its derivative
+    // is `cdof_dot[i][0:3]` directly -- no transport term, because a rotational
+    // row does not depend on where the contact point is.
+    let mut jacr = vec![0.0; 3 * nv];
     let offset = sub3(point, pos.subtree_com[body]);
     // The point's own velocity, transformed from the tree reference point to
     // `point` (motion convention: linear part picks up `omega x offset`).
@@ -270,11 +274,12 @@ pub fn point_jacobian_dot(
         );
         for r in 0..3 {
             jacp[r * nv + d] = term[r];
+            jacr[r * nv + d] = cdd_ang[r];
         }
         let p = model.tree.dof_parentid[d];
         i = if p < 0 { None } else { Some(p as usize) };
     }
-    jacp
+    (jacp, jacr)
 }
 
 /// The last degree of freedom owned by `body` or, if it has none, by its
@@ -622,30 +627,46 @@ pub fn default_solimp() -> [f64; 5] {
 /// 07 section 9.2). `point` is the contact position in world coordinates. Pass
 /// `body_b = None` for a contact against a static environment.
 ///
-/// At `condim = 1` one row along the normal. At `condim = 3` the four
-/// **pyramid edges** of 07 section 9.2, with Jacobians `n + mu t_1`,
-/// `n - mu t_1`, `n + mu t_2`, `n - mu t_2` and non-negative coefficients, in
-/// that order.
+/// `friction` is the five-element vector the example's contact-parameter mixing
+/// produces (07 section 3.1): `(fri0, fri0, fri1, fri2, fri2)` — sliding
+/// friction twice, then torsional, then rolling twice. Use
+/// [`sliding_friction`] to build one from a single sliding coefficient.
 ///
-/// # Why edges rather than a normal and two tangents
+/// # Row structure
 ///
-/// An earlier version of this function emitted one normal row plus two
-/// tangential rows, and bounded each tangential force by `mu` times the normal
-/// force inside the solver. That is a cone, but it is the wrong one: bounding
-/// each tangential component independently gives the pyramid whose
-/// cross-section is a **square** of half-width `mu f_n`, which circumscribes
-/// the true circular cone and allows up to `sqrt(2) mu f_n` of friction along a
-/// diagonal -- about 41 per cent too much.
+/// At `condim = 1` one row along the normal. Above that, the
+/// **pyramid edges** of 07 section 9.2: `2(condim - 1)` rows, each a generator
+/// direction of the friction cone with a non-negative coefficient, in the
+/// example's order `(+t1, -t1, +t2, -t2, +spin, -spin, +roll1, -roll1, +roll2,
+/// -roll2)`. Row `dimid` uses `dimid2 = dimid/2 + 1` and the direction
 ///
-/// The example's generator form gives the **inscribed diamond** instead: with
-/// `lambda >= 0`, the realised force is `sum_k lambda_k (n +/- mu t_k)`, whose
-/// tangential part satisfies `|f_t1| + |f_t2| <= mu f_n`. That is conservative
-/// rather than permissive, which is the right side to err on for a contact
-/// model, and it is what `mju_decodePyramid` inverts.
+/// - `frame[dimid2]` against the **translational** Jacobian for `dimid2 < 3`
+///   (the two sliding tangents), and
+/// - `frame[dimid2 - 3]` against the **rotational** Jacobian for
+///   `dimid2 >= 3` (spin about the normal at `condim >= 4`, rolling about the
+///   two tangents at `condim = 6`).
+///
+/// So `condim` 4 adds torsional friction and `condim` 6 adds rolling friction,
+/// which is what makes it a per-contact fidelity parameter rather than a
+/// compile-time choice (`specs/06` item 4).
+///
+/// # A direction with zero friction contributes no rows
+///
+/// This generalises a defect that cost a diverging G1. The edge directions are
+/// `n +/- mu d`, so at `mu = 0` both collapse onto `n`: two identical rows,
+/// with `Rpy = 2 mu^2 R0` zero, so `D = 1/R` saturates at `1/MINVAL` and the
+/// Hessian loses every pivot. A coefficient of zero means that direction
+/// carries no friction, and the example's own answer for a contact with no
+/// friction at all is `dim == 1`. So each direction is included only when its
+/// coefficient is positive, and a contact whose every coefficient is zero gets
+/// the single frictionless normal row.
+///
+/// That matters more at `condim` 4 and 6 than at 3, because torsional and
+/// rolling coefficients are commonly zero while sliding friction is not.
 ///
 /// # Errors
 ///
-/// [`CompositeError::WidthMismatch`] if `condim` is not 1 or 3.
+/// [`CompositeError::WidthMismatch`] if `condim` is not 1, 3, 4 or 6.
 #[allow(clippy::too_many_arguments)]
 pub fn contact_rows(
     model: &CompositeModel,
@@ -659,54 +680,69 @@ pub fn contact_rows(
     body_a: usize,
     body_b: Option<usize>,
     condim: usize,
-    friction: f64,
+    friction: [f64; 5],
     solref: [f64; 2],
     solimp: [f64; 5],
     margin: f64,
     out: &mut Vec<Row>,
 ) -> Result<(), CompositeError> {
-    if condim != 1 && condim != 3 {
+    if !matches!(condim, 1 | 3 | 4 | 6) {
         return Err(CompositeError::WidthMismatch {
-            what: "condim (only 1 and 3 are implemented)",
+            what: "condim (1, 3, 4 and 6 are the example's values)",
             expected: 3,
             found: condim,
         });
     }
     let nv = model.tree.nv;
-    // The relative point Jacobian and its derivative: body a minus body b.
-    let (ja, _) = point_jacobian(model, pos, point, body_a);
-    let jda = point_jacobian_dot(model, pos, cvel, cdof_dot, point, body_a);
-    let (jb, jdb) = match body_b {
-        Some(b) => (
-            point_jacobian(model, pos, point, b).0,
-            point_jacobian_dot(model, pos, cvel, cdof_dot, point, b),
+    // The relative point Jacobians and their derivatives: body a minus body b,
+    // translational and rotational.
+    let (ja_p, ja_r) = point_jacobian(model, pos, point, body_a);
+    let (jda_p, jda_r) = point_jacobian_dot(model, pos, cvel, cdof_dot, point, body_a);
+    let (jb_p, jb_r, jdb_p, jdb_r) = match body_b {
+        Some(b) => {
+            let (p, r) = point_jacobian(model, pos, point, b);
+            let (dp, dr) = point_jacobian_dot(model, pos, cvel, cdof_dot, point, b);
+            (p, r, dp, dr)
+        }
+        None => (
+            vec![0.0; 3 * nv],
+            vec![0.0; 3 * nv],
+            vec![0.0; 3 * nv],
+            vec![0.0; 3 * nv],
         ),
-        None => (vec![0.0; 3 * nv], vec![0.0; 3 * nv]),
     };
-    let rel: Vec<f64> = ja.iter().zip(&jb).map(|(x, y)| x - y).collect();
-    let rel_dot: Vec<f64> = jda.iter().zip(&jdb).map(|(x, y)| x - y).collect();
+    let rel_p: Vec<f64> = ja_p.iter().zip(&jb_p).map(|(x, y)| x - y).collect();
+    let rel_r: Vec<f64> = ja_r.iter().zip(&jb_r).map(|(x, y)| x - y).collect();
+    let rel_dp: Vec<f64> = jda_p.iter().zip(&jdb_p).map(|(x, y)| x - y).collect();
+    let rel_dr: Vec<f64> = jda_r.iter().zip(&jdb_r).map(|(x, y)| x - y).collect();
 
-    // Projects the relative Jacobian onto a direction in the contact frame.
+    // Projects a relative Jacobian onto a direction in the contact frame.
     let project = |dir: [f64; 3], src: &[f64]| -> Vec<f64> {
         (0..nv)
             .map(|i| (0..3).map(|r| dir[r] * src[r * nv + i]).sum::<f64>())
             .collect()
     };
 
-    // A pair with zero friction is a frictionless contact, whatever `condim`
-    // asks for, and 07 section 9.2 gives that one row along the normal.
-    //
-    // Building a pyramid anyway is not merely wasteful, it is singular: the
-    // edge directions are `n +/- mu t_k`, so at `mu = 0` all four collapse onto
-    // `n` and the four rows become identical. Worse, `Rpy = 2 mu^2 R0` is then
-    // zero, so `D = 1/R` saturates at `1/MINVAL = 1e15` and the Hessian
-    // `M + J' D_q J` loses every pivot to cancellation. That is not
-    // hypothetical: it is what made the Newton solver diverge on step 1511 of
-    // the G1 collapse, once the folded robot began contacting its own links
-    // through a pair friction of zero.
-    if condim == 1 || friction <= 0.0 {
-        let j = project(normal, &rel);
-        let jd = project(normal, &rel_dot);
+    let (t1, t2) = contact_tangents(normal);
+    // The generator directions this contact actually has, in the example's
+    // order. `angular` says which Jacobian the direction multiplies.
+    let mut dirs: Vec<([f64; 3], bool, f64)> = Vec::new();
+    if condim >= 3 {
+        dirs.push((t1, false, friction[0]));
+        dirs.push((t2, false, friction[1]));
+    }
+    if condim >= 4 {
+        dirs.push((normal, true, friction[2]));
+    }
+    if condim >= 6 {
+        dirs.push((t1, true, friction[3]));
+        dirs.push((t2, true, friction[4]));
+    }
+    dirs.retain(|(_, _, mu)| *mu > 0.0);
+
+    if dirs.is_empty() {
+        let j = project(normal, &rel_p);
+        let jd = project(normal, &rel_dp);
         out.push(Row {
             jdot_v: dot(&jd, qd),
             jacobian: j,
@@ -719,18 +755,30 @@ pub fn contact_rows(
         return Ok(());
     }
 
-    let (t1, t2) = contact_tangents(normal);
+    let normal_j = project(normal, &rel_p);
+    let normal_jd = project(normal, &rel_dp);
     let first_edge = out.len();
-    for t in [t1, t2] {
+    for (dir, angular, mu) in dirs {
+        let (src, src_d): (&[f64], &[f64]) = if angular {
+            (&rel_r, &rel_dr)
+        } else {
+            (&rel_p, &rel_dp)
+        };
+        let dir_j = project(dir, src);
+        let dir_jd = project(dir, src_d);
         for sign in [1.0f64, -1.0] {
-            // The edge direction itself: n +/- mu t.
-            let dir = [
-                normal[0] + sign * friction * t[0],
-                normal[1] + sign * friction * t[1],
-                normal[2] + sign * friction * t[2],
-            ];
-            let j = project(dir, &rel);
-            let jd = project(dir, &rel_dot);
+            // The edge itself: the normal direction plus or minus `mu` times
+            // this generator's direction, on whichever Jacobian it belongs to.
+            let j: Vec<f64> = normal_j
+                .iter()
+                .zip(&dir_j)
+                .map(|(n, d)| n + sign * mu * d)
+                .collect();
+            let jd: Vec<f64> = normal_jd
+                .iter()
+                .zip(&dir_jd)
+                .map(|(n, d)| n + sign * mu * d)
+                .collect();
             out.push(Row {
                 jdot_v: dot(&jd, qd),
                 jacobian: j,
@@ -738,40 +786,54 @@ pub fn contact_rows(
                 solref,
                 solimp,
                 margin,
-                kind: RowKind::ContactPyramid {
-                    first_edge,
-                    mu: friction,
-                },
+                kind: RowKind::ContactPyramid { first_edge, mu },
             });
         }
     }
     Ok(())
 }
 
-/// `mju_decodePyramid`: the contact-frame force `(normal, t1, t2)` of a
-/// pyramidal contact, from the four non-negative edge coefficients in the order
-/// [`contact_rows`] emits them.
+/// The example's five-element friction vector for a contact with sliding
+/// friction only (07 section 3.1's `(fri0, fri0, fri1, fri2, fri2)` with the
+/// torsional and rolling entries zero).
 ///
-/// `f_n = sum_k lambda_k`, and `f_tk = mu (lambda_{2k} - lambda_{2k+1})`. The
-/// result always satisfies `|f_t1| + |f_t2| <= mu f_n`, which is the pyramid
-/// this representation realises.
+/// Zero torsional and rolling friction is this project's default rather than
+/// the example's numbers: rule 2 of the mapping document keeps the example's
+/// constants with the engine they describe, so adopting its
+/// `friction = [1, 0.005, 0.0001]` would need its own measurement. A zero
+/// entry contributes no rows, so a `condim` of 4 or 6 with this vector behaves
+/// exactly as 3 does — the dimensionality is available and unused until a
+/// coefficient is supplied.
 #[must_use]
-pub fn decode_pyramid(edges: &[f64], mu: f64) -> [f64; 3] {
+pub fn sliding_friction(mu: f64) -> [f64; 5] {
+    [mu, mu, 0.0, 0.0, 0.0]
+}
+
+/// `mju_decodePyramid`: the contact-frame force of a pyramidal contact, from
+/// its non-negative edge coefficients.
+///
+/// Returns `(normal, components)`, where `components[k]` is the force along the
+/// k-th generator direction `contact_rows` emitted — the sliding tangents
+/// first, then spin, then rolling, with any zero-coefficient direction absent.
+/// `mus` is that direction's coefficient, in the same order.
+///
+/// `f_n = sum_k lambda_k` and `component_k = mu_k (lambda_{2k} -
+/// lambda_{2k+1})`. The result always satisfies
+/// `sum_k |component_k| <= mu f_n` when every `mu` is equal, which is the
+/// pyramid this representation realises: the inscribed diamond, not the
+/// circumscribed box.
+#[must_use]
+pub fn decode_pyramid(edges: &[f64], mus: &[f64]) -> (f64, Vec<f64>) {
     let mut normal = 0.0;
-    let mut t1 = 0.0;
-    let mut t2 = 0.0;
+    let mut components = Vec::with_capacity(mus.len());
     for (k, pair) in edges.chunks(2).enumerate() {
         let plus = pair.first().copied().unwrap_or(0.0);
         let minus = pair.get(1).copied().unwrap_or(0.0);
         normal += plus + minus;
-        let tangential = mu * (plus - minus);
-        if k == 0 {
-            t1 = tangential;
-        } else if k == 1 {
-            t2 = tangential;
-        }
+        let mu = mus.get(k).copied().unwrap_or(0.0);
+        components.push(mu * (plus - minus));
     }
-    [normal, t1, t2]
+    (normal, components)
 }
 
 #[cfg(test)]
@@ -890,7 +952,7 @@ mod tests {
                     0,
                     None,
                     condim,
-                    friction,
+                    sliding_friction(friction),
                     default_solref(),
                     default_solimp(),
                     0.0,
@@ -964,7 +1026,7 @@ mod tests {
                     0,
                     None,
                     1,
-                    0.0,
+                    sliding_friction(0.0),
                     default_solref(),
                     default_solimp(),
                     0.0,
@@ -1054,7 +1116,7 @@ mod tests {
                         0,
                         None,
                         3,
-                        mu,
+                        sliding_friction(mu),
                         default_solref(),
                         default_solimp(),
                         0.0,
@@ -1078,11 +1140,12 @@ mod tests {
                     for (edge, f) in solution.force.iter().enumerate() {
                         assert!(*f >= -1e-12, "pyramid edge {edge} pulled: {f}");
                     }
-                    let [fn_, ft1, ft2] = decode_pyramid(&solution.force, mu);
+                    let (fn_, components) = decode_pyramid(&solution.force, &[mu, mu]);
                     assert!(fn_ >= -1e-12, "the normal force must not pull: {fn_}");
+                    let tangential: f64 = components.iter().map(|c| c.abs()).sum();
                     assert!(
-                        ft1.abs() + ft2.abs() <= mu * fn_.max(0.0) + 1e-9,
-                        "friction ({ft1}, {ft2}) leaves the pyramid of bound {}",
+                        tangential <= mu * fn_.max(0.0) + 1e-9,
+                        "friction {tangential} leaves the pyramid of bound {}",
                         mu * fn_.max(0.0)
                     );
                     warm = Some(solution.force.clone());
@@ -1139,7 +1202,7 @@ mod tests {
             0,
             None,
             1,
-            0.0,
+            sliding_friction(0.0),
             default_solref(),
             default_solimp(),
             0.0,
@@ -1268,7 +1331,7 @@ mod tests {
                 0,
                 None,
                 3,
-                0.6,
+                sliding_friction(0.6),
                 default_solref(),
                 default_solimp(),
                 0.0,
@@ -1430,7 +1493,7 @@ mod tests {
                 0,
                 None,
                 3,
-                mu,
+                sliding_friction(mu),
                 default_solref(),
                 default_solimp(),
                 0.0,
@@ -1443,5 +1506,166 @@ mod tests {
         assert_eq!(frictionless.len(), 1, "zero friction is one normal row");
         assert_eq!(frictionless[0].kind, RowKind::ContactNormal);
         assert_eq!(build(0.6).len(), 4, "a real pyramid is four edges");
+    }
+    #[test]
+    fn condim_selects_the_example_row_counts_and_directions() {
+        // 07 section 9.2: a pyramidal contact has `2(condim - 1)` rows, in the
+        // order (+t1, -t1, +t2, -t2, +spin, -spin, +roll1, -roll1, +roll2,
+        // -roll2). The sliding tangents multiply the translational Jacobian and
+        // spin and rolling multiply the rotational one, which is what makes
+        // condim 4 and 6 different in kind from 3 rather than just longer.
+        let profile = free_body(2.0);
+        let model = CompositeModel::from_profile(&profile);
+        let mut state = CompositeState::identity(&model);
+        state.q[2] = -0.002;
+        let pos = position(&model, &state.q).unwrap();
+        let (cvel, cdof_dot) = com_vel(&model, &pos, &state.qd).unwrap();
+
+        let build = |condim: usize, friction: [f64; 5]| {
+            let mut rows = Vec::new();
+            contact_rows(
+                &model,
+                &pos,
+                &cvel,
+                &cdof_dot,
+                &state.qd,
+                [0.0, 0.0, -0.002],
+                [0.0, 0.0, 1.0],
+                0.002,
+                0,
+                None,
+                condim,
+                friction,
+                default_solref(),
+                default_solimp(),
+                0.0,
+                &mut rows,
+            )
+            .unwrap();
+            rows
+        };
+
+        // Sliding only: condim 4 and 6 add nothing, because their coefficients
+        // are zero and a zero direction contributes no rows.
+        assert_eq!(build(1, sliding_friction(0.6)).len(), 1);
+        assert_eq!(build(3, sliding_friction(0.6)).len(), 4);
+        assert_eq!(build(4, sliding_friction(0.6)).len(), 4);
+        assert_eq!(build(6, sliding_friction(0.6)).len(), 4);
+
+        // With a torsional coefficient, condim 4 is the example's six rows.
+        let torsional = [0.6, 0.6, 0.01, 0.0, 0.0];
+        assert_eq!(build(3, torsional).len(), 4, "condim 3 ignores torsion");
+        assert_eq!(build(4, torsional).len(), 6);
+        // And with rolling as well, condim 6 is ten.
+        let full = [0.6, 0.6, 0.01, 0.002, 0.002];
+        assert_eq!(build(6, full).len(), 10);
+        assert_eq!(build(4, full).len(), 6, "condim 4 ignores rolling");
+
+        // The spin rows act on rotation, not translation. For a free body the
+        // first three degrees of freedom are world-frame linear and the last
+        // three body-frame angular, so a sliding edge must have non-zero
+        // entries in the linear block and a spin edge must differ from the
+        // sliding ones in the angular block.
+        let rows = build(4, torsional);
+        let nv = model.nv();
+        let linear_part = |r: &Row| (0..3).fold(0.0f64, |m, i| m.max(r.jacobian[i].abs()));
+        let angular_part = |r: &Row| (3..nv).fold(0.0f64, |m, i| m.max(r.jacobian[i].abs()));
+        // Row 4 is +spin. Its angular entries come from the rotational
+        // Jacobian scaled by the torsional coefficient.
+        let slide = &rows[0];
+        let spin = &rows[4];
+        assert!(
+            linear_part(slide) > 0.0,
+            "a sliding edge acts on translation"
+        );
+        assert!(angular_part(spin) > 0.0, "a spin edge must act on rotation");
+        // Every edge pair differs only in the sign of its friction term, so
+        // each pair averages to the same plain normal row. That is the
+        // structural invariant of the generator representation: the pyramid is
+        // centred on the normal.
+        let mean_normal: Vec<f64> = (0..nv)
+            .map(|i| 0.5 * (rows[4].jacobian[i] + rows[5].jacobian[i]))
+            .collect();
+        let mean_slide: Vec<f64> = (0..nv)
+            .map(|i| 0.5 * (rows[0].jacobian[i] + rows[1].jacobian[i]))
+            .collect();
+        for i in 0..nv {
+            assert!(
+                (mean_normal[i] - mean_slide[i]).abs() < 1e-12,
+                "every edge pair must average to the same normal row at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_torsional_coefficient_resists_spin_about_the_contact_normal() {
+        // The physical point of condim 4. A body pressed onto a plane and spun
+        // about the contact normal should feel a resisting torque, and should
+        // not at condim 3.
+        let profile = free_body(2.0);
+        let model = CompositeModel::from_profile(&profile);
+        let dt = 1e-3;
+        let spin_decay = |condim: usize, friction: [f64; 5]| {
+            let mut state = CompositeState::identity(&model);
+            state.q[2] = -0.002;
+            // Spin about the contact normal, which is the body-frame angular
+            // z degree of freedom.
+            state.qd[5] = 2.0;
+            let mut warm: Option<Vec<f64>> = None;
+            for _ in 0..200 {
+                let pos = position(&model, &state.q).unwrap();
+                let (cvel, cdof_dot) = com_vel(&model, &pos, &state.qd).unwrap();
+                let tau = vec![0.0; model.nv()];
+                let qacc_smooth = forward_dynamics(&model, &pos, &state.qd, &tau).unwrap();
+                let mut rows = Vec::new();
+                let depth = -state.q[2];
+                if depth > 0.0 {
+                    contact_rows(
+                        &model,
+                        &pos,
+                        &cvel,
+                        &cdof_dot,
+                        &state.qd,
+                        [0.0, 0.0, state.q[2]],
+                        [0.0, 0.0, 1.0],
+                        depth,
+                        0,
+                        None,
+                        condim,
+                        friction,
+                        default_solref(),
+                        default_solimp(),
+                        0.0,
+                        &mut rows,
+                    )
+                    .unwrap();
+                }
+                let solution = solve(
+                    &model,
+                    &pos,
+                    &state.qd,
+                    &qacc_smooth,
+                    &rows,
+                    dt,
+                    SolverConfig::default(),
+                    warm.as_deref(),
+                )
+                .unwrap();
+                warm = Some(solution.force.clone());
+                for (v, a) in state.qd.iter_mut().zip(&solution.qacc) {
+                    *v += dt * a;
+                }
+                let qd = state.qd.clone();
+                crate::composite::integrate_pos(&model, &mut state.q, &qd, dt).unwrap();
+            }
+            state.qd[5]
+        };
+
+        let without = spin_decay(3, sliding_friction(0.8));
+        let with = spin_decay(4, [0.8, 0.8, 0.5, 0.0, 0.0]);
+        assert!(
+            with.abs() < without.abs(),
+            "torsional friction should remove spin: condim 4 left {with}, condim 3 left {without}"
+        );
     }
 }

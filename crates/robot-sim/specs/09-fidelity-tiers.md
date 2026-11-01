@@ -5,7 +5,8 @@
 **Status**: **Knobs implemented; named tiers still open.** `options::SimOptions`
 carries every knob old Section 12 enumerates as a per-run parameter —
 `timestep`, `integrator`, `solver`, `solver_iterations`, `solver_tolerance`,
-`condim`, `contact_slots`, `margin`, `gap`, `limit_margin`, `warm_start`,
+`condim` (all four of the example's values), `contact_slots`, `margin`, `gap`,
+`limit_margin`, `warm_start`,
 `solref`, `solimp` and the convex-collision budget (`CcdConfig`: tolerance,
 iterations, `max_faces`). They are **validated rather than clamped**: an invalid
 combination is refused, not silently adjusted. `SimOptions::record()` emits them

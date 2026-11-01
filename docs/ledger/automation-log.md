@@ -968,3 +968,39 @@ derivative) and `mjd_freeMhat`'s free-body gyroscopic block, which is what makes
 implicitfast and implicit identical for a standalone free body.
 
 Specs at 0.1.8-draft. Gate: 1082 tests, fmt and clippy clean.
+
+## 2026-11-01 — condim 4 and 6: torsional and rolling friction
+
+Step 06 item 4's second MUST. A pyramidal contact now emits the example's
+`2(condim - 1)` generator rows in the order (+t1, -t1, +t2, -t2, +spin, -spin,
++roll1, -roll1, +roll2, -roll2).
+
+The split that matters is which Jacobian each generator multiplies. The two
+sliding tangents multiply the translational Jacobian; spin (about the normal,
+condim >= 4) and rolling (about the two tangents, condim = 6) multiply the
+rotational one. So 4 and 6 differ from 3 in kind, not in length, and
+`point_jacobian_dot` now returns the rotational derivative the extra rows need
+for their `Jdot v` term -- which is `cdof_dot[i][0:3]` directly, with no
+transport term, because a rotational row does not depend on where the contact
+point is.
+
+A direction whose coefficient is zero contributes no rows. That generalises the
+defect that diverged a G1 collapse earlier: the edges are `n +/- mu d`, so at
+mu = 0 both collapse onto `n` and `Rpy = 2 mu^2 R0` vanishes, saturating
+D = 1/R at 1/MINVAL and destroying the Hessian. It matters more at 4 and 6 than
+at 3, because a torsional or rolling coefficient is commonly zero while sliding
+friction is not.
+
+`solver::sliding_friction` builds the example's five-element vector
+`(fri0, fri0, fri1, fri2, fri2)` with the torsional and rolling entries zero, so
+condim 4 and 6 behave exactly as 3 until a coefficient is supplied -- the
+dimensionality is available rather than forced. Rule 2 of the mapping document
+is why the default is zero rather than the example's
+`friction = [1, 0.005, 0.0001]`.
+
+Tested on the structure (row counts per condim and per coefficient; every edge
+pair averaging to the same normal row; spin edges acting on the angular block
+and sliding edges on the linear one) and on the physics (a body spun about the
+contact normal loses its spin at condim 4 and does not at condim 3).
+
+Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.

@@ -1426,7 +1426,7 @@ fn plane_normal_force_balance(dt: Duration) -> Result<Measurement, BatteryError>
                 0,
                 None,
                 1,
-                0.0,
+                crate::solver::sliding_friction(0.0),
                 default_solref(),
                 default_solimp(),
                 0.0,
@@ -1504,7 +1504,7 @@ fn friction_cone_bound(dt: Duration) -> Result<Measurement, BatteryError> {
                 0,
                 None,
                 3,
-                mu,
+                crate::solver::sliding_friction(mu),
                 default_solref(),
                 default_solimp(),
                 0.0,
@@ -1530,8 +1530,9 @@ fn friction_cone_bound(dt: Duration) -> Result<Measurement, BatteryError> {
             // `|f_t1| + |f_t2| <= mu f_n`. Bounding each edge coefficient
             // separately would test nothing, since the cone lives in the row
             // Jacobians.
-            let [normal, t1, t2] = crate::solver::decode_pyramid(&solution.force, mu);
-            let excess = t1.abs() + t2.abs() - mu * normal.max(0.0);
+            let mus = [mu, mu];
+            let (normal, components) = crate::solver::decode_pyramid(&solution.force, &mus);
+            let excess = components.iter().map(|c| c.abs()).sum::<f64>() - mu * normal.max(0.0);
             if excess > worst {
                 worst = excess;
                 worst_at = step as usize;

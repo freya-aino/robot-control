@@ -144,9 +144,15 @@ pub struct SimOptions {
     pub solver_iterations: usize,
     /// Solver convergence tolerance, on the largest force change in a sweep.
     pub solver_tolerance: f64,
-    /// Contact dimensionality: 1 for frictionless, 3 for a normal and two
-    /// friction directions. 4 and 6 (torsional and rolling friction) are not
-    /// implemented and are rejected by [`SimOptions::is_valid`].
+    /// Contact dimensionality: 1 frictionless, 3 adding two sliding friction
+    /// directions, 4 adding torsional friction about the normal, 6 adding
+    /// rolling friction about the two tangents.
+    ///
+    /// All four of the example's values are implemented, which is `specs/06`
+    /// item 4's MUST. A direction whose friction coefficient is zero
+    /// contributes no constraint rows, so 4 and 6 behave exactly as 3 does
+    /// until a torsional or rolling coefficient is supplied — the
+    /// dimensionality is available rather than forced.
     pub condim: usize,
     /// Contact-slot budget. `None` means unbounded, which is what the CPU
     /// backend does; the GPU backend needs a fixed budget and an overflow
@@ -234,7 +240,7 @@ impl SimOptions {
             && self.solver_iterations > 0
             && self.solver_tolerance.is_finite()
             && self.solver_tolerance >= 0.0
-            && (self.condim == 1 || self.condim == 3)
+            && (matches!(self.condim, 1 | 3 | 4 | 6))
             && self.margin.is_finite()
             && self.margin >= 0.0
             && self.gap.is_finite()
@@ -323,6 +329,20 @@ mod tests {
     }
 
     #[test]
+    fn every_condim_the_example_defines_is_accepted() {
+        // `specs/06` item 4 makes contact dimensionality a per-contact
+        // parameter, and all four of the example's values are implemented:
+        // 1 frictionless, 3 sliding, 4 adding torsional, 6 adding rolling.
+        let base = SimOptions::default();
+        for condim in [1, 3, 4, 6] {
+            assert!(
+                SimOptions { condim, ..base }.is_valid(),
+                "condim {condim} is one of the example's and must be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn invalid_knobs_are_rejected_rather_than_silently_clamped() {
         let base = SimOptions::default();
         let bad = [
@@ -338,11 +358,13 @@ mod tests {
                 solver_tolerance: f64::NAN,
                 ..base
             },
-            // condim 4 and 6 are real in the example but not implemented here,
-            // so they must be refused rather than quietly treated as 3.
-            SimOptions { condim: 4, ..base },
-            SimOptions { condim: 6, ..base },
+            // 1, 3, 4 and 6 are the example's values and all are implemented;
+            // anything else is refused rather than quietly treated as the
+            // nearest one.
             SimOptions { condim: 0, ..base },
+            SimOptions { condim: 2, ..base },
+            SimOptions { condim: 5, ..base },
+            SimOptions { condim: 7, ..base },
             SimOptions {
                 margin: -1.0,
                 ..base

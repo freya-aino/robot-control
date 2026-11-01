@@ -593,7 +593,7 @@ mod tests {
                 0,
                 None,
                 3,
-                0.6,
+                crate::solver::sliding_friction(0.6),
                 default_solref(),
                 default_solimp(),
                 0.0,
@@ -708,9 +708,12 @@ mod tests {
             assert!(*f >= 0.0, "pyramid edge {i} pulled: {f}");
         }
         // And the decoded force is inside the pyramid.
-        let [normal, t1, t2] = crate::solver::decode_pyramid(&newton.force[0..4], 0.6);
+        let (normal, components) = crate::solver::decode_pyramid(&newton.force[0..4], &[0.6, 0.6]);
         assert!(normal >= 0.0);
-        assert!(t1.abs() + t2.abs() <= 0.6 * normal + 1e-9);
+        assert!(
+            components.iter().map(|c| c.abs()).sum::<f64>() <= 0.6 * normal + 1e-9,
+            "the decoded force must lie in the pyramid"
+        );
     }
 
     #[test]

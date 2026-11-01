@@ -6,7 +6,7 @@
 and `robot_sim::newton` solve contact, joint-limit and equality rows as one
 convex problem, and `World` runs it as the stepper behind `robot sim multibody`.
 Every item of old Section 5 is met except the elliptic cone (item 4's second
-half) and `condim` 4 and 6.
+half).
 
 The two algorithms item 5 requires both exist, and they are each other's
 cross-check — they solve the same problem by different routes and agree on the
@@ -64,8 +64,28 @@ A consequence worth stating as specification rather than implementation detail:
 **every row kind is now either unbounded or non-negative**, because the cone
 lives entirely in the row Jacobians. Neither solver contains a cone projection.
 
-Not implemented: the elliptic cone and its `H_c` Hessian block, `condim` 4 and
-6, conjugate gradient (item 5 is satisfied by Newton plus Gauss-Seidel, so CG is
+**Contact dimensionality is all four of the example's values**, which is item
+4's second MUST. A pyramidal contact has `2(condim - 1)` rows in the order
+`(+t1, -t1, +t2, -t2, +spin, -spin, +roll1, -roll1, +roll2, -roll2)`, and the
+split that matters is which Jacobian each generator multiplies: the two sliding
+tangents multiply the **translational** Jacobian, while spin (about the normal,
+`condim >= 4`) and rolling (about the two tangents, `condim = 6`) multiply the
+**rotational** one. So 4 and 6 differ from 3 in kind rather than in length, and
+`point_jacobian_dot` now returns the rotational derivative the extra rows need.
+
+A direction whose friction coefficient is zero contributes **no rows**, which
+generalises the defect that once diverged a G1 collapse: the edges are
+`n +/- mu d`, so at `mu = 0` both collapse onto `n` and `Rpy = 2 mu^2 R0`
+vanishes, saturating `D = 1/R` at `1/MINVAL`. That matters more here than at
+`condim` 3, because a torsional or rolling coefficient is commonly zero while
+sliding friction is not — so `condim` 4 or 6 with `solver::sliding_friction`
+behaves exactly as 3 does, and the dimensionality is available rather than
+forced. Rule 2 of the mapping document is why the default is zero rather than
+the example's `friction = [1, 0.005, 0.0001]`: its constants stay with the
+engine they describe.
+
+Not implemented: the elliptic cone and its `H_c` Hessian block, conjugate
+gradient (item 5 is satisfied by Newton plus Gauss-Seidel, so CG is
 optional rather than owed), islands, adhesion, friction-loss rows, and the
 sparse Hessian — `newton` forms a dense `nv x nv` Hessian and refactorises it
 each iteration rather than updating it rank-1 as `HessianIncremental` does, a
