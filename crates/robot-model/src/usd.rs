@@ -55,6 +55,10 @@ pub struct ImportReport {
     pub collision_meshes: usize,
     /// Visual mesh prims, kept as references and not used by the physics.
     pub visual_meshes: usize,
+    /// Primitive proxies fitted to the bounding box of a link's collision
+    /// meshes, for links the USD gives no primitive collision shape. See
+    /// [`PROXY_LINKS`] for the links and the method.
+    pub fitted_proxies: usize,
 }
 
 /// Why a USD robot description could not be imported.
@@ -354,6 +358,68 @@ fn local_transform(prim: &Prim) -> Result<(RigidPose, [f64; 3]), UsdImportError>
 
 /// Walks a link's `collisions` subtree and returns its shapes, in the link
 /// frame. Dimensions include the scale of every prim on the path.
+/// Links that the USD describes only with mesh collision and that the simulator
+/// therefore needs a primitive proxy for. The proxy is an axis-aligned box fitted
+/// to the bounding box of every collision mesh vertex of the link, expressed in
+/// the link frame. It is a bound, not the hull, so it encloses the mesh.
+pub const PROXY_LINKS: [&str; 2] = ["pelvis", "torso_link"];
+
+/// Every collision mesh vertex of `scope`, in the link frame.
+fn collision_mesh_points(
+    scope: &Prim,
+    pose: RigidPose,
+    scale: [f64; 3],
+    out: &mut Vec<Vec3>,
+) -> Result<(), UsdImportError> {
+    for child in &scope.children {
+        let (local, local_scale) = local_transform(child)?;
+        let child_scale = [
+            scale[0] * local_scale[0],
+            scale[1] * local_scale[1],
+            scale[2] * local_scale[2],
+        ];
+        let child_pose = pose.compose(&local);
+        if child.type_name.as_deref() == Some("Mesh") {
+            for p in point_array(child)? {
+                out.push(child_pose.apply(Vec3::new(
+                    p[0] * child_scale[0],
+                    p[1] * child_scale[1],
+                    p[2] * child_scale[2],
+                )));
+            }
+        } else {
+            collision_mesh_points(child, child_pose, child_scale, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Centre and half extents of the axis-aligned bounding box of `points`.
+fn bounding_box(points: &[Vec3]) -> Option<(Vec3, [f64; 3])> {
+    let first = points.first()?;
+    let mut lo = [first.x, first.y, first.z];
+    let mut hi = lo;
+    for p in points {
+        for (axis, value) in [p.x, p.y, p.z].into_iter().enumerate() {
+            lo[axis] = lo[axis].min(value);
+            hi[axis] = hi[axis].max(value);
+        }
+    }
+    let centre = Vec3::new(
+        0.5 * (lo[0] + hi[0]),
+        0.5 * (lo[1] + hi[1]),
+        0.5 * (lo[2] + hi[2]),
+    );
+    Some((
+        centre,
+        [
+            0.5 * (hi[0] - lo[0]),
+            0.5 * (hi[1] - lo[1]),
+            0.5 * (hi[2] - lo[2]),
+        ],
+    ))
+}
+
 fn collect_collisions(
     prim: &Prim,
     pose: RigidPose,
@@ -514,6 +580,22 @@ pub fn import_fixed_base_with_warnings(
                 &mut collision,
                 &mut report,
             )?;
+            let has_primitive = collision
+                .iter()
+                .any(|c| !matches!(c.geometry, CollisionGeometry::Mesh { .. }));
+            if PROXY_LINKS.contains(&child.name.as_str()) && !has_primitive {
+                let mut points = Vec::new();
+                collision_mesh_points(scope, RigidPose::IDENTITY, [1.0; 3], &mut points)?;
+                if let Some((centre, half)) = bounding_box(&points) {
+                    collision.push(CollisionShape {
+                        geometry: CollisionGeometry::Box {
+                            half_extents: Vec3::new(half[0], half[1], half[2]),
+                        },
+                        pose: RigidPose::from_translation(centre),
+                    });
+                    report.fitted_proxies += 1;
+                }
+            }
         }
         if let Some(scope) = child.child("visuals") {
             report.visual_meshes += count_visual_meshes(scope);
@@ -1008,12 +1090,40 @@ mod g1 {
                 collision_cylinders: 6,
                 collision_meshes: 15,
                 visual_meshes: 35,
+                fitted_proxies: 2,
             }
         );
         assert_eq!(profile.links.len(), 30);
         assert_eq!(profile.actuators.len(), 29);
         assert_eq!(profile.root_link, profile.links[0].id);
         assert_eq!(profile.links[0].name.as_str(), "pelvis");
+    }
+
+    #[test]
+    fn the_pelvis_proxy_is_fitted_to_the_bounds_of_its_collision_mesh() {
+        // The pelvis collision mesh spans z from about -0.152 to -0.028 in the
+        // link frame (the USD extent), so its proxy has half height near 0.062
+        // and centre near -0.09.
+        let (profile, _) = import_fixed_base(layer()).unwrap();
+        let pelvis = profile
+            .links
+            .iter()
+            .find(|l| l.name.as_str() == "pelvis")
+            .unwrap();
+        let proxy = pelvis
+            .collision
+            .iter()
+            .find_map(|c| match c.geometry {
+                CollisionGeometry::Box { half_extents } => Some((c.pose.translation, half_extents)),
+                _ => None,
+            })
+            .expect("the pelvis has a fitted box proxy");
+        assert!(
+            (proxy.1.z - 0.062).abs() < 0.005,
+            "half height {}",
+            proxy.1.z
+        );
+        assert!((proxy.0.z + 0.09).abs() < 0.01, "centre z {}", proxy.0.z);
     }
 
     #[test]
@@ -1100,9 +1210,11 @@ mod g1 {
             })
             .sum();
         assert_eq!(ankle_spheres, 10, "five spheres per ankle in the USD");
+        // Fitted proxies sit on the pelvis and torso and are not USD boxes.
         let boxes = profile
             .links
             .iter()
+            .filter(|l| !PROXY_LINKS.contains(&l.name.as_str()))
             .flat_map(|l| l.collision.iter())
             .filter(|c| matches!(c.geometry, CollisionGeometry::Box { .. }))
             .count();

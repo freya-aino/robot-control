@@ -119,6 +119,16 @@ fn run_multibody(flags: &[String]) -> i32 {
         Ok(scene) => scene,
         Err(message) => return invalid_flag(&message),
     };
+    let contact = match flags.iter().position(|a| a == "--contact").map(|i| flags.get(i + 1)) {
+        None => robot_sim::articulated::ContactModel::Penalty,
+        Some(Some(value)) if value == "penalty" => robot_sim::articulated::ContactModel::Penalty,
+        Some(Some(value)) if value == "impedance" => {
+            robot_sim::articulated::ContactModel::Impedance
+        }
+        Some(_) => {
+            return invalid_flag("--contact expects penalty or impedance");
+        }
+    };
     commands::sim::multibody_scene_to(
         steps,
         dt_seconds,
@@ -126,6 +136,7 @@ fn run_multibody(flags: &[String]) -> i32 {
         zero_torque,
         out.as_deref(),
         scene.as_deref(),
+        contact,
     )
 }
 

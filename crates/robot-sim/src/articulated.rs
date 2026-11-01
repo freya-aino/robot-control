@@ -52,12 +52,13 @@
 //! body's angular velocity is checked for conservation, before the real
 //! G1 is ever given a floating base.
 
+use crate::collision::{self, Placed, Primitive, Proximity};
 use crate::contact::GroundContact;
 use crate::spatial::{
-    add3, add6, compose_pose, cross3, cross_motion_force, cross_motion_motion, dot3, dot6,
+    add3, add6, compose_pose, cross3, cross_motion_force, cross_motion_motion, dot3, dot6, mat3_mul,
     inertia_apply, inertia_from_mass, inertia_transform_to_parent, join6, mat3_mul_vec,
     mat3_transpose_mul_vec, matrix6_add, matrix6_sub, rotation_from_quat, scale3, scale6, split6,
-    sub6, transform_force, transform_motion,
+    sub3, sub6, transform_force, transform_motion,
 };
 use robot_model::joint::JointKind;
 use robot_model::link::CollisionGeometry;
@@ -169,20 +170,103 @@ struct Body {
 /// A profile's joint tree, preprocessed into the articulated structure
 /// the dynamics algorithms recurse over.
 pub struct ArticulatedBody {
+    contact_model: ContactModel,
     bodies: Vec<Body>,
     n_dof: usize,
     n_position: usize,
     n_actuated: usize,
-    contact_spheres: Vec<ContactSphere>,
+    contact_shapes: Vec<ContactShape>,
     unmodelled_collision_shapes: usize,
 }
 
-/// A sphere collision shape on one body, centred in that body's own link
-/// frame, used as a ground-contact point.
-struct ContactSphere {
+/// Points per cylinder rim used when a cylinder contacts the ground.
+const RIM_SAMPLES: usize = 8;
+
+/// Overlap allowed between two adjacent links at their shared joint, in metres.
+/// The joint geometry overlaps by design, so penalty contact between adjacent
+/// shapes starts only beyond this depth.
+pub const ADJACENT_OVERLAP_ALLOWANCE: f64 = 0.003;
+
+/// How ground and pair contact forces are computed.
+///
+/// `Penalty` is the spring-damper law of ADR 0010, one force per penetrating
+/// point, with no coupling between points. It is the default. `Impedance` solves
+/// the contact rows together at acceleration level (see
+/// [`ArticulatedBody::contact_externals`]), so that a contact acts on the
+/// accelerations it causes at the other contacts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ContactModel {
+    /// Uncoupled spring-damper per point (ADR 0010).
+    #[default]
+    Penalty,
+    /// Coupled rows solved with projected Gauss-Seidel.
+    Impedance,
+}
+
+/// Reference mass in kilograms. A contact spring with stiffness `k` and damping
+/// `c` acts on accelerations with `omega^2 = k / m_ref` and `2 zeta omega = c /
+/// m_ref`. A row whose effective mass is `m_ref` therefore carries the stated
+/// penalty. Other rows are solved together with it.
+const CONTACT_REFERENCE_MASS: f64 = 1.0;
+
+/// Projected Gauss-Seidel sweeps for the contact solve, and the largest change in
+/// a normal force that stops the sweeps early.
+const CONTACT_PGS_SWEEPS: usize = 500;
+const CONTACT_PGS_TOLERANCE: f64 = 1e-10;
+
+/// One penetrating contact row: body `a` (and body `b`, or the ground when `b`
+/// is `None`), the contact points on each, the unit normal that pushes `a`
+/// away from `b` (up for the ground), and the penetration depth.
+struct ContactRow {
+    a: usize,
+    b: Option<usize>,
+    pa: [f64; 3],
+    pb: [f64; 3],
+    n: [f64; 3],
+    depth: f64,
+}
+
+/// A collision shape on one body. Its pose is given in that body's own link
+/// frame. Shapes are contact primitives: the sphere, box and cylinder of the
+/// profile. Mesh shapes are not modelled in contact.
+struct ContactShape {
     body: usize,
-    center: [f64; 3],
-    radius: f64,
+    shape: Primitive,
+    rotation: [f64; 9],
+    translation: [f64; 3],
+}
+
+/// The world pose of a contact shape, given its body's world pose.
+fn place_shape(cs: &ContactShape, body_world: &Pose) -> Placed {
+    let (rb, tb) = *body_world;
+    let rotation = mat3_mul(rb, cs.rotation);
+    let translation = add3(mat3_mul_vec(rb, cs.translation), tb);
+    Placed {
+        shape: cs.shape,
+        rotation: [
+            [rotation[0], rotation[1], rotation[2]],
+            [rotation[3], rotation[4], rotation[5]],
+            [rotation[6], rotation[7], rotation[8]],
+        ],
+        translation,
+    }
+}
+
+/// World velocity of the body-fixed point `p_world`, for a body with body-frame
+/// twist `v` at world pose `body_world`.
+fn point_velocity(v: [f64; 6], body_world: &Pose, p_world: [f64; 3]) -> [f64; 3] {
+    let (omega, linear) = split6(v);
+    let p_body = mat3_transpose_mul_vec(body_world.0, sub3(p_world, body_world.1));
+    let v_body = add3(linear, cross3(omega, p_body));
+    mat3_mul_vec(body_world.0, v_body)
+}
+
+/// The spatial wrench (moment about the body origin, force), in body
+/// coordinates, of the world force `f_world` applied at the world point `p_world`.
+fn wrench_at(body_world: &Pose, p_world: [f64; 3], f_world: [f64; 3]) -> [f64; 6] {
+    let p_body = mat3_transpose_mul_vec(body_world.0, sub3(p_world, body_world.1));
+    let f_body = mat3_transpose_mul_vec(body_world.0, f_world);
+    join6(cross3(p_body, f_body), f_body)
 }
 
 /// The motion subspace of `kind`: the basis twists (expressed in the
@@ -394,7 +478,7 @@ impl ArticulatedBody {
         let order = profile.topological_link_order();
         let mut body_index = Vec::new();
         let mut bodies: Vec<Body> = Vec::with_capacity(order.len().saturating_sub(1));
-        let mut contact_spheres = Vec::new();
+        let mut contact_shapes = Vec::new();
         let mut unmodelled_collision_shapes = 0usize;
 
         for link_id in order.into_iter().skip(1) {
@@ -454,16 +538,31 @@ impl ArticulatedBody {
                 actuated,
             });
             for shape in &link.collision {
-                match shape.geometry {
-                    CollisionGeometry::Sphere { radius } => {
+                let primitive = match &shape.geometry {
+                    CollisionGeometry::Sphere { radius } => Some(Primitive::Sphere {
+                        radius: *radius,
+                    }),
+                    CollisionGeometry::Box { half_extents } => Some(Primitive::Box {
+                        half: [half_extents.x, half_extents.y, half_extents.z],
+                    }),
+                    CollisionGeometry::Cylinder { radius, length } => Some(Primitive::Cylinder {
+                        radius: *radius,
+                        half_height: 0.5 * length,
+                    }),
+                    CollisionGeometry::Mesh { .. } => None,
+                };
+                match primitive {
+                    Some(shape_primitive) => {
+                        let q = shape.pose.rotation;
                         let c = shape.pose.translation;
-                        contact_spheres.push(ContactSphere {
+                        contact_shapes.push(ContactShape {
                             body: index,
-                            center: [c.x, c.y, c.z],
-                            radius,
+                            shape: shape_primitive,
+                            rotation: rotation_from_quat(q.w, q.x, q.y, q.z),
+                            translation: [c.x, c.y, c.z],
                         });
                     }
-                    _ => unmodelled_collision_shapes += 1,
+                    None => unmodelled_collision_shapes += 1,
                 }
             }
             body_index.push((link_id, index));
@@ -474,7 +573,8 @@ impl ArticulatedBody {
             n_dof: next_dof,
             n_position: next_position,
             n_actuated: dof_slots.len(),
-            contact_spheres,
+            contact_model: ContactModel::Penalty,
+            contact_shapes,
             unmodelled_collision_shapes,
         }
     }
@@ -495,33 +595,64 @@ impl ArticulatedBody {
         self.n_position
     }
 
-    /// Number of sphere collision shapes on non-root links, each a ground-
-    /// contact point under [`ArticulatedBody::forward_dynamics_with_ground`].
+    /// The same body with contact forces computed by `model`.
     #[must_use]
-    pub fn contact_sphere_count(&self) -> usize {
-        self.contact_spheres.len()
+    pub fn with_contact_model(mut self, model: ContactModel) -> Self {
+        self.contact_model = model;
+        self
     }
 
-    /// World-frame height of the lowest contact sphere's bottom at
-    /// configuration `q`, or `None` if the body has no contact spheres.
-    /// Negative means that sphere is below the plane `z = 0` (penetration).
+    /// The contact model in use.
+    #[must_use]
+    pub fn contact_model(&self) -> ContactModel {
+        self.contact_model
+    }
+
+    /// Number of contact primitives (sphere, box, cylinder) on non-root links.
+    /// Each takes part in ground contact and in contact with other links under
+    /// [`ArticulatedBody::forward_dynamics_with_ground`].
+    #[must_use]
+    pub fn contact_shape_count(&self) -> usize {
+        self.contact_shapes.len()
+    }
+
+    /// World-frame height of the lowest contact point of any contact shape at
+    /// configuration `q`, or `None` if the body has no contact shapes. Each
+    /// point's height is its centre minus its radius. Negative means that point
+    /// is below the plane `z = 0`.
     pub fn lowest_contact_height(&self, q: &[f64]) -> Result<Option<f64>, DynamicsError> {
         self.check_width("q", q, self.n_position)?;
-        let mut world: Vec<Pose> = Vec::with_capacity(self.bodies.len());
+        let zeros = vec![0.0; self.n_dof];
+        let (world, _) = self.kinematics(q, &zeros);
         let mut lowest: Option<f64> = None;
-        for (i, body) in self.bodies.iter().enumerate() {
-            let (rot, trans) = joint_transform(body, q);
-            let world_i = body.parent.map_or((rot, trans), |p| {
-                compose_pose(world[p].0, world[p].1, rot, trans)
-            });
-            for sphere in self.contact_spheres.iter().filter(|s| s.body == i) {
-                let point = add3(mat3_mul_vec(world_i.0, sphere.center), world_i.1);
-                let bottom = point[2] - sphere.radius;
+        for cs in &self.contact_shapes {
+            let placed = place_shape(cs, &world[cs.body]);
+            for (point, radius) in collision::plane_contact_points(&placed, RIM_SAMPLES) {
+                let bottom = point[2] - radius;
                 lowest = Some(lowest.map_or(bottom, |l| l.min(bottom)));
             }
-            world.push(world_i);
         }
         Ok(lowest)
+    }
+
+    /// World pose and body-frame twist of every body at `(q, qd)`, root first.
+    fn kinematics(&self, q: &[f64], qd: &[f64]) -> (Vec<Pose>, Vec<[f64; 6]>) {
+        let mut world: Vec<Pose> = Vec::with_capacity(self.bodies.len());
+        let mut v: Vec<[f64; 6]> = Vec::with_capacity(self.bodies.len());
+        for body in &self.bodies {
+            let (rot, trans) = joint_transform(body, q);
+            let (s, k) = motion_subspace_basis(body.kind, body.axis);
+            let joint_v = combine(
+                &s[..k],
+                &qd[body.dof_offset..body.dof_offset + body.dof_width],
+            );
+            let v_parent = body.parent.map_or(ZERO6, |p| v[p]);
+            v.push(add6(transform_motion(rot, trans, v_parent), joint_v));
+            world.push(body.parent.map_or((rot, trans), |p| {
+                compose_pose(world[p].0, world[p].1, rot, trans)
+            }));
+        }
+        (world, v)
     }
 
     /// Number of non-root collision shapes (box, cylinder, mesh) this module
@@ -605,31 +736,235 @@ impl ArticulatedBody {
     /// body origin. `body_world` is the body's pose in the world and `v` its
     /// spatial velocity in its own frame. The `Vec3` conversion is confined
     /// to the call into [`GroundContact::force`], whose signature is public.
-    fn contact_wrench(
+    /// Contact rows at the current configuration: every ground contact point
+    /// that penetrates the plane, and every penetrating non-adjacent pair point.
+    fn contact_rows(
         &self,
-        body_index: usize,
-        body_world: &Pose,
-        v: [f64; 6],
+        world: &[Pose],
         ground: &GroundContact,
-    ) -> [f64; 6] {
-        let (rot, trans) = *body_world;
-        let (omega, linear) = split6(v);
-        let mut total = ZERO6;
-        for sphere in self.contact_spheres.iter().filter(|s| s.body == body_index) {
-            let c = sphere.center;
-            let point_world = add3(mat3_mul_vec(rot, c), trans);
-            let point_velocity_body = add3(linear, cross3(omega, c));
-            let velocity_world = mat3_mul_vec(rot, point_velocity_body);
-            let force_world = ground.force(
-                Vec3::new(point_world[0], point_world[1], point_world[2]),
-                sphere.radius,
-                Vec3::new(velocity_world[0], velocity_world[1], velocity_world[2]),
-            );
-            let force_body =
-                mat3_transpose_mul_vec(rot, [force_world.x, force_world.y, force_world.z]);
-            total = add6(total, join6(cross3(c, force_body), force_body));
+    ) -> Vec<ContactRow> {
+        let mut rows = Vec::new();
+        for cs in &self.contact_shapes {
+            let placed = place_shape(cs, &world[cs.body]);
+            for (point, radius) in collision::plane_contact_points(&placed, RIM_SAMPLES) {
+                let depth = ground.ground_height + radius - point[2];
+                if depth > 0.0 {
+                    rows.push(ContactRow {
+                        a: cs.body,
+                        b: None,
+                        pa: point,
+                        pb: point,
+                        n: [0.0, 0.0, 1.0],
+                        depth,
+                    });
+                }
+            }
         }
-        total
+        for (a_index, a) in self.contact_shapes.iter().enumerate() {
+            for b in &self.contact_shapes[a_index + 1..] {
+                if a.body == b.body {
+                    continue;
+                }
+                let adjacent = self.bodies[a.body].parent == Some(b.body)
+                    || self.bodies[b.body].parent == Some(a.body);
+                let allowance = if adjacent {
+                    ADJACENT_OVERLAP_ALLOWANCE
+                } else {
+                    0.0
+                };
+                let (wa, wb) = (world[a.body], world[b.body]);
+                let pa = place_shape(a, &wa);
+                let pb = place_shape(b, &wb);
+                // Box pairs give a corner manifold; other pairs one contact.
+                let contacts: Vec<collision::Contact> = match (pa.shape, pb.shape) {
+                    (Primitive::Box { .. }, Primitive::Box { .. }) => {
+                        collision::box_box_contacts(&pa, &pb).unwrap_or_default()
+                    }
+                    _ => match collision::proximity(&pa, &pb) {
+                        Proximity::Overlap(c) => vec![c],
+                        Proximity::Apart { .. } => Vec::new(),
+                    },
+                };
+                for contact in contacts {
+                    let depth = contact.depth - allowance;
+                    if depth > 0.0 {
+                        rows.push(ContactRow {
+                            a: a.body,
+                            b: Some(b.body),
+                            pa: contact.point_a,
+                            pb: contact.point_b,
+                            n: contact.normal,
+                            depth,
+                        });
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// Relative separating velocity along a row's normal, for the body twists
+    /// `twists` at the poses `world`. Positive means the two bodies separate.
+    fn row_normal_velocity(row: &ContactRow, world: &[Pose], twists: &[[f64; 6]]) -> f64 {
+        let va = point_velocity(twists[row.a], &world[row.a], row.pa);
+        let vb = row.b.map_or([0.0; 3], |b| point_velocity(twists[b], &world[b], row.pb));
+        dot3(row.n, sub3(va, vb))
+    }
+
+    /// Adds the wrench of a row's normal force `f` (pushing body `a` along `n`
+    /// and body `b` against it) into the per-body wrenches `out`.
+    fn add_row_wrench(out: &mut [[f64; 6]], row: &ContactRow, world: &[Pose], f: f64) {
+        let force = scale3(row.n, f);
+        out[row.a] = add6(out[row.a], wrench_at(&world[row.a], row.pa, force));
+        if let Some(b) = row.b {
+            out[b] = add6(out[b], wrench_at(&world[b], row.pb, scale3(force, -1.0)));
+        }
+    }
+
+    /// External wrenches of every body from contact, found by solving the
+    /// contact problem at acceleration level.
+    ///
+    /// Each contact row `i` has a normal force `f_i >= 0`. Its normal
+    /// acceleration is `a_u,i + sum_j A_ij f_j`, where `A_ij` is the normal
+    /// velocity change at row `i` per unit force at row `j`, computed exactly
+    /// from forward dynamics with `qd = 0` and no gravity. The target is the
+    /// spring-damper acceleration `omega^2 depth - 2 zeta omega v_n`, with
+    /// `omega^2 = k / m_ref` and `2 zeta omega = c / m_ref`, so that the
+    /// contact behaves as the stated penalty when the rows are uncoupled. The
+    /// forces solve the non-negative least-squares problem
+    /// `min 1/2 f'(A+R)f - f'(a_ref - a_u)`, `f >= 0`, with `R = 1/m_ref`, by
+    /// projected Gauss-Seidel.
+    /// Ground friction is then a Coulomb force on the solved normal force.
+    ///
+    /// Approximation: `a_u` uses `J qdd` without the `Jdot qd` term, so the
+    /// centripetal part of the contact-point acceleration is neglected.
+    fn contact_externals(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+        tau: &[f64],
+        gravity: Vec3,
+        ground: &GroundContact,
+    ) -> Result<Vec<[f64; 6]>, DynamicsError> {
+        let n = self.bodies.len();
+        let mut externals = vec![ZERO6; n];
+        let (world, v) = self.kinematics(q, qd);
+        let rows = self.contact_rows(&world, ground);
+        if rows.is_empty() {
+            return Ok(externals);
+        }
+        if self.contact_model == ContactModel::Penalty {
+            for row in &rows {
+                let closing = -Self::row_normal_velocity(row, &world, &v);
+                let magnitude =
+                    (ground.stiffness * row.depth + ground.normal_damping * closing).max(0.0);
+                Self::add_row_wrench(&mut externals, row, &world, magnitude);
+                Self::add_ground_friction(&mut externals, row, &world, &v, ground, magnitude);
+            }
+            return Ok(externals);
+        }
+        let k = rows.len();
+        let unconstrained = self.aba_with_externals(q, qd, tau, gravity, &externals)?;
+        let (_, v_u) = self.kinematics(q, &unconstrained);
+
+        let zeros = vec![0.0; self.n_dof];
+        let mut a = vec![vec![0.0; k]; k];
+        for (i, row) in rows.iter().enumerate() {
+            let mut unit = vec![ZERO6; n];
+            Self::add_row_wrench(&mut unit, row, &world, 1.0);
+            let response = self.aba_with_externals(q, &zeros, &zeros, Vec3::new(0.0, 0.0, 0.0), &unit)?;
+            let (_, v_resp) = self.kinematics(q, &response);
+            for (j, other) in rows.iter().enumerate() {
+                a[j][i] = Self::row_normal_velocity(other, &world, &v_resp);
+            }
+        }
+
+        let omega2 = ground.stiffness / CONTACT_REFERENCE_MASS;
+        let two_zeta_omega = ground.normal_damping / CONTACT_REFERENCE_MASS;
+        let rhs: Vec<f64> = rows
+            .iter()
+            .map(|row| {
+                let v_n = Self::row_normal_velocity(row, &world, &v);
+                let a_u = Self::row_normal_velocity(row, &world, &v_u);
+                omega2 * row.depth - two_zeta_omega * v_n - a_u
+            })
+            .collect();
+
+        // Regularization R = 1/m_ref. With it, an isolated body of mass m rests
+        // at penetration m g / k, the penalty depth, for stiffness k.
+        let regularization = 1.0 / CONTACT_REFERENCE_MASS;
+        let mut f = vec![0.0; k];
+        for _ in 0..CONTACT_PGS_SWEEPS {
+            let mut change = 0.0_f64;
+            for i in 0..k {
+                let diagonal = a[i][i] + regularization;
+                let mut residual = rhs[i];
+                for (j, fj) in f.iter().enumerate() {
+                    if j != i {
+                        residual -= a[i][j] * fj;
+                    }
+                }
+                let next = (residual / diagonal).max(0.0);
+                change = change.max((next - f[i]).abs());
+                f[i] = next;
+            }
+            if change <= CONTACT_PGS_TOLERANCE {
+                break;
+            }
+        }
+
+        for (row, &force) in rows.iter().zip(&f) {
+            if force > 0.0 {
+                Self::add_row_wrench(&mut externals, row, &world, force);
+                Self::add_ground_friction(&mut externals, row, &world, &v, ground, force);
+            }
+        }
+        Ok(externals)
+    }
+
+    /// Adds Coulomb friction for a ground row with normal force `normal`. The
+    /// friction is regularized at low tangential speed, as in
+    /// `GroundContact::force`.
+    fn add_ground_friction(
+        out: &mut [[f64; 6]],
+        row: &ContactRow,
+        world: &[Pose],
+        v: &[[f64; 6]],
+        ground: &GroundContact,
+        normal: f64,
+    ) {
+        if row.b.is_some() || ground.friction <= 0.0 || normal <= 0.0 {
+            return;
+        }
+        let vt = point_velocity(v[row.a], &world[row.a], row.pa);
+        let tangential = [vt[0], vt[1], 0.0];
+        let speed = dot3(tangential, tangential)
+            .sqrt()
+            .max(ground.friction_regularization);
+        let friction = scale3(tangential, -(ground.friction * normal) / speed);
+        out[row.a] = add6(out[row.a], wrench_at(&world[row.a], row.pa, friction));
+    }
+
+    /// Forward dynamics with contact: the contact externals solved by
+    /// [`ArticulatedBody::contact_externals`], then one articulated pass.
+    fn articulated_accelerations(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+        tau: &[f64],
+        gravity: Vec3,
+        ground: Option<&GroundContact>,
+    ) -> Result<Vec<f64>, DynamicsError> {
+        match ground {
+            None => self.aba_with_externals(q, qd, tau, gravity, &vec![ZERO6; self.bodies.len()]),
+            Some(g) => {
+                self.check_width("q", q, self.n_position)?;
+                self.check_width("qd", qd, self.n_dof)?;
+                self.check_width("tau", tau, self.n_dof)?;
+                let externals = self.contact_externals(q, qd, tau, gravity, g)?;
+                self.aba_with_externals(q, qd, tau, gravity, &externals)
+            }
+        }
     }
 
     fn check_width(
@@ -867,13 +1202,15 @@ impl ArticulatedBody {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn articulated_accelerations(
+    /// Forward dynamics with the external wrenches of every body given, in
+    /// body coordinates at the body origin (`externals[i]` for body `i`).
+    fn aba_with_externals(
         &self,
         q: &[f64],
         qd: &[f64],
         tau: &[f64],
         gravity: Vec3,
-        ground: Option<&GroundContact>,
+        externals: &[[f64; 6]],
     ) -> Result<Vec<f64>, DynamicsError> {
         self.check_width("q", q, self.n_position)?;
         self.check_width("qd", qd, self.n_dof)?;
@@ -906,7 +1243,7 @@ impl ArticulatedBody {
             let world_i = body.parent.map_or((rot, trans), |p| {
                 compose_pose(world[p].0, world[p].1, rot, trans)
             });
-            let external = ground.map_or(ZERO6, |g| self.contact_wrench(i, &world_i, v_i, g));
+            let external = externals[i];
             let pa_i = sub6(
                 cross_motion_force(v_i, inertia_apply(&body.inertia, v_i)),
                 external,
@@ -2125,6 +2462,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_impedance_sphere_settles_at_the_same_rest_height_as_the_penalty() {
+        // The coupled solve with R = 1/m_ref and omega^2 = k/m_ref gives an
+        // isolated body the penalty equilibrium: penetration m g / k.
+        let (mass, radius) = (2.0, 0.1);
+        let profile = free_sphere_body(mass, radius);
+        let body = ArticulatedBody::from_profile(&profile).with_contact_model(ContactModel::Impedance);
+        let ground = test_ground(0.0);
+        let mut q = FREE_IDENTITY.to_vec();
+        q[2] = 0.2;
+        let mut state = MultibodyState::at_rest(q, 6);
+        let tau = vec![0.0; 6];
+        let dt = Duration::from_millis(1);
+        for _ in 0..6_000 {
+            state
+                .step_with_ground(&body, &tau, GRAVITY, &ground, dt)
+                .unwrap();
+        }
+        let expected = radius - mass * G / ground.stiffness;
+        assert!(
+            (state.q[2] - expected).abs() < 1e-5,
+            "rest height {} want {expected}",
+            state.q[2]
+        );
+        assert!(state.qd[2].abs() < 1e-5, "still moving: {}", state.qd[2]);
+    }
+
+    #[test]
     fn a_dropped_sphere_settles_at_the_penalty_rest_height() {
         // Static balance of the penalty spring: the sphere sits where
         // k * penetration = m * g, so its centre rests at
@@ -2132,7 +2496,7 @@ pub(crate) mod tests {
         let (mass, radius) = (2.0, 0.1);
         let profile = free_sphere_body(mass, radius);
         let body = ArticulatedBody::from_profile(&profile);
-        assert_eq!(body.contact_sphere_count(), 1);
+        assert_eq!(body.contact_shape_count(), 1);
         assert_eq!(body.unmodelled_collision_shape_count(), 0);
 
         let ground = test_ground(0.0);
@@ -2235,7 +2599,7 @@ pub(crate) mod tests {
         let (mass, radius, half_z) = (2.0, 0.02, 0.05);
         let profile = free_corner_box(mass, (0.1, 0.05, half_z), radius);
         let body = ArticulatedBody::from_profile(&profile);
-        assert_eq!(body.contact_sphere_count(), 4);
+        assert_eq!(body.contact_shape_count(), 4);
 
         let ground = test_ground(0.5);
         let tilt = 0.05_f64;
@@ -2263,6 +2627,62 @@ pub(crate) mod tests {
             "box did not return flat: qx={} qy={}",
             state.q[4],
             state.q[5]
+        );
+        assert!(
+            state.qd.iter().all(|v| v.abs() < 1e-4),
+            "residual motion: {:?}",
+            state.qd
+        );
+    }
+
+    /// A rigid box as one free body with a single box collision shape centred
+    /// on the body origin.
+    fn free_box_body(mass: f64, half_extents: (f64, f64, f64)) -> RobotProfile {
+        let (half_x, half_y, half_z) = half_extents;
+        let mut profile = free_body(mass, InertiaTensor::diagonal(0.1, 0.1, 0.1));
+        let body_link = profile
+            .links
+            .iter_mut()
+            .find(|l| l.id == LinkId::new(1))
+            .expect("free_body has a body link");
+        body_link.collision.push(robot_model::link::CollisionShape {
+            geometry: robot_model::link::CollisionGeometry::Box {
+                half_extents: Vec3::new(half_x, half_y, half_z),
+            },
+            pose: RigidPose::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+        });
+        profile
+    }
+
+    #[test]
+    fn a_flat_box_settles_on_its_four_bottom_corners_at_the_analytic_height() {
+        // A box lying flat touches the ground with its four bottom corners,
+        // each a zero-radius contact point. The corners share the weight
+        // equally, so each penetrates m*g/(4k) and the centre rests at
+        // half_z - m*g/(4k).
+        let (mass, half_z) = (2.0, 0.05);
+        let profile = free_box_body(mass, (0.1, 0.05, half_z));
+        let body = ArticulatedBody::from_profile(&profile);
+        assert_eq!(body.contact_shape_count(), 1);
+        assert_eq!(body.unmodelled_collision_shape_count(), 0);
+
+        let ground = test_ground(0.5);
+        let mut q = FREE_IDENTITY.to_vec();
+        q[2] = 0.3;
+        let mut state = MultibodyState::at_rest(q, 6);
+        let tau = vec![0.0; 6];
+        let dt = Duration::from_micros(100);
+        for _ in 0..30_000 {
+            state
+                .step_with_ground(&body, &tau, GRAVITY, &ground, dt)
+                .unwrap();
+        }
+
+        let expected = half_z - mass * G / (4.0 * ground.stiffness);
+        assert!(
+            (state.q[2] - expected).abs() < 1e-5,
+            "rest height {} want {expected}",
+            state.q[2]
         );
         assert!(
             state.qd.iter().all(|v| v.abs() < 1e-4),

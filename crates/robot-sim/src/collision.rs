@@ -717,6 +717,145 @@ pub fn plane_contact_points(placed: &Placed, rim_samples: usize) -> Vec<(V3, f64
     }
 }
 
+fn box_parts(p: &Placed) -> Option<(V3, V3, [V3; 3])> {
+    let Primitive::Box { half } = p.shape else {
+        return None;
+    };
+    let r = &p.rotation;
+    let axes = [
+        [r[0][0], r[1][0], r[2][0]],
+        [r[0][1], r[1][1], r[2][1]],
+        [r[0][2], r[1][2], r[2][2]],
+    ];
+    Some((p.translation, half, axes))
+}
+
+/// Separating-axis test for two boxes (Gottschalk, Lin and Manocha 1996 for the
+/// 15 candidate axes). Returns the least overlap over all candidate axes and the
+/// unit axis that attains it, oriented from `b` toward `a`. Returns `None` if a
+/// separating axis exists, if either shape is not a box, or if the boxes are
+/// too far apart to overlap.
+#[must_use]
+pub fn box_sat(a: &Placed, b: &Placed) -> Option<(f64, V3)> {
+    let (ca, ha, axes_a) = box_parts(a)?;
+    let (cb, hb, axes_b) = box_parts(b)?;
+    let mut candidates: Vec<V3> = Vec::with_capacity(15);
+    candidates.extend(axes_a);
+    candidates.extend(axes_b);
+    for ea in axes_a {
+        for eb in axes_b {
+            let c = cross(ea, eb);
+            if norm2(c) > 1e-18 {
+                candidates.push(scale(c, 1.0 / norm(c)));
+            }
+        }
+    }
+    let d = sub(ca, cb);
+    let mut best: Option<(f64, V3)> = None;
+    for u in candidates {
+        let ra: f64 = (0..3).map(|i| ha[i] * dot(axes_a[i], u).abs()).sum();
+        let rb: f64 = (0..3).map(|i| hb[i] * dot(axes_b[i], u).abs()).sum();
+        let s = dot(d, u);
+        let overlap = ra + rb - s.abs();
+        if overlap < 0.0 {
+            return None;
+        }
+        if best.is_none_or(|(o, _)| overlap < o) {
+            let oriented = if s >= 0.0 { u } else { scale(u, -1.0) };
+            best = Some((overlap, oriented));
+        }
+    }
+    best
+}
+
+/// Contact manifold of two boxes, up to eight points.
+///
+/// The normal and depth come from [`box_sat`]. A corner of one box that lies
+/// inside the other is a contact point, and its depth is its penetration along
+/// the normal. Corners of both boxes are used, and a corner of the second set
+/// that coincides laterally with one already taken is dropped. This gives the
+/// four corner contacts of a box resting flat on a box, which a single
+/// closest-point contact cannot give. When no corner lies inside the other
+/// box (edges crossing), the single deepest support pair is returned.
+///
+/// The normal points from `b` toward `a`, so that `a` is pushed away from `b`.
+/// Both points of each contact are the corner itself.
+#[must_use]
+pub fn box_box_contacts(a: &Placed, b: &Placed) -> Option<Vec<Contact>> {
+    let (depth, n) = box_sat(a, b)?;
+    let (ca, ha, axes_a) = box_parts(a)?;
+    let (cb, hb, axes_b) = box_parts(b)?;
+    let reach = |c: V3, h: V3, axes: &[V3; 3]| -> (f64, f64) {
+        let centre = dot(c, n);
+        let r: f64 = (0..3).map(|i| h[i] * dot(axes[i], n).abs()).sum();
+        (centre - r, centre + r)
+    };
+    let (min_a, _) = reach(ca, ha, &axes_a);
+    let (_, max_b) = reach(cb, hb, &axes_b);
+    let corners = |c: V3, h: V3, axes: &[V3; 3]| -> [V3; 8] {
+        let mut out = [[0.0; 3]; 8];
+        for (k, slot) in out.iter_mut().enumerate() {
+            let sx = if k & 1 == 0 { -1.0 } else { 1.0 };
+            let sy = if k & 2 == 0 { -1.0 } else { 1.0 };
+            let sz = if k & 4 == 0 { -1.0 } else { 1.0 };
+            let local = [sx * h[0], sy * h[1], sz * h[2]];
+            *slot = add(
+                c,
+                add(
+                    add(scale(axes[0], local[0]), scale(axes[1], local[1])),
+                    scale(axes[2], local[2]),
+                ),
+            );
+        }
+        out
+    };
+    let inside = |p: V3, c: V3, h: V3, axes: &[V3; 3]| -> bool {
+        let d = sub(p, c);
+        (0..3).all(|i| dot(d, axes[i]).abs() <= h[i] + 1e-12)
+    };
+    let mut points: Vec<Contact> = Vec::new();
+    let push = |p: V3, pen: f64, points: &mut Vec<Contact>| {
+        let lateral_dup = points.iter().any(|q| {
+            let diff = sub(p, q.point_a);
+            norm(sub(diff, scale(n, dot(diff, n)))) < 1e-7
+        });
+        if pen > 0.0 && !lateral_dup {
+            points.push(Contact {
+                depth: pen,
+                normal: n,
+                point_a: p,
+                point_b: p,
+            });
+        }
+    };
+    for p in corners(cb, hb, &axes_b) {
+        if inside(p, ca, ha, &axes_a) {
+            push(p, dot(n, p) - min_a, &mut points);
+        }
+    }
+    for p in corners(ca, ha, &axes_a) {
+        if inside(p, cb, hb, &axes_b) {
+            push(p, max_b - dot(n, p), &mut points);
+        }
+    }
+    if points.is_empty() {
+        let deepest_a = corners(ca, ha, &axes_a)
+            .into_iter()
+            .min_by(|x, y| dot(*x, n).total_cmp(&dot(*y, n)))?;
+        let deepest_b = corners(cb, hb, &axes_b)
+            .into_iter()
+            .max_by(|x, y| dot(*x, n).total_cmp(&dot(*y, n)))?;
+        points.push(Contact {
+            depth,
+            normal: n,
+            point_a: deepest_a,
+            point_b: deepest_b,
+        });
+    }
+    points.truncate(8);
+    Some(points)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,6 +1102,19 @@ mod tests {
 mod fuzz_tests {
     use super::*;
 
+    fn at(shape: Primitive, t: V3) -> Placed {
+        Placed {
+            shape,
+            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            translation: t,
+        }
+    }
+
+    fn rot_z(angle: f64) -> Mat3 {
+        let (s, c) = angle.sin_cos();
+        [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
+    }
+
     /// A deterministic LCG in [0, 1).
     struct Lcg(u64);
     impl Lcg {
@@ -1100,6 +1252,76 @@ mod fuzz_tests {
             best = best.min(overlap);
         }
         Some(best)
+    }
+
+    #[test]
+    fn a_box_resting_flat_on_a_box_gives_its_four_bottom_corners() {
+        // Lower box top at z = 0.1; upper box bottom 0.01 below it.
+        let lower = at(Primitive::Box { half: [0.5, 0.5, 0.1] }, [0.0, 0.0, 0.0]);
+        let upper = at(Primitive::Box { half: [0.5, 0.5, 0.1] }, [0.0, 0.0, 0.19]);
+        let contacts = box_box_contacts(&upper, &lower).expect("overlapping");
+        assert_eq!(contacts.len(), 4, "{contacts:?}");
+        for c in &contacts {
+            assert!((c.depth - 0.01).abs() < 1e-9, "{c:?}");
+            assert!((c.normal[2] - 1.0).abs() < 1e-9, "{c:?}");
+        }
+        let total: f64 = contacts.iter().map(|c| c.depth).sum();
+        assert!((total - 0.04).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_tilted_box_on_a_box_still_gets_contacts_pushing_up() {
+        let lower = at(Primitive::Box { half: [0.5, 0.5, 0.1] }, [0.0, 0.0, 0.0]);
+        let upper = Placed {
+            shape: Primitive::Box { half: [0.3, 0.3, 0.1] },
+            rotation: rot_z(0.4),
+            translation: [0.05, 0.0, 0.19],
+        };
+        let contacts = box_box_contacts(&upper, &lower).expect("overlapping");
+        assert!(!contacts.is_empty());
+        assert!(contacts.iter().all(|c| c.normal[2] > 0.99), "{contacts:?}");
+        assert!(contacts.iter().all(|c| c.depth > 0.0 && c.depth < 0.05));
+    }
+
+    #[test]
+    fn separated_boxes_give_no_manifold() {
+        let a = at(Primitive::Box { half: [0.5, 0.5, 0.5] }, [0.0, 0.0, 0.0]);
+        let b = at(Primitive::Box { half: [0.5, 0.5, 0.5] }, [0.0, 0.0, 1.2]);
+        assert!(box_box_contacts(&a, &b).is_none());
+        assert!(box_sat(&a, &b).is_none());
+    }
+
+    #[test]
+    fn the_manifold_normal_agrees_with_the_separating_axis_on_random_boxes() {
+        let mut rng = Lcg(23);
+        let mut checked = 0;
+        for case in 0..300 {
+            let a = Placed {
+                shape: Primitive::Box { half: [rng.range(0.1, 0.6), rng.range(0.1, 0.6), rng.range(0.1, 0.6)] },
+                rotation: rng.rotation(),
+                translation: [rng.range(-0.6, 0.6), rng.range(-0.6, 0.6), rng.range(-0.6, 0.6)],
+            };
+            let b = Placed {
+                shape: Primitive::Box { half: [rng.range(0.1, 0.6), rng.range(0.1, 0.6), rng.range(0.1, 0.6)] },
+                rotation: rng.rotation(),
+                translation: [0.0, 0.0, 0.0],
+            };
+            let exact = sat_depth(&a, &b).unwrap();
+            match box_box_contacts(&a, &b) {
+                Some(contacts) => {
+                    assert!(exact > 0.0, "case {case}: manifold for separated boxes");
+                    let (depth, normal) = box_sat(&a, &b).unwrap();
+                    assert!((depth - exact).abs() < 1e-9, "case {case}");
+                    for c in &contacts {
+                        assert!(dot(c.normal, normal) > 1.0 - 1e-9, "case {case}");
+                        assert!(c.depth > 0.0, "case {case}");
+                    }
+                    checked += 1;
+                }
+                None => assert!(exact <= 1e-9, "case {case}: separated but SAT overlaps {exact}"),
+            }
+        }
+        assert!(checked > 50, "{checked} overlapping cases");
     }
 
     #[test]

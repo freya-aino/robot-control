@@ -15,7 +15,7 @@
 use super::{EXIT_FAILURE, EXIT_USAGE};
 use robot_model::joint::JointKind;
 use robot_model::profile::RobotProfile;
-use robot_sim::articulated::{ArticulatedBody, MultibodyState};
+use robot_sim::articulated::{ArticulatedBody, ContactModel, MultibodyState};
 use robot_sim::contact::GroundContact;
 use robot_sim::pendulum::{Pendulum, PendulumParams, PendulumState};
 use robot_types::time::{ClockId, Duration, Timestamp};
@@ -187,7 +187,7 @@ pub fn default_steps(dt_seconds: f64) -> Result<u32, String> {
 /// `finish` leaves the directory's earlier committed run intact.
 #[cfg(test)]
 fn multibody(steps: u32, dt_seconds: f64, floating: bool, zero_torque: bool) -> i32 {
-    multibody_scene_to(steps, dt_seconds, floating, zero_torque, None, None)
+    multibody_scene_to(steps, dt_seconds, floating, zero_torque, None, None, ContactModel::Penalty)
 }
 
 /// [`multibody`] with an optional frame directory.
@@ -199,7 +199,7 @@ pub fn multibody_to(
     zero_torque: bool,
     out: Option<&Path>,
 ) -> i32 {
-    multibody_scene_to(steps, dt_seconds, floating, zero_torque, out, None)
+    multibody_scene_to(steps, dt_seconds, floating, zero_torque, out, None, ContactModel::Penalty)
 }
 
 /// As [`multibody_to`], with the environment read from `scene` (a USD layer)
@@ -212,6 +212,7 @@ pub fn multibody_scene_to(
     zero_torque: bool,
     out: Option<&Path>,
     scene: Option<&Path>,
+    contact: ContactModel,
 ) -> i32 {
     let scene_path: std::path::PathBuf =
         scene.map_or_else(|| std::path::PathBuf::from(GROUND_SCENE), Path::to_path_buf);
@@ -280,7 +281,7 @@ pub fn multibody_scene_to(
             return EXIT_FAILURE;
         }
     };
-    let body = ArticulatedBody::from_profile(&profile);
+    let body = ArticulatedBody::from_profile(&profile).with_contact_model(contact);
     let gravity = profile.gravity.acceleration();
     let dt = Duration::from_secs_f64(dt_seconds);
     let dt_nanos = dt.nanos();
@@ -386,7 +387,7 @@ pub fn multibody_scene_to(
     if floating {
         println!(
             "  contact shapes:          {} sphere, {} not modelled",
-            body.contact_sphere_count(),
+            body.contact_shape_count(),
             body.unmodelled_collision_shape_count()
         );
     }
