@@ -373,6 +373,9 @@ pub fn multibody_scene_to(
     println!("G1 multibody simulation ({mode}): {steps} steps at {dt_seconds} s");
     println!("  path:                    {}", path.describe());
     println!("  degrees of freedom:      {}", sim.dof());
+    if !zero_torque {
+        println!("  actuation:               {}", sim.actuation());
+    }
     if floating {
         let (modelled, unmodelled) = sim.shape_counts();
         println!("  contact shapes:          {modelled} modelled, {unmodelled} not modelled");

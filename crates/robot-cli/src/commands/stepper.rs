@@ -77,8 +77,11 @@ pub enum Stepper {
         state: State,
         /// Index in `state.q` of the floating base's world height.
         pelvis_z: Option<usize>,
-        /// Stance damping gains, once computed.
+        /// Stance damping gains, used only when the model declares no drives.
         stance_kd: Vec<f64>,
+        /// Position target per declared actuator, in the profile's actuator
+        /// order. Held at the zero posture for this command.
+        ctrl: Vec<f64>,
         /// Torques written each step.
         tau: Vec<f64>,
     },
@@ -138,11 +141,13 @@ impl Stepper {
                     .find(|b| b.kind == robot_model::joint::JointKind::Free)
                     .map(|b| b.qpos_adr + 2);
                 let nv = world.nv();
+                let actuators = world.actuator_count();
                 Self::Corrected {
                     world: Box::new(world),
                     state,
                     pelvis_z,
                     stance_kd: vec![0.0; nv],
+                    ctrl: vec![0.0; actuators],
                     tau: vec![0.0; nv],
                 }
             }
@@ -174,6 +179,32 @@ impl Stepper {
                     stance_kd: vec![0.0; nv],
                     tau: vec![0.0; nv],
                 }
+            }
+        }
+    }
+
+    /// How the hinges are driven, for the command's header line.
+    #[must_use]
+    pub fn actuation(&self) -> String {
+        match self {
+            Self::Corrected { world, .. } => {
+                let n = world.actuator_count();
+                if n == 0 {
+                    return "no declared drives; hand-written PD hold".to_owned();
+                }
+                let gains = world.actuator_gains();
+                let kp_lo = gains.iter().map(|g| g.0).fold(f64::INFINITY, f64::min);
+                let kp_hi = gains.iter().map(|g| g.0).fold(0.0, f64::max);
+                let kd_lo = gains.iter().map(|g| g.1).fold(f64::INFINITY, f64::min);
+                let kd_hi = gains.iter().map(|g| g.1).fold(0.0, f64::max);
+                let f_lo = gains.iter().map(|g| g.2).fold(f64::INFINITY, f64::min);
+                let f_hi = gains.iter().map(|g| g.2).fold(0.0, f64::max);
+                format!(
+                    "{n} model drives (USD PhysicsDriveAPI): stiffness {kp_lo:.2}..{kp_hi:.2}, damping {kd_lo:.4}..{kd_hi:.4}, maxForce {f_lo:.0}..{f_hi:.0} N m"
+                )
+            }
+            Self::Legacy { .. } => {
+                "hand-written PD hold (the legacy path cannot read the model's drives)".to_owned()
             }
         }
     }
@@ -293,12 +324,24 @@ impl Stepper {
                 world,
                 state,
                 stance_kd,
+                ctrl,
                 tau,
                 ..
             } => {
                 if zero_torque {
                     tau.fill(0.0);
+                } else if world.actuator_count() > 0 {
+                    // The model's own actuators, at their declared stiffness,
+                    // damping and force limit, holding the zero posture. This
+                    // is what importing the model into any simulator that
+                    // reads `PhysicsDriveAPI` would do.
+                    world
+                        .actuator_torques(&state.q, &state.qd, ctrl, tau)
+                        .map_err(|e| e.to_string())?;
                 } else {
+                    // No declared drives (a URDF import carries none), so fall
+                    // back to a hand-written hold rather than leaving the
+                    // robot limp. The command says which it used.
                     world
                         .stance_torques(&state.q, &state.qd, kp, stance_kd, tau)
                         .map_err(|e| e.to_string())?;

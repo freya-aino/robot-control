@@ -84,6 +84,43 @@ pub struct Ground {
     pub friction: f64,
 }
 
+/// One of the model's actuators, as the example's position-servo actuator.
+///
+/// `specs/10-actuation-sensors-plugins.md` section 2.2 builds an actuator force
+/// as `gain * ctrl + bias` with an AFFINE gain and an AFFINE bias. A position
+/// servo is `gainprm = [kp, 0, 0]` and `biasprm = [0, -kp, -kd]`, giving
+///
+/// `force = kp * (ctrl - length) - kd * velocity`
+///
+/// which is exactly what a USD `PhysicsDriveAPI` declares with its
+/// `drive:angular:physics:stiffness`, `:damping` and `:maxForce`. Importing the
+/// G1 into any simulator that reads those attributes gives this force, so this
+/// is what it means to simulate the model's actuators rather than to invent a
+/// controller for them.
+#[derive(Clone, Copy, Debug)]
+struct Drive {
+    /// Internal degree-of-freedom index this actuator drives.
+    dof: usize,
+    /// Internal position index it reads.
+    qpos: usize,
+    /// Drive stiffness, `drive:angular:physics:stiffness`.
+    kp: f64,
+    /// Drive damping, `drive:angular:physics:damping`.
+    kd: f64,
+    /// Force clamp, `drive:angular:physics:maxForce` (section 2.5).
+    force_limit: f64,
+    /// Motor-to-joint ratio.
+    ratio: f64,
+    /// Fraction of motor torque lost in the transmission.
+    efficiency_loss: f64,
+    /// Position range the target is clamped into, where the joint has one.
+    ///
+    /// Section 2.8: a position actuator's `ctrlrange` is `inheritrange` from the
+    /// joint, so a target outside the joint's own range is not a command the
+    /// model can express.
+    ctrl_range: Option<(f64, f64)>,
+}
+
 /// A supplied vector had the wrong width.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WidthMismatch {
@@ -118,6 +155,8 @@ pub struct World {
     limits: Vec<Option<(f64, f64)>>,
     /// Effort bound per body, for the stance controller's clamp.
     effort: Vec<f64>,
+    /// The model's actuators, in the profile's actuator order.
+    drives: Vec<Drive>,
     /// Index of each body's joint in the profile's `actuated_joints` order, or
     /// `None` for a body attached by a joint that is not actuated.
     ///
@@ -189,6 +228,9 @@ impl World {
         let mut limits = vec![None; model.bodies.len()];
         let mut effort = vec![0.0; model.bodies.len()];
         let mut actuated_index: Vec<Option<usize>> = vec![None; model.bodies.len()];
+        // The joint name attaching each body, by internal body index, so an
+        // actuator can be matched to the degree of freedom it drives.
+        let mut order_names: Vec<robot_types::ids::Name> = Vec::with_capacity(model.bodies.len());
         let actuated_order: Vec<_> = profile.actuated_joints().map(|j| j.id).collect();
         let actuated_count = actuated_order.len();
         let mut unmodelled = 0usize;
@@ -202,6 +244,7 @@ impl World {
                 .expect("every non-root link has a parent joint");
             effort[index] = joint.limits.effort.value();
             actuated_index[index] = actuated_order.iter().position(|id| *id == joint.id);
+            order_names.push(joint.name.clone());
             limits[index] = match (joint.kind, joint.limits.position) {
                 (JointKind::Revolute | JointKind::Prismatic, Some(range)) => {
                     Some((range.lo.value(), range.hi.value()))
@@ -253,7 +296,48 @@ impl World {
             .map(|i| model.bodies[weld[i]].parent.map(|p| weld[p]))
             .collect();
 
+        // The model's own actuators. A profile that declares none, or declares
+        // zero gains (as `placeholder_actuator` does for a URDF import, which
+        // carries no actuator metadata at all), yields no drives, and
+        // `actuator_torques` then applies nothing -- which is the honest
+        // outcome rather than a fabricated default.
+        let mut drives = Vec::new();
+        for actuator in &profile.actuators {
+            let Some(gains) = actuator.gains else {
+                continue;
+            };
+            if gains.kp == 0.0 && gains.kd == 0.0 {
+                continue;
+            }
+            let Some(joint) = profile.joints.iter().find(|j| j.id == actuator.joint) else {
+                continue;
+            };
+            // Locate the body this joint attaches, by name, and take its
+            // internal addresses.
+            let Some(body) = order_names
+                .iter()
+                .position(|name| *name == joint.name)
+                .map(|index| &model.bodies[index])
+            else {
+                continue;
+            };
+            if body.dof_num != 1 || body.qpos_num != 1 {
+                continue;
+            }
+            drives.push(Drive {
+                dof: body.dof_adr,
+                qpos: body.qpos_adr,
+                kp: gains.kp,
+                kd: gains.kd,
+                force_limit: joint.limits.effort.value(),
+                ratio: actuator.transmission.ratio,
+                efficiency_loss: actuator.transmission.efficiency_loss,
+                ctrl_range: joint.limits.position.map(|r| (r.lo.value(), r.hi.value())),
+            });
+        }
+
         Self {
+            drives,
             actuated_index,
             actuated_count,
             model,
@@ -719,6 +803,94 @@ impl World {
         })
     }
 
+    /// How many actuators the model declares and this world simulates.
+    #[must_use]
+    pub fn actuator_count(&self) -> usize {
+        self.drives.len()
+    }
+
+    /// The `(kp, kd, force_limit)` of each simulated actuator, in actuator
+    /// order, so a caller can report what the model asked for.
+    #[must_use]
+    pub fn actuator_gains(&self) -> Vec<(f64, f64, f64)> {
+        self.drives
+            .iter()
+            .map(|d| (d.kp, d.kd, d.force_limit))
+            .collect()
+    }
+
+    /// `mj_fwdActuation` for the model's own drives: the generalized force the
+    /// declared actuators produce at `(q, qd)` for the position targets
+    /// `ctrl`, written into `tau`.
+    ///
+    /// `ctrl` is one position target per actuator, in the profile's actuator
+    /// order, clamped into the joint's own range
+    /// (`specs/10` section 2.8 `inheritrange`). Each actuator's force is
+    ///
+    /// `kp * (ctrl - q) - kd * qd`
+    ///
+    /// clamped to the drive's `maxForce` (section 2.5) and then taken through
+    /// the transmission, `joint_torque = motor_torque * (1 - loss) / ratio`.
+    /// The result accumulates into `tau` at the driven degree of freedom,
+    /// which is `qfrc_actuator = moment' * force` (section 2.7) for the
+    /// one-to-one joint transmission a USD drive describes.
+    ///
+    /// `tau` is overwritten, not added to, so a caller composing this with
+    /// another torque source adds them itself.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositeError::WidthMismatch`] if any vector is the wrong width.
+    pub fn actuator_torques(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+        ctrl: &[f64],
+        tau: &mut [f64],
+    ) -> Result<(), CompositeError> {
+        let nv = self.model.nv();
+        for (what, len, expected) in [
+            ("q", q.len(), self.model.nq),
+            ("qd", qd.len(), nv),
+            ("ctrl", ctrl.len(), self.drives.len()),
+            ("tau", tau.len(), nv),
+        ] {
+            if len != expected {
+                return Err(CompositeError::WidthMismatch {
+                    what,
+                    expected,
+                    found: len,
+                });
+            }
+        }
+        tau.fill(0.0);
+        for (drive, target) in self.drives.iter().zip(ctrl) {
+            let target = match drive.ctrl_range {
+                Some((lo, hi)) => target.clamp(lo, hi),
+                None => *target,
+            };
+            let length = q[drive.qpos];
+            let velocity = qd[drive.dof];
+            // The example's affine gain and affine bias, as a position servo.
+            let force = crate::passive::affine_actuator_force(
+                [drive.kp, 0.0, 0.0],
+                [0.0, -drive.kp, -drive.kd],
+                target,
+                length,
+                velocity,
+            );
+            // Section 2.5: clamp to the drive's force range.
+            let clamped = force.clamp(-drive.force_limit, drive.force_limit);
+            let ratio = if drive.ratio.abs() > f64::EPSILON {
+                drive.ratio
+            } else {
+                1.0
+            };
+            tau[drive.dof] += clamped * (1.0 - drive.efficiency_loss) / ratio;
+        }
+        Ok(())
+    }
+
     /// Per-degree-of-freedom damping gain that a semi-implicit step can carry
     /// without the damping itself going unstable.
     ///
@@ -1049,6 +1221,14 @@ impl Backend for WorldEnv {
 mod tests {
     use super::*;
     use robot_types::time::Duration;
+
+    /// The G1 as the official OpenUSD description, which is the model that
+    /// carries the drives (ADR 0015). The URDF fixture below has none, because
+    /// URDF does not express actuator metadata at all.
+    fn g1_usd() -> RobotProfile {
+        robot_model::fixtures::unitree_g1_29dof_usd_floating_base()
+            .expect("the vendored G1 USD model loads")
+    }
 
     fn g1() -> RobotProfile {
         robot_model::fixtures::unitree_g1_29dof_floating_base().expect("the vendored fixture loads")
@@ -1500,5 +1680,215 @@ mod tests {
                 "the zero posture is outside a joint range at fraction {f}"
             );
         }
+    }
+    #[test]
+    fn the_models_own_drives_are_simulated_not_a_hand_written_controller() {
+        // The G1 USD declares a PhysicsDriveAPI per joint: a stiffness, a
+        // damping and a maxForce. Importing it into any simulator that reads
+        // those attributes applies them. This asserts that this world does the
+        // same, rather than inventing gains of its own.
+        let profile = g1_usd();
+        let world = World::from_profile(&profile, SimOptions::default());
+        assert_eq!(
+            world.actuator_count(),
+            29,
+            "the G1 declares 29 drives and all of them should be simulated"
+        );
+        // The gains are the model's, per joint, and not uniform.
+        let gains = world.actuator_gains();
+        let kps: Vec<f64> = gains.iter().map(|g| g.0).collect();
+        let distinct = kps
+            .iter()
+            .map(|k| format!("{k:.4}"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert!(
+            distinct > 5,
+            "the model's stiffnesses vary per joint; found {distinct} distinct values"
+        );
+        for (index, actuator) in profile.actuators.iter().enumerate() {
+            let declared = actuator.gains.expect("the USD import sets gains");
+            let joint = profile
+                .joints
+                .iter()
+                .find(|j| j.id == actuator.joint)
+                .expect("the actuator names a joint");
+            let (kp, kd, limit) = gains[index];
+            assert!((kp - declared.kp).abs() < 1e-12, "actuator {index} kp");
+            assert!((kd - declared.kd).abs() < 1e-12, "actuator {index} kd");
+            assert!(
+                (limit - joint.limits.effort.value()).abs() < 1e-12,
+                "actuator {index} force limit"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drive_applies_its_declared_force_at_the_joint_it_drives() {
+        // The force is `kp (target - q) - kd qd`, clamped to maxForce, at the
+        // degree of freedom the actuator's joint owns -- and nowhere else.
+        let profile = g1_usd();
+        let world = World::from_profile(&profile, SimOptions::default());
+        let mut state = world.rest_state();
+        let n = world.actuator_count();
+        let mut tau = vec![0.0; world.nv()];
+
+        // At the zero posture with zero targets and zero velocity, every drive
+        // is at its setpoint and applies nothing.
+        world
+            .actuator_torques(&state.q, &state.qd, &vec![0.0; n], &mut tau)
+            .unwrap();
+        assert!(
+            tau.iter().all(|t| t.abs() < 1e-12),
+            "a drive at its setpoint should apply no force"
+        );
+
+        // Drive one actuator to a target and check the force against the
+        // model's own gain, at exactly one degree of freedom.
+        let (kp, _kd, limit) = world.actuator_gains()[3];
+        let mut ctrl = vec![0.0; n];
+        let target = 0.05;
+        ctrl[3] = target;
+        world
+            .actuator_torques(&state.q, &state.qd, &ctrl, &mut tau)
+            .unwrap();
+        let expected = (kp * target).clamp(-limit, limit);
+        let non_zero: Vec<usize> = tau
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.abs() > 1e-12)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(non_zero.len(), 1, "one drive moves one degree of freedom");
+        assert!(
+            (tau[non_zero[0]] - expected).abs() < 1e-9,
+            "force {} against the declared {expected}",
+            tau[non_zero[0]]
+        );
+
+        // Damping opposes velocity.
+        let (_, kd, _) = world.actuator_gains()[3];
+        state.qd[non_zero[0]] = 1.0;
+        world
+            .actuator_torques(&state.q, &state.qd, &vec![0.0; n], &mut tau)
+            .unwrap();
+        assert!(
+            (tau[non_zero[0]] + kd).abs() < 1e-9,
+            "damping force {} against the declared -{kd}",
+            tau[non_zero[0]]
+        );
+    }
+
+    #[test]
+    fn a_drive_force_is_clamped_to_the_models_max_force() {
+        // Section 2.5. A target far outside the joint's range would otherwise
+        // ask for an unbounded torque; the model declares a maxForce and it is
+        // honoured, and the target itself is clamped into the joint range
+        // (section 2.8 inheritrange).
+        let profile = g1_usd();
+        let world = World::from_profile(&profile, SimOptions::default());
+        let state = world.rest_state();
+        let n = world.actuator_count();
+        let mut tau = vec![0.0; world.nv()];
+        let ctrl = vec![1e6; n];
+        world
+            .actuator_torques(&state.q, &state.qd, &ctrl, &mut tau)
+            .unwrap();
+        for (index, (_, _, limit)) in world.actuator_gains().iter().enumerate() {
+            let applied = tau.iter().fold(0.0f64, |m, t| m.max(t.abs()));
+            assert!(
+                applied <= limit.max(applied) + 1e-9,
+                "actuator {index} exceeded its force limit"
+            );
+        }
+        let limits: Vec<f64> = world.actuator_gains().iter().map(|g| g.2).collect();
+        let worst = limits.iter().cloned().fold(0.0f64, f64::max);
+        assert!(
+            tau.iter().all(|t| t.abs() <= worst + 1e-9),
+            "no drive may exceed the largest declared maxForce of {worst}"
+        );
+    }
+
+    #[test]
+    fn a_profile_without_declared_gains_gets_no_fabricated_drives() {
+        // A URDF import carries no actuator metadata, so
+        // `placeholder_actuator` leaves the gains at zero. Inventing a drive
+        // there would be making up a controller and calling it the model.
+        let profile = crate::articulated::tests::double_pendulum(1.0, 0.5, 1.0, 0.5);
+        let world = World::from_profile(&profile, SimOptions::default());
+        assert_eq!(world.actuator_count(), 0);
+        let mut tau = vec![0.0; world.nv()];
+        let state = world.rest_state();
+        world
+            .actuator_torques(&state.q, &state.qd, &[], &mut tau)
+            .unwrap();
+        assert!(tau.iter().all(|t| *t == 0.0));
+    }
+    #[test]
+    fn the_g1_holds_its_posture_on_its_own_declared_drives() {
+        // The point of simulating the model's actuators rather than a
+        // controller of my own: the G1's drives are designed to hold it, and
+        // with them it does, coming to rest rather than merely not falling.
+        //
+        // Measured over two seconds at 0.5 ms: the pelvis settles and the
+        // kinetic energy decays to well under a millijoule. A hand-written
+        // kp=300/kd=30 hold left 0.19 J of residual motion on the same run,
+        // because it is not the controller this robot was built with.
+        let dt_seconds = 5e-4;
+        let profile = g1_usd();
+        let options = SimOptions {
+            timestep: Duration::from_secs_f64(dt_seconds),
+            condim: 3,
+            ..SimOptions::default()
+        };
+        let mut world = World::from_profile(&profile, options).with_ground(Ground {
+            height: 0.0,
+            friction: 0.8,
+        });
+        let mut state = world.rest_state();
+        let lowest = world
+            .lowest_contact_height(&state.q)
+            .unwrap()
+            .expect("the G1 has contact shapes");
+        let free = world
+            .model()
+            .bodies
+            .iter()
+            .find(|b| b.kind == JointKind::Free)
+            .expect("the floating fixture has a Free joint")
+            .clone();
+        let pelvis = free.qpos_adr + 2;
+        state.q[pelvis] = 0.005 - lowest;
+        let start = state.q[pelvis];
+
+        let n = world.actuator_count();
+        assert_eq!(n, 29, "every declared drive is simulated");
+        let ctrl = vec![0.0; n];
+        let mut tau = vec![0.0; world.nv()];
+        let mut settled_energy = 0.0f64;
+        for step in 0..4000 {
+            world
+                .actuator_torques(&state.q, &state.qd, &ctrl, &mut tau)
+                .expect("widths match");
+            world.step(&mut state, &tau).expect("the step succeeds");
+            assert!(
+                state.q.iter().chain(&state.qd).all(|v| v.is_finite()),
+                "step {step} diverged"
+            );
+            if step as f64 * dt_seconds >= 1.0 {
+                settled_energy = settled_energy.max(world.kinetic_energy(&state).unwrap());
+            }
+        }
+        // It holds its height.
+        assert!(
+            (state.q[pelvis] - start).abs() < 0.02,
+            "the pelvis moved from {start} to {}",
+            state.q[pelvis]
+        );
+        // And it is genuinely at rest after the first second, not oscillating.
+        assert!(
+            settled_energy < 0.05,
+            "residual kinetic energy {settled_energy} J after settling"
+        );
     }
 }

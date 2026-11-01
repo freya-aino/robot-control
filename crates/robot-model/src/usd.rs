@@ -11,7 +11,9 @@
 //!   body (`physics:localPos0/1`, `physics:localRot0/1`), `physics:axis`, and
 //!   `physics:lowerLimit` and `physics:upperLimit` in degrees;
 //! - the drive of each joint (`drive:angular:physics:*`) gives the effort limit,
-//!   the stiffness and the damping, and `physxJoint:maxJointVelocity` gives the
+//!   the stiffness and the damping -- both converted from per-degree to
+//!   per-radian, since USD states angular quantities in degrees -- and
+//!   `physxJoint:maxJointVelocity` gives the
 //!   velocity limit in degrees per second;
 //! - collision shapes are `Sphere`, `Cube`, `Cylinder` and `Mesh` prims under
 //!   `<link>/collisions`, with their pose in the link frame given by `xformOp`s.
@@ -173,6 +175,12 @@ fn quat_xyzw(a: [f64; 4]) -> Quat {
 fn identity_xyzw() -> [f64; 4] {
     [0.0, 0.0, 0.0, 1.0]
 }
+
+/// Degrees in one radian, for converting a per-degree drive gain to per-radian.
+///
+/// USD states angular quantities in degrees, so a stiffness in torque per
+/// degree is `180/pi` times smaller than the same stiffness per radian.
+const DEGREES_PER_RADIAN: f64 = 180.0 / core::f64::consts::PI;
 
 fn required_f64(prim: &Prim, name: &'static str) -> Result<f64, UsdImportError> {
     let v = attr(prim, name).ok_or_else(|| UsdImportError::Missing {
@@ -662,8 +670,22 @@ pub fn import_fixed_base_with_warnings(
                     what: "physxJoint:maxJointVelocity",
                 })?;
             let effort = required_f64(joint, "drive:angular:physics:maxForce")?;
-            let stiffness = required_f64(joint, "drive:angular:physics:stiffness")?;
-            let damping = required_f64(joint, "drive:angular:physics:damping")?;
+            // An angular drive's stiffness and damping are **per degree**, as
+            // every other angular quantity in a USD physics layer is in
+            // degrees: this file states the knee's range as -145 to 165 and its
+            // maximum velocity as 1833, which only make sense as degrees and
+            // degrees per second, and both are converted above.
+            //
+            // A gain is per unit angle, so it converts the other way: a
+            // stiffness of 24.84 N m per degree is 1423 N m per radian. Reading
+            // these as per-radian understates every drive by a factor of
+            // 180/pi, which left the G1 unable to hold its own posture -- it
+            // folded and fell. `maxForce` is a torque, not a gain, so it is
+            // not converted.
+            let stiffness =
+                required_f64(joint, "drive:angular:physics:stiffness")? * DEGREES_PER_RADIAN;
+            let damping =
+                required_f64(joint, "drive:angular:physics:damping")? * DEGREES_PER_RADIAN;
 
             let id = JointId::new(joints.len() as u32);
             let spec = JointSpec {
@@ -1183,7 +1205,17 @@ mod g1 {
     }
 
     #[test]
-    fn the_drive_gains_come_from_the_usd_drives() {
+    fn the_drive_gains_come_from_the_usd_drives_converted_to_radians() {
+        // The layer states `left_hip_pitch_joint`'s drive as
+        // `stiffness = 24.844929` and `damping = 0.009937972`, and its limits
+        // as -144.99841 to 165.00038 with `maxJointVelocity = 1833.4648`.
+        // Those limits and that velocity are only sensible as degrees, which is
+        // why they are converted; a gain stated per degree is therefore
+        // `180/pi` times *smaller* than the same gain per radian, and converts
+        // the other way.
+        //
+        // The numbers are written as the raw attribute times the conversion
+        // rather than as constants, so the test states the claim it is making.
         let profile = fixtures::unitree_g1_29dof_usd().unwrap();
         let hip = profile
             .actuators
@@ -1191,8 +1223,30 @@ mod g1 {
             .find(|a| a.name.as_str() == "left_hip_pitch_joint")
             .unwrap();
         let gains = hip.gains.expect("USD drives state gains");
-        assert!((gains.kp - 24.844_93).abs() < 1e-4, "{gains:?}");
-        assert!((gains.kd - 0.009_938).abs() < 1e-6, "{gains:?}");
+        let per_radian = 180.0 / core::f64::consts::PI;
+        assert!(
+            (gains.kp - 24.844_929 * per_radian).abs() < 1e-3,
+            "stiffness {} should be 24.844929 N m per degree in N m per radian",
+            gains.kp
+        );
+        assert!(
+            (gains.kd - 0.009_937_972 * per_radian).abs() < 1e-6,
+            "damping {} should be 0.009937972 N m s per degree in N m s per radian",
+            gains.kd
+        );
+        // Sanity on the magnitude: a degree of error should give back the
+        // attribute's own number in newton metres.
+        assert!(
+            (gains.kp.to_radians() - 24.844_929).abs() < 1e-4,
+            "one degree of error should give 24.84 N m"
+        );
+        // `maxForce` is a torque, not a gain, so it is not converted.
+        let joint = profile
+            .joints
+            .iter()
+            .find(|j| j.id == hip.joint)
+            .expect("the actuator names a joint");
+        assert!((joint.limits.effort.value() - 88.0).abs() < 1e-9);
     }
 
     #[test]
