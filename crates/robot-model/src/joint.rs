@@ -331,6 +331,38 @@ impl JointSpec {
         (canonical - self.zero_offset) / self.sign
     }
 
+    /// This joint's axis as a unit vector, with the example's own fallback.
+    ///
+    /// Every consumer of the axis MUST use this rather than the declared
+    /// `axis` field, because the declared vector is not required to be unit
+    /// length and nothing normalises it at import: `urdf::parse_joint` stores
+    /// `<axis xyz="...">` verbatim, and the URDF specification only says the
+    /// axis *should* be normalised. The example's model compiler normalises
+    /// joint axes at compile time (`mju_normalize3`,
+    /// `docs/example-system-specs/02_kinematics_dynamics_smooth.md` section 0).
+    ///
+    /// Why it matters, from
+    /// `crates/robot-sim/specs/appendix-d-mathematical-challenges.md` entry
+    /// M-02: the motion subspace `S` must be the derivative of the pose map
+    /// with respect to the joint coordinate, so that `v = S qdot` holds. If one
+    /// consumer normalises and another does not, the velocity map and the pose
+    /// map disagree by the axis norm, and the mass matrix, the bias force and
+    /// the generalized force are all scaled while the kinematics are not. The
+    /// measured effect was that scaling a pendulum's declared axis from
+    /// `(0, 1, 0)` to `(0, 2, 0)` -- the same physical axis -- halved its
+    /// acceleration and quadrupled its kinetic energy, with profile validation
+    /// accepting both.
+    ///
+    /// Returns `(1, 0, 0)` for a degenerate axis, matching `mju_normalize3`.
+    /// `validate` rejects a degenerate axis on any joint that has one, so that
+    /// fallback is unreachable through a validated profile.
+    #[must_use]
+    pub fn unit_axis(&self) -> Vec3 {
+        self.axis
+            .normalized(1e-15)
+            .unwrap_or(Vec3::new(1.0, 0.0, 0.0))
+    }
+
     /// The pose contributed by this joint at `value` (canonical units),
     /// relative to the parent link's own frame.
     ///
@@ -349,13 +381,9 @@ impl JointSpec {
         let motion = match self.kind {
             JointKind::Fixed => RigidPose::IDENTITY,
             JointKind::Revolute | JointKind::Continuous => RigidPose::from_rotation(
-                Quat::from_axis_angle(self.axis, Radians(value)).unwrap_or(Quat::IDENTITY),
+                Quat::from_axis_angle(self.unit_axis(), Radians(value)).unwrap_or(Quat::IDENTITY),
             ),
-            JointKind::Prismatic => RigidPose::from_translation(
-                self.axis
-                    .normalized(1e-12)
-                    .map_or(Vec3::ZERO, |u| u * value),
-            ),
+            JointKind::Prismatic => RigidPose::from_translation(self.unit_axis() * value),
             JointKind::Free => panic!(
                 "JointKind::Free has no single-scalar value representation; \
                  use robot_sim::articulated for floating-base dynamics"

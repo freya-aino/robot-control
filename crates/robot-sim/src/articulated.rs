@@ -519,7 +519,15 @@ impl ArticulatedBody {
             let i = &props.inertia;
             bodies.push(Body {
                 kind: joint.kind,
-                axis: [joint.axis.x, joint.axis.y, joint.axis.z],
+                // Appendix D M-02: the declared axis is not required to be
+                // unit length and nothing normalises it at import, while
+                // `joint_transform` below does. Taking the unit axis here
+                // makes the motion subspace agree with the pose map, so
+                // `v = S qdot` holds by construction.
+                axis: {
+                    let u = joint.unit_axis();
+                    [u.x, u.y, u.z]
+                },
                 origin: (rotation_from_quat(q.w, q.x, q.y, q.z), [t.x, t.y, t.z]),
                 effort: joint.limits.effort.0,
                 parent,
@@ -1599,11 +1607,29 @@ impl MultibodyState {
 
 /// Solves `a x = b` by Gaussian elimination with partial pivoting. Returns
 /// `None` if a pivot is numerically zero.
+///
+/// The singularity test is **relative** to the largest entry of `a`, matching
+/// [`solve_dense`]. Appendix D M-14 records that it used an absolute `1e-14`,
+/// which is scale-dependent in both directions: this solver's entries are
+/// elements of `M^-1`, whose magnitude spans about five orders of magnitude on
+/// the G1 alone, so a well-conditioned system with legitimately small entries
+/// was rejected as singular -- silently dropping the joint limit for that
+/// step, since the caller treats `None` as "no constraint" -- while a badly
+/// conditioned one with large entries passed with no indication of how little
+/// of its solution was significant.
 fn solve_small_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     let n = b.len();
+    let scale = a
+        .iter()
+        .flat_map(|row| row.iter())
+        .fold(0.0f64, |acc, v| acc.max(v.abs()));
+    if !scale.is_finite() {
+        return None;
+    }
+    let tol = if scale > 0.0 { scale * 1e-14 } else { 1e-300 };
     for col in 0..n {
         let pivot = (col..n).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
-        if a[pivot][col].abs() < 1e-14 {
+        if a[pivot][col].abs() <= tol {
             return None;
         }
         a.swap(col, pivot);

@@ -6,6 +6,7 @@
 //! content-addressed blobs — the profile names the mesh it needs, the artifact
 //! store holds the bytes.
 
+use crate::eig::{eig3, Eig3};
 use crate::pose::RigidPose;
 use core::fmt;
 use robot_types::frames::Vec3;
@@ -62,25 +63,73 @@ impl InertiaTensor {
             .all(|v| v.is_finite())
     }
 
-    /// Whether the tensor satisfies the necessary conditions for a physically
-    /// realizable rigid body: non-negative diagonal entries and the triangle
-    /// inequality `I_a + I_b >= I_c` for every permutation of the principal
-    /// moments.
+    /// The principal moments of inertia: the eigenvalues of the tensor, sorted
+    /// decreasing, with the rotation into the principal frame.
     ///
-    /// This is a necessary, not sufficient, check — it does not diagonalize
-    /// the tensor to confirm the *principal* moments satisfy the inequality
-    /// when products of inertia are large, which is why a profile fixture
-    /// should also be checked against a measured or CAD-derived tensor before
-    /// being trusted.
+    /// This is the example's `mjuu_fullInertia` step
+    /// (`docs/example-system-specs/13_model_compiler_setconst.md` section 5,
+    /// item 5), which turns a full tensor into a principal diagonal and an
+    /// `iquat` before any validity test is applied.
+    #[must_use]
+    pub fn principal_moments(&self) -> Eig3 {
+        eig3([
+            self.ixx, self.ixy, self.ixz, self.ixy, self.iyy, self.iyz, self.ixz, self.iyz,
+            self.izz,
+        ])
+    }
+
+    /// Whether the tensor satisfies the necessary conditions for a physically
+    /// realizable rigid body: its **principal moments** are non-negative and
+    /// satisfy the triangle inequality `I_a + I_b >= I_c` for every
+    /// permutation.
+    ///
+    /// The condition is applied to the eigenvalues, not to the diagonal
+    /// entries, following the example's compiler: it diagonalizes a full
+    /// inertia tensor and then tests `I0 + I1 < I2 || I0 + I2 < I1 ||
+    /// I1 + I2 < I0` on the principal moments
+    /// (`13_model_compiler_setconst.md` section 5, items 5 and 10). The two
+    /// conditions coincide only for an already-diagonal tensor. Testing the
+    /// diagonal entries accepts, for instance,
+    /// `ixx = iyy = izz = 1` with `ixy = 2`, whose eigenvalues are `3`, `1`
+    /// and `-1`: a body with negative kinetic energy about one axis. That is
+    /// the measured counterexample in
+    /// `crates/robot-sim/specs/appendix-d-mathematical-challenges.md` entry
+    /// M-03, and `crates/robot-sim/specs/appendix-b-open-questions.md` S-08 is
+    /// the decision this implements.
+    ///
+    /// Still necessary rather than sufficient: it does not test the joint
+    /// realisability of mass, centre of mass and tensor together (the
+    /// positive-semi-definiteness of the 4x4 pseudo-inertia), which S-08
+    /// records as the stronger alternative and leaves for its own decision. A
+    /// fixture should still be checked against a measured or CAD-derived
+    /// tensor before being trusted.
+    ///
+    /// **One deviation from the example, deliberate.** The example applies the
+    /// triangle inequality "exact, no tolerance", because its compiler tests
+    /// values it has just produced in the same routine. Here the eigenvalues
+    /// come from a Jacobi iteration with a relative error of order `1e-13`,
+    /// and physically ordinary bodies sit exactly on the boundary — a thin rod
+    /// has `I = (0, I, I)`, for which `0 + I >= I` is an equality. An exact
+    /// test would reject such a body on rounding alone, so the inequality is
+    /// applied with a tolerance relative to the largest principal moment.
+    /// Non-negativity carries the same relative tolerance, for the same
+    /// reason, and an all-zero tensor (a point mass, and
+    /// [`MassProperties::MASSLESS`]) therefore stays valid.
     #[must_use]
     pub fn is_physically_plausible(&self) -> bool {
-        self.is_finite()
-            && self.ixx >= 0.0
-            && self.iyy >= 0.0
-            && self.izz >= 0.0
-            && self.ixx + self.iyy >= self.izz
-            && self.iyy + self.izz >= self.ixx
-            && self.izz + self.ixx >= self.iyy
+        if !self.is_finite() {
+            return false;
+        }
+        let [a, b, c] = self.principal_moments().values;
+        // Relative to the largest moment, which is `a` because the
+        // eigenvalues come back sorted decreasing.
+        let tol = 1e-9 * a.abs().max(1.0e-300);
+        a >= -tol
+            && b >= -tol
+            && c >= -tol
+            && a + b >= c - tol
+            && b + c >= a - tol
+            && c + a >= b - tol
     }
 
     /// As a row-major 3x3 matrix, for use in dynamics.
@@ -293,6 +342,8 @@ impl LinkSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use robot_types::frames::Quat;
+    use robot_types::units::Radians;
 
     fn link(mass: MassProperties, collision: Vec<CollisionShape>) -> LinkSpec {
         LinkSpec {
@@ -386,5 +437,215 @@ mod tests {
             link(mp, vec![good, bad]).validate(),
             Err(LinkError::InvalidCollisionShape { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn an_indefinite_tensor_is_rejected_even_though_its_diagonal_passes() {
+        // Appendix D M-03's measured counterexample. The diagonal entries are
+        // all 1 and satisfy every triangle inequality among themselves, but the
+        // products of inertia make the tensor indefinite: its eigenvalues are
+        // 3, 1 and -1, so a body carrying it has negative kinetic energy about
+        // one axis.
+        let bad = InertiaTensor {
+            ixx: 1.0,
+            iyy: 1.0,
+            izz: 1.0,
+            ixy: 2.0,
+            ixz: 0.0,
+            iyz: 0.0,
+        };
+        // The old diagonal-only conditions, spelled out, all hold:
+        assert!(bad.ixx >= 0.0 && bad.iyy >= 0.0 && bad.izz >= 0.0);
+        assert!(bad.ixx + bad.iyy >= bad.izz);
+        assert!(bad.iyy + bad.izz >= bad.ixx);
+        assert!(bad.izz + bad.ixx >= bad.iyy);
+        // and the principal moments are what reject it.
+        let m = bad.principal_moments().values;
+        assert!(m[2] < -0.5, "smallest principal moment is {}", m[2]);
+        assert!(!bad.is_physically_plausible());
+    }
+
+    #[test]
+    fn a_valid_tensor_with_large_products_of_inertia_is_accepted() {
+        // The check must not reject a legitimate tensor merely for having
+        // off-diagonal terms, so build one that is valid by construction: take
+        // principal moments that satisfy the triangle inequality strictly and
+        // rotate them 45 degrees about z, which is a similarity transform and
+        // cannot change validity.
+        //
+        // Worth recording why this test is built rather than hand-picked. The
+        // first tensor written here by hand -- diagonal (4, 3, 2) with products
+        // (1, 0.5, -0.25), which looks entirely ordinary -- turned out to have
+        // principal moments (4.65, 2.69, 1.66), and 2.69 + 1.66 < 4.65. No
+        // rigid body has those moments. It passes the old diagonal-entry test.
+        // That is the same failure mode as Appendix D M-03, found by accident
+        // while testing the fix for it.
+        for (ia, ib) in [(3.0, 2.0), (5.0, 4.0), (1.0, 0.75)] {
+            // diag(ia, ib, ib) rotated by 45 degrees about z.
+            let mix = 0.5 * (ia + ib);
+            let off = 0.5 * (ib - ia);
+            let good = InertiaTensor {
+                ixx: mix,
+                iyy: mix,
+                izz: ib,
+                ixy: off,
+                ixz: 0.0,
+                iyz: 0.0,
+            };
+            assert!(
+                off.abs() > 0.1 * mix,
+                "the off-diagonal term should be substantial: {off} against {mix}"
+            );
+            let m = good.principal_moments().values;
+            assert!(m[2] > 0.0, "principal moments {m:?}");
+            assert!(m[1] + m[2] >= m[0], "triangle inequality on {m:?}");
+            assert!(good.is_physically_plausible());
+        }
+    }
+
+    #[test]
+    fn a_massless_tensor_stays_valid() {
+        // MassProperties::MASSLESS is used throughout the fixtures and for
+        // point masses; an all-zero tensor must remain acceptable.
+        assert!(InertiaTensor::ZERO.is_physically_plausible());
+        assert!(MassProperties::MASSLESS.inertia.is_physically_plausible());
+    }
+
+    #[test]
+    fn a_thin_rod_on_the_triangle_boundary_stays_valid() {
+        // A rod about its own axis has principal moments (0, I, I), for which
+        // 0 + I >= I holds with exact equality. This is the case that makes the
+        // example's "exact, no tolerance" test unusable on eigenvalues computed
+        // by iteration, and the reason the check carries a relative tolerance.
+        for i in [1.0, 1e-7, 5.9e-2] {
+            let rod = InertiaTensor {
+                ixx: 0.0,
+                iyy: i,
+                izz: i,
+                ixy: 0.0,
+                ixz: 0.0,
+                iyz: 0.0,
+            };
+            assert!(rod.is_physically_plausible(), "rod with I = {i}");
+            // The same rod, rotated into a frame where it is all off-diagonal,
+            // must also pass: validity cannot depend on the frame.
+            let r = core::f64::consts::FRAC_1_SQRT_2;
+            // Rotating diag(0, i, i) by 45 degrees about x leaves it diagonal,
+            // so rotate about z instead, which mixes xx, yy and xy.
+            let (c, s) = (r, r);
+            let rotated = InertiaTensor {
+                ixx: c * c * 0.0 + s * s * i,
+                iyy: s * s * 0.0 + c * c * i,
+                izz: i,
+                ixy: c * s * (0.0 - i),
+                ixz: 0.0,
+                iyz: 0.0,
+            };
+            assert!(
+                rotated.is_physically_plausible(),
+                "rotated rod with I = {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tensor_violating_the_triangle_inequality_on_its_eigenvalues_is_rejected() {
+        // Diagonal and positive, but I0 + I1 < I2: no rigid body has these
+        // principal moments.
+        let bad = InertiaTensor {
+            ixx: 1.0,
+            iyy: 1.0,
+            izz: 5.0,
+            ixy: 0.0,
+            ixz: 0.0,
+            iyz: 0.0,
+        };
+        assert!(!bad.is_physically_plausible());
+    }
+
+    #[test]
+    fn validity_does_not_depend_on_the_frame_the_tensor_is_expressed_in() {
+        // Rotating a tensor is a similarity transform and leaves its
+        // eigenvalues alone, so the verdict must be invariant. This is the
+        // property the diagonal-entry test lacked, and it is what makes the
+        // check meaningful for an imported model whose link frames are
+        // arbitrary.
+        let base = InertiaTensor {
+            ixx: 0.05,
+            iyy: 0.07,
+            izz: 0.04,
+            ixy: 0.0,
+            ixz: 0.0,
+            iyz: 0.0,
+        };
+        assert!(base.is_physically_plausible());
+        let before = base.principal_moments().values;
+        // R I R' for a rotation by 0.7 about the axis (1, 2, -1), built from
+        // the quaternion so this test does not depend on any matrix helper.
+        let q = Quat::from_axis_angle(Vec3::new(1.0, 2.0, -1.0), Radians(0.7)).unwrap();
+        let col = |v: Vec3| {
+            let r = q.rotate(v);
+            [r.x, r.y, r.z]
+        };
+        let r = [
+            col(Vec3::new(1.0, 0.0, 0.0)),
+            col(Vec3::new(0.0, 1.0, 0.0)),
+            col(Vec3::new(0.0, 0.0, 1.0)),
+        ];
+        // R has the rotated basis vectors as its columns: R[i][j] = r[j][i].
+        let i_local = [
+            [base.ixx, base.ixy, base.ixz],
+            [base.ixy, base.iyy, base.iyz],
+            [base.ixz, base.iyz, base.izz],
+        ];
+        let mut out = [[0.0f64; 3]; 3];
+        for a in 0..3 {
+            for b in 0..3 {
+                let mut acc = 0.0;
+                for k in 0..3 {
+                    for l in 0..3 {
+                        acc += r[k][a] * i_local[k][l] * r[l][b];
+                    }
+                }
+                out[a][b] = acc;
+            }
+        }
+        let rotated = InertiaTensor {
+            ixx: out[0][0],
+            iyy: out[1][1],
+            izz: out[2][2],
+            ixy: out[0][1],
+            ixz: out[0][2],
+            iyz: out[1][2],
+        };
+        let after = rotated.principal_moments().values;
+        for (x, y) in before.iter().zip(&after) {
+            assert!(
+                (x - y).abs() < 1e-12,
+                "principal moments changed under rotation: {before:?} then {after:?}"
+            );
+        }
+        assert!(rotated.is_physically_plausible());
+    }
+
+    #[test]
+    fn every_link_of_the_vendored_g1_has_a_physically_valid_inertia() {
+        // The stricter condition must not reject the real robot. It does not:
+        // every one of the G1's links passes on its principal moments, which
+        // is worth pinning because the check became stronger.
+        for fixture in [
+            crate::fixtures::unitree_g1_29dof(),
+            crate::fixtures::unitree_g1_29dof_floating_base(),
+        ] {
+            let profile = fixture.expect("the vendored fixture loads");
+            for link in &profile.links {
+                assert!(
+                    link.mass.inertia.is_physically_plausible(),
+                    "link {:?} has principal moments {:?}",
+                    link.name,
+                    link.mass.inertia.principal_moments().values
+                );
+            }
+        }
     }
 }

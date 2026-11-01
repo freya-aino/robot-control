@@ -453,8 +453,10 @@ impl CompositeModel {
                 JointKind::Revolute | JointKind::Continuous | JointKind::Prismatic => 1,
                 JointKind::Free => 7,
             };
-            // Appendix D M-02: normalise once, at the boundary.
-            let (axis, _) = normalize3([joint.axis.x, joint.axis.y, joint.axis.z]);
+            // Appendix D M-02: the unit axis, from the one accessor every
+            // consumer is required to use.
+            let u = joint.unit_axis();
+            let axis = [u.x, u.y, u.z];
             let q = joint.origin.rotation;
             let t = joint.origin.translation;
             let props = &link.mass;

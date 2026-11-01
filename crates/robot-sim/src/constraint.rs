@@ -168,7 +168,15 @@ pub fn stiffness_damping(solref: [f64; 2], solimp: [f64; 5]) -> (f64, f64) {
     } else {
         -solref[0] / (d_width * d_width).max(MINVAL)
     };
-    let b = if solref[1] > 0.0 {
+    // One predicate for one format choice. Appendix D M-13 records that the
+    // stiffness branched on `solref[0] > 0` and the damping on
+    // `solref[1] > 0`; the example selects both from the first element. The two
+    // agree on every path through this crate, because `effective_timeconst`
+    // refuses a mixed-format `solref` before this is reached, but this
+    // function is public and validates nothing of its own, so a direct caller
+    // with `solref = [0.02, -1.0]` would have got a standard-formulation
+    // stiffness and a direct-formulation damping.
+    let b = if solref[0] > 0.0 {
         2.0 / (d_width * solref[0]).max(MINVAL)
     } else {
         -solref[1] / d_width.max(MINVAL)
