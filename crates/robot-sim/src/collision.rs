@@ -722,27 +722,6 @@ fn build_polytope(
     }
 }
 
-/// Iteration cap for the expanding-polytope loop. The example caps at
-/// `min(max_iterations, 1000)` (05 section 6.3).
-const EPA_MAX_ITERATIONS: usize = 128;
-/// Relative gap between the penetration depth's lower and upper bounds at
-/// which the expansion is considered converged (05 section 6.3).
-const EPA_TOLERANCE: f64 = 1e-8;
-/// Maximum faces the expanding polytope may hold. The example carries the same
-/// bound (`maxfaces`) and breaks out of the loop when a horizon would exceed
-/// it, keeping the best face found rather than failing: "if nedges > maxfaces -
-/// nfaces: warning out of memory for faces; break" (05 section 6.3).
-///
-/// Omitting it is not a missing optimisation, it is a missing termination
-/// condition. Each pass replaces the faces the new support point can see with
-/// one face per horizon edge, so a polytope whose faces are not a proper convex
-/// hull -- which the triangle construction can produce -- grows its face count
-/// geometrically instead of refining it. Measured without this bound, a single
-/// narrow-phase query on a collapsed G1 took 2.9 seconds while reporting a
-/// normal four GJK iterations, because the entire cost was a face list that had
-/// run away.
-const EPA_MAX_FACES: usize = 256;
-
 /// EPA: expands the polytope around the origin until it reaches the Minkowski
 /// boundary, and returns the closest face's depth and normal.
 ///
@@ -759,6 +738,7 @@ fn epa(
     b: &Placed,
     initial: Vec<Vertex>,
     initial_faces: &[[usize; 3]],
+    ccd: crate::options::CcdConfig,
 ) -> Option<Contact> {
     let mut verts: Vec<Vertex> = initial;
     // A face is (indices, outward unit normal, distance from origin). The origin
@@ -808,7 +788,7 @@ fn epa(
     let mut converged = false;
     let mut horizon: Vec<(usize, usize)> = Vec::new();
     let mut visible: Vec<usize> = Vec::new();
-    for _ in 0..EPA_MAX_ITERATIONS {
+    for _ in 0..ccd.iterations {
         let (fi, _) = faces
             .iter()
             .enumerate()
@@ -829,7 +809,7 @@ fn epa(
         }
         result_normal = n;
         result_depth = dist;
-        let on_boundary = upper - dist < EPA_TOLERANCE * (1.0 + dist);
+        let on_boundary = upper - dist < ccd.tolerance * (1.0 + dist);
         // Barycentric point of the origin's projection on the face, for the
         // contact points.
         let proj = scale(n, dist);
@@ -887,7 +867,7 @@ fn epa(
             // ring: the example's "if horizon.nedges < 3: face = NULL".
             return None;
         }
-        if faces.len() - visible.len() + horizon.len() > EPA_MAX_FACES {
+        if faces.len() - visible.len() + horizon.len() > ccd.max_faces {
             // The example's out-of-faces break, which keeps the current best
             // face rather than discarding the result.
             break;
@@ -1005,10 +985,17 @@ fn capsule_pair(a: &Placed, a_h: f64, a_r: f64, b: &Placed, b_h: f64, b_r: f64) 
 /// GJK, with EPA for overlap. `Overlap.normal` pushes `a` away from `b`.
 #[must_use]
 pub fn proximity(a: &Placed, b: &Placed) -> Proximity {
+    proximity_with(a, b, crate::options::CcdConfig::default())
+}
+
+/// [`proximity`] with an explicit narrow-phase budget.
+#[must_use]
+pub fn proximity_with(a: &Placed, b: &Placed, ccd: crate::options::CcdConfig) -> Proximity {
     if let (Some((ah, ar)), Some((bh, br))) = (as_capsule(a.shape), as_capsule(b.shape)) {
+        // The analytic path is exact, so the budget does not apply to it.
         return capsule_pair(a, ah, ar, b, bh, br);
     }
-    gjk_epa(a, b)
+    gjk_epa_with(a, b, ccd)
 }
 
 /// A sphere is a capsule with no core; a capsule is itself.
@@ -1027,6 +1014,18 @@ fn as_capsule(shape: Primitive) -> Option<(f64, f64)> {
 /// penetration. Exposed so that the analytic fast paths can be checked against it.
 #[must_use]
 pub fn gjk_epa(a: &Placed, b: &Placed) -> Proximity {
+    gjk_epa_with(a, b, crate::options::CcdConfig::default())
+}
+
+/// [`gjk_epa`] with an explicit narrow-phase budget.
+///
+/// The budget is a per-run fidelity knob rather than a compile-time constant
+/// (`specs/09-fidelity-tiers.md` section 12.1, Appendix D M-21). The
+/// performance work recorded in the narrow-phase rewrite is the argument for
+/// it: the right values differ between shallow contact and deep penetration,
+/// so no single baked-in choice serves both.
+#[must_use]
+pub fn gjk_epa_with(a: &Placed, b: &Placed, ccd: crate::options::CcdConfig) -> Proximity {
     // The loop follows 05 section 5.3. The important structural point is how
     // penetration is decided: not by a separate containment test, but by the
     // subdistance returning four non-zero barycentric weights, which is strict
@@ -1161,7 +1160,7 @@ pub fn gjk_epa(a: &Placed, b: &Placed) -> Proximity {
     let penetrating = (enclosed && !separated) || (!separated && x_norm < TOLERANCE);
     if penetrating {
         if let Some((pverts, pfaces)) = build_polytope(a, b, &simplex[..nsimplex], x_norm) {
-            if let Some(contact) = epa(a, b, pverts, &pfaces) {
+            if let Some(contact) = epa(a, b, pverts, &pfaces, ccd) {
                 return Proximity::Overlap(contact);
             }
         }
