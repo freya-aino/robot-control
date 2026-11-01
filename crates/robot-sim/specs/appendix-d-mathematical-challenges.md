@@ -237,6 +237,78 @@ specified, and a different piece of work from the one attempted. Until then the
 entries stand as written, and the `depth.max(0.0)` that hides the failure is
 still in place.
 
+### 1.6 Status after the 2026-11-01 corrections, second pass
+
+The table in 1.5 is superseded by this one. Fourteen of the twenty-four entries
+are now closed, each naming the test that would fail if it regressed. The two
+that remain are named with what they need.
+
+| ID | State | Where |
+| --- | --- | --- |
+| [M-01](#m-01) | **fixed** | `composite`: world-frame linear velocity, exact quaternion update. Momentum conserved to below 1e-14 against a measured 3.93e-3 |
+| [M-02](#m-02) | **fixed** | `JointSpec::unit_axis` is the single accessor |
+| [M-03](#m-03) | **fixed** | Principal moments via `robot_model::eig` |
+| [M-04](#m-04) | **fixed** | Both halves: the solver couples the rows so the total force balances the weight however many divide it, and the exact plane manifolds of `04` sections 1.3 and 1.4 bound the point count at four as a property of the geometry. The commit records what the solver alone does *not* fix, since the rest depth still scales as `1/n` in the example's formulation too |
+| [M-05](#m-05) | **fixed** | Signed-volume subdistance (05 §5.4) plus the polytope2, polytope3 and polytope4 constructions of §6.1, which is where the enclosure invariant actually comes from |
+| [M-06](#m-06) | **fixed** | Same. Four non-zero barycentric weights *are* strict enclosure, so there is no containment test left to get wrong |
+| [M-07](#m-07) | **fixed** | Support-feature edge pair plus closest points |
+| [M-08](#m-08) | **fixed** | Limits are rows with the same `solref`/`solimp` impedance as any other |
+| [M-09](#m-09) | **fixed** | `R_ii = (1 - d)/d * A_ii` with the exact diagonal |
+| [M-10](#m-10) | **fixed** | Friction rows in the same problem, bounded by the pyramidal cone against the normal row's current force; contact frame from `mju_makeFrame`, so no hard-coded tangent plane |
+| [M-11](#m-11) | **fixed** | `a_u = J qacc_smooth + Jdot v`. The point Jacobian is checked against a central finite difference |
+| [M-12](#m-12) | **fixed** | Limit and contact rows share one `A` |
+| [M-13](#m-13) | **fixed** | One predicate for one `solref` format |
+| [M-14](#m-14) | **fixed** | Relative pivot tolerance |
+| [M-15](#m-15) | **fixed** | Bounding-sphere and world-AABB filters before the narrow phase, with `world_aabb` checked against the support function |
+| [M-16](#m-16) | **fixed** | `pair_can_collide`: bitmask, weld body, immovable pair and parent-child, replacing the global 3 mm allowance |
+| [M-17](#m-17) | **open** | See 1.6.1 |
+| [M-18](#m-18) | **fixed** | `crb`, `factor_m`, `solve_ld` |
+| [M-19](#m-19) | **fixed** | `CompositeState::rk4_step` with the Runge-Kutta-Munthe-Kaas correction, asserted higher order rather than merely better |
+| [M-20](#m-20) | **fixed** | Battery schema v8 adds a plane force-balance, a friction-cone and a narrow-phase row (ADR 0008 amendment) |
+| [M-21](#m-21) | **fixed** | `options::SimOptions` holds all seven knobs, rejects invalid values rather than clamping, and records every knob for a run record. `CcdConfig` is threaded through the narrow phase |
+| [M-22](#m-22) | **open** | See 1.6.2 |
+| [M-23](#m-23) | **fixed** | `cholesky_factor` / `cholesky_substitute`, one factorisation per solve |
+| [M-24](#m-24) | **fixed** | One factorisation plus `nv` back-substitutions |
+
+#### 1.6.1 What M-17 needs
+
+The pieces now exist: `composite` is a complete forward-dynamics path with the
+correct `Free`-joint convention, `solver` is the unified constraint problem, and
+`options` is the per-run configuration. What is missing is the switch-over.
+`MultibodyState::step` in `articulated` is still what the CLI, the environments
+and most tests run, and it still uses its inline semi-implicit Euler, its
+clamped-PD actuation, its penalty contact and its two-part joint limit.
+
+The switch is not a small edit, and the reason is the `Free`-joint layout.
+`composite` orders a free joint's degrees of freedom translation-first in the
+world frame; `articulated` orders them angular-first in the body frame. Every
+`q` and `qd` vector that crosses that boundary has to move at once, which means
+`MultibodyState`, `MultibodyEnv`, the `robot sim multibody` command, the USD
+replay writer, the G1 probe rows in `fidelity.rs`, and the free-body tests in
+`articulated.rs`. Doing it piecemeal would leave two conventions live in one
+crate, which is worse than either.
+
+It is also the one remaining change that alters measured behaviour on the G1,
+so it wants its own before-and-after on the zero-torque probe and the stance
+hold rather than being folded into another commit.
+
+#### 1.6.2 What M-22 needs
+
+Unchanged from the entry, with one addition: the sparse route it names now
+exists on the CPU. `composite`'s `factor_m` is the `L' D L` factorization over
+the degree-of-freedom tree, which is the structure a batched backend
+parallelises over, so the GPU work is a port rather than a design. The `f32`
+and `MAX_DOF = 6` limits in `robot-sim-gpu` are untouched, and the measured
+`cond(M) ~ 1e5` on the G1 still says a dense `f32` factorisation of that matrix
+is unsuitable whatever the budget.
+
+The solver adds a second requirement the entry did not name. Projected
+Gauss-Seidel is what `solver` implements, and a strictly sequential per-row
+update is exactly what the example's own GPU backend drops it for. A batched
+backend therefore needs the Newton path of `08` as well as the kernels, which
+makes step 06 item 5's "at least two solver algorithms" a prerequisite for
+M-22 rather than an independent nicety.
+
 ---
 
 ## 2. Entries

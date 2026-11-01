@@ -78,6 +78,65 @@ dissipation check (symplectic-integrator energy drift bounded over
 contact model strictly losing energy on impact; friction that damps
 without ever reversing a slide).
 
+## Second correction pass (2026-11-01)
+
+Fourteen of the twenty-four audit entries are now closed.
+`specs/appendix-d-mathematical-challenges.md` section 1.6 is the current status
+table, and 1.6.1 and 1.6.2 say what the two remaining entries need.
+
+**New module `solver`.** Contact, joint-limit and equality rows solved as one
+convex problem over constraint forces, which is what `specs/06` item 1 asks for
+and what five audit entries folded into: `A = J M^-1 J^T` from the composite
+factorization, `R_ii = (1-d)/d A_ii` with the exact diagonal instead of a fixed
+1 kg reference mass, `a_u = J qacc_smooth + Jdot v` with both of the terms that
+were missing, friction as rows bounded by the pyramidal cone against the normal
+row's current force, and warm starting. The point Jacobian is checked against a
+central finite difference of the kinematics.
+
+**New module `options`.** The seven fidelity knobs of `specs/09` section 12.1 as
+a per-run configuration that validates rather than clamps and that records every
+knob for a run record. The narrow-phase budget is threaded through collision,
+which is where the need for it was actually discovered.
+
+**Collision.** The narrow phase is now the example's signed-volume GJK with the
+polytope2, polytope3 and polytope4 constructions, which is where the
+expanding-polytope algorithm's enclosure invariant comes from -- four non-zero
+barycentric weights *are* strict enclosure, so there is no containment test left
+to get wrong. Plane contact uses the exact bounded manifolds instead of sampling
+eight corners or sixteen rim points, so the point count is a property of the
+contact geometry. A broad phase rejects pairs before any support-mapping call,
+and a real pair-exclusion filter replaces the global 3 mm overlap allowance.
+
+**RK4 takes a free joint**, with the Runge-Kutta-Munthe-Kaas correction, and is
+asserted higher order rather than merely better: more than a hundred times below
+the semi-implicit step's energy drift on a tumbling body, and shrinking much
+faster than first order when the timestep halves.
+
+**The battery covers contact now** (schema v8), and writing those rows paid for
+itself immediately: the first sample of the collision row exposed a head-on
+collision between two convex shapes reporting no contact at all, because the
+two-vertex polytope construction was missing. Random fuzzing had never produced
+that configuration because random orientations are never collinear. That is the
+argument for `specs/04`'s coverage gap in one example.
+
+**One correction to the audit's own analysis.** Appendix D M-04 claimed the
+per-point penalty law was the reason rest penetration scaled with the sampled
+point count. The solver fixes the force balance -- the total settles at the
+weight however many rows divide it -- but the `1/n` depth scaling survives,
+because with `A_ii ~ 1/m` and `R_i = (1-d)/d A_ii` the per-row force is `m g / n`
+either way. The example's formulation has the same property. What removes it is
+the bounded manifolds, which cap the count geometrically. Two of that commit's
+tests were first written asserting the opposite, from penalty-spring intuition.
+
+**What is not done.** `MultibodyState::step` is still the stepper the CLI and the
+environments run, so `composite`, `solver` and `options` are available but not
+the default path (M-17); section 1.6.1 explains why that switch wants to be one
+change rather than several, since the `Free`-joint layout has to move everywhere
+at once. And the GPU backend's `f32` and six-degree-of-freedom limits are
+untouched (M-22), now with the added requirement that a batched solver needs the
+Newton path, because a sequential per-row update is exactly what the example's
+own GPU backend drops projected Gauss-Seidel for.
+
 ## What the corrections did (2026-11-01)
 
 `docs/example-system-specs/` is now the single source of truth for the

@@ -125,7 +125,22 @@ Step 4 runs the pendulum trajectory oracle at both declared tiers. Its v6 check 
 - Resolved in Step 4: `sn` is the Landen recursion in `oracle.rs`, checked against an RK4 integration and a hand-derived power series of `K(m)`. The linear regime of section 2.3 was not used and has no tolerance.
 - No cross-engine comparison against the reference simulator itself is requested here. Any such comparison is subject to the `SPECS.md` Section 2.1 exception procedure.
 
-## Challenges
+## Status of the battery (updated 2026-11-01)
+
+Schema **v8** (`shared-analytic-v8`) adds the three rows the Challenges section
+below argued for: `plane_normal_force_balance` against the closed form `m g`,
+`friction_cone_bound` against the feasible set itself, and `narrowphase_depth`
+against a sphere closed form and the separating-axis depth of a box pair. All
+three are oracles of the kinds this step already admits. ADR 0008 carries the
+amendment, and Appendix D M-20 is closed.
+
+The argument in the Challenges section was borne out on contact with the code.
+The first sample of the collision row exposed a missing two-vertex polytope
+construction that made a head-on collision between two convex shapes report no
+contact at all -- the most ordinary contact there is, which the randomised fuzz
+tests had never produced because random orientations are never collinear.
+
+## Challenges (as first recorded)
 
 [Appendix D](appendix-d-mathematical-challenges.md) M-20 (**gap**) is owned here, and Appendix D section 3.1 argues it is the entry that matters most of the twenty-four.
 
