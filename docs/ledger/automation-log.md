@@ -717,3 +717,35 @@ legacy path slot for slot.
 
 Gate: 1064 tests, fmt and clippy clean. Replay writing verified end to end on
 the new default path.
+
+## 2026-11-01 — the model's actuators are simulated, and their units are right
+
+Two defects, recorded as Appendix D M-25 and M-26, found by comparing the
+simulation's behaviour against what the G1 USD layer describes.
+
+M-25: the layer declares a `PhysicsDriveAPI` per joint and the importer reads all
+29 into `ActuatorSpec::gains`, but nothing consumed them. `robot sim multibody`
+applied a hand-written hold with a uniform kp=300, kd=30. `World` now owns the
+model's actuators and `World::actuator_torques` is `mj_fwdActuation` for them --
+the AFFINE-gain/AFFINE-bias position servo of specs/10 section 2.2, clamped to
+`maxForce` and taken through the declared transmission. A profile with no
+declared gains gets no drives rather than fabricated ones.
+
+M-26: an angular drive's stiffness and damping are **per degree**, and were read
+as per radian. The importer already converted the limits and the velocity from
+degrees -- the knee's range reads -145 to 165 and its maximum velocity 1833 --
+but not the gains, which convert the opposite way to an angle. Every drive was
+understated by 180/pi. With the wrong units the G1 could not hold its own
+posture: it folded, the pelvis fell to 0.055 m, and all three stance checks
+failed with 188 J. With the right units it settles at 0.790 m and reads 0.0000 J
+from t=0.8 s.
+
+The sequence is the lesson. A hand-written hold with invented gains produced a
+passing stance for weeks while masking a unit error in the model import, and the
+error only became visible once the model's own drives were actually applied.
+
+New run in `outputs/g1-stance-newton-replay/`: PASS, residual kinetic energy
+0.0114 J against the legacy run's 0.0866 J, worst penetration -4.6 mm against
+-5.1 mm. usdchecker clean on both replays.
+
+Gate: 1069 tests, fmt and clippy clean.

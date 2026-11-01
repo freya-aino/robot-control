@@ -167,6 +167,8 @@ repository.
 | [M-22](#m-22) | The GPU dense path is `f32` and capped at 6 degrees of freedom; the G1 needs 35 at `cond(M) ~ 1e5` | gap | [11](11-gpu-batched-backend.md), [12](12-cpu-gpu-agreement.md) |
 | [M-23](#m-23) | `solve_equality` refactorises `M` once per constraint row | cost | [06](06-equality-constraints-and-solver.md) |
 | [M-24](#m-24) | `inverse_inertia_diagonal` costs `nv` forward-dynamics passes and runs inside the stance loop | cost | [02](02-pure-dynamics-core.md) |
+| [M-25](#m-25) | The model's declared actuators are not simulated; the stepper applies invented gains | defect | [05](05-passive-forces-and-actuators.md) |
+| [M-26](#m-26) | A USD angular drive's stiffness and damping are per degree and were read as per radian | defect | [05](05-passive-forces-and-actuators.md) |
 
 ### 1.5 Status after the 2026-11-01 corrections
 
@@ -499,6 +501,27 @@ A first attempt inferred the mapping from the rank of a body's external position
 offset, which is wrong for exactly those fixed bodies. The mapping now comes
 from the profile, and a test compares the whole vector against the legacy path
 slot for slot rather than merely checking its length.
+
+#### 1.7.6 Simulating the model, not a robot that resembles it
+
+Two defects found by comparing the simulation's behaviour against what the G1
+USD layer describes, rather than by reading code: [M-25](#m-25), the model's 29
+declared drives were not simulated at all, and [M-26](#m-26), an angular drive's
+gains are per degree and were being read as per radian.
+
+M-26 is the more instructive of the two. The importer already converted the
+joint limits and the maximum velocity from degrees, so the layer's convention
+was known; the drive gains were simply missed, and a gain converts the opposite
+way to an angle. Understating every drive by 180/pi left the G1 unable to hold
+its own posture, and that failure was only visible once M-25 was fixed and the
+model's drives were actually being applied. A hand-written hold with invented
+gains had been masking a unit error in the model import.
+
+The lesson for the rest of this appendix: a simulation that looks plausible
+under a controller of our own choosing is weak evidence that the *model* is
+being read correctly. The invented `kp = 300, kd = 30` hold produced a passing
+stance for weeks while the drives it was standing in for were wrong by a factor
+of 57.
 
 ## 2. Entries
 
@@ -1388,6 +1411,69 @@ factorisation — the comparison is CRBA plus one factorisation against 35 ABA
 passes, not CRBA alone.
 
 ---
+
+### M-25
+
+**The model's declared actuators are not simulated; the stepper applies invented
+gains.** Severity: defect. Owning step:
+[05](05-passive-forces-and-actuators.md).
+
+The G1 OpenUSD layer declares a `PhysicsDriveAPI` on every joint, with its own
+`drive:angular:physics:stiffness`, `:damping` and `:maxForce`. The importer
+reads all 29 of them into `ActuatorSpec::gains` and the joint effort limit.
+Nothing consumed them. `robot sim multibody` applied a hand-written
+proportional-derivative hold with a uniform `kp = 300` and `kd = 30`, which is
+neither the model's gains nor uniform in the model.
+
+This is a correctness defect and not a missing feature. The stated standard for
+this project is that a USD scene describes the system and that loading it should
+behave as loading it into any other simulator would, and every simulator that
+reads `PhysicsDriveAPI` applies the drive the model declares. A run using
+invented gains is not a simulation of the model; it is a simulation of a
+different robot with the same geometry.
+
+**Resolved.** `World` owns the model's actuators and `World::actuator_torques`
+is `mj_fwdActuation` for them, as the AFFINE-gain/AFFINE-bias position servo of
+[specs/10](../../../docs/example-system-specs/10_actuation_sensors_plugins.md)
+section 2.2: `gainprm = [kp, 0, 0]`, `biasprm = [0, −kp, −kd]`, so
+`force = kp(ctrl − q) − kd·qd`, clamped to `maxForce` (section 2.5) with the
+target clamped into the joint range (section 2.8 `inheritrange`) and the result
+taken through the declared transmission.
+
+A profile that declares no gains gets **no** drives rather than fabricated ones.
+A URDF import carries no actuator metadata at all — `placeholder_actuator` leaves
+the gains at zero — and inventing a controller there and calling it the model is
+the mistake this entry is about. The command prints which actuation it used, so
+a fallback is visible rather than looking like the real thing.
+
+### M-26
+
+**A USD angular drive's stiffness and damping are per degree and were read as
+per radian.** Severity: defect. Owning step:
+[05](05-passive-forces-and-actuators.md).
+
+USD states angular quantities in degrees. The importer already knew this for
+some of them: it converts `physics:lowerLimit`, `physics:upperLimit` and
+`physxJoint:maxJointVelocity` with `to_radians`, and it must — the G1 layer
+gives `left_knee_joint` a range of −145 to 165 and a maximum velocity of 1833,
+which are only sensible as degrees and become −2.53 to 2.88 rad and 32 rad/s.
+
+It did not convert the drive gains. A gain is a torque *per unit angle*, so it
+converts the opposite way to an angle: a stiffness of 24.84 N·m per degree is
+24.84 × 180/π = 1423 N·m per radian. Reading the attribute as per-radian
+understates every drive by a factor of 180/π ≈ 57.3.
+
+The consequence was not subtle, which is how it was found. Simulated with its
+own drives at the wrong units the G1 could not hold its own posture: it folded,
+the pelvis fell from 0.797 m to 0.055 m, penetration reached 44 mm, and the run
+failed all three supported-stance checks with 188 J of kinetic energy. With the
+units right the model holds itself, which is what it was designed to do — the
+pelvis settles at 0.790 m and the kinetic energy reads 0.0000 J from t = 0.8 s.
+
+`maxForce` is a torque rather than a gain and is not converted.
+
+**Resolved**, with the test written as the raw attribute times 180/π rather than
+as a constant, so it states the claim it is making.
 
 ## 3. Cross-cutting observations
 
