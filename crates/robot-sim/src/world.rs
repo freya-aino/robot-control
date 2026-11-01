@@ -116,6 +116,8 @@ pub struct World {
     weld_parent: Vec<Option<usize>>,
     /// Hard position limits per body, in the joint's own unit.
     limits: Vec<Option<(f64, f64)>>,
+    /// Effort bound per body, for the stance controller's clamp.
+    effort: Vec<f64>,
     ground: Option<Ground>,
     /// Friction coefficient between two shapes of the robot.
     pair_friction: f64,
@@ -152,6 +154,14 @@ pub struct StepReport {
     pub normal_force: f64,
     /// Rows whose time constant was raised to twice the timestep.
     pub clamped_rows: usize,
+    /// Generalized torque the joint-limit rows applied this step, `J' f` summed
+    /// over the limit rows, in the model's **internal** degree-of-freedom
+    /// order.
+    ///
+    /// The legacy path reported this from a separate active-set pass. Here it
+    /// is a projection of the one solve's own forces, so it cannot disagree
+    /// with what actually moved the robot.
+    pub limit_torque: Vec<f64>,
 }
 
 impl World {
@@ -164,6 +174,7 @@ impl World {
         let order = profile.topological_link_order();
         let mut shapes = Vec::new();
         let mut limits = vec![None; model.bodies.len()];
+        let mut effort = vec![0.0; model.bodies.len()];
         let mut unmodelled = 0usize;
 
         for (index, link_id) in order.into_iter().skip(1).enumerate() {
@@ -173,6 +184,7 @@ impl World {
             let joint = profile
                 .parent_joint_of(link_id)
                 .expect("every non-root link has a parent joint");
+            effort[index] = joint.limits.effort.value();
             limits[index] = match (joint.kind, joint.limits.position) {
                 (JointKind::Revolute | JointKind::Prismatic, Some(range)) => {
                     Some((range.lo.value(), range.hi.value()))
@@ -230,6 +242,7 @@ impl World {
             weld,
             weld_parent,
             limits,
+            effort,
             ground: None,
             pair_friction: 0.0,
             options,
@@ -667,6 +680,14 @@ impl World {
             }
         }
         let limits = rows.iter().filter(|r| r.kind == RowKind::Limit).count();
+        let mut limit_torque = vec![0.0; nv];
+        for (row, f) in rows.iter().zip(&solution.force) {
+            if row.kind == RowKind::Limit && *f != 0.0 {
+                for (t, j) in limit_torque.iter_mut().zip(&row.jacobian) {
+                    *t += j * f;
+                }
+            }
+        }
         Ok(StepReport {
             rows: rows.len(),
             contacts,
@@ -675,7 +696,133 @@ impl World {
             solver_residual: solution.residual,
             normal_force,
             clamped_rows: solution.clamped_rows.len(),
+            limit_torque,
         })
+    }
+
+    /// Per-degree-of-freedom damping gain that a semi-implicit step can carry
+    /// without the damping itself going unstable.
+    ///
+    /// `kd <= 0.5 / (M^-1_jj dt)`, capped at `kd_max`: the same bound the
+    /// legacy path uses, and the same reason -- an explicit damping term with
+    /// `kd` above `m_eff / (2 dt)` amplifies rather than removes velocity.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the position or factorisation stages report.
+    pub fn stable_damping(
+        &self,
+        q: &[f64],
+        kd_max: f64,
+        dt_seconds: f64,
+    ) -> Result<Vec<f64>, CompositeError> {
+        let pos = composite::position(&self.model, q)?;
+        let inverse = composite::inverse_inertia_diagonal(&self.model, &pos)?;
+        Ok(inverse
+            .iter()
+            .map(|m_inv| kd_max.min(0.5 / (m_inv * dt_seconds)))
+            .collect())
+    }
+
+    /// A clamped proportional-derivative hold toward the zero posture, written
+    /// into `tau` in the model's internal degree-of-freedom order.
+    ///
+    /// Only single-degree-of-freedom joints are driven; a `Free` joint's
+    /// degrees of freedom are left at zero, because there is no actuator on a
+    /// floating base to drive them with.
+    ///
+    /// This is a demonstration controller, not a balance controller, and it is
+    /// here rather than in a controller crate for the same reason the legacy
+    /// path has it: `robot sim multibody` needs *some* torque to hold a stance
+    /// so that the contact solve has something to do.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositeError::WidthMismatch`] if any vector is the wrong width.
+    pub fn stance_torques(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+        kp: f64,
+        kd: &[f64],
+        tau: &mut [f64],
+    ) -> Result<(), CompositeError> {
+        let nv = self.model.nv();
+        for (what, len, expected) in [
+            ("q", q.len(), self.model.nq),
+            ("qd", qd.len(), nv),
+            ("kd", kd.len(), nv),
+            ("tau", tau.len(), nv),
+        ] {
+            if len != expected {
+                return Err(CompositeError::WidthMismatch {
+                    what,
+                    expected,
+                    found: len,
+                });
+            }
+        }
+        tau.fill(0.0);
+        for (index, body) in self.model.bodies.iter().enumerate() {
+            if body.dof_num != 1 || body.qpos_num != 1 {
+                continue;
+            }
+            let effort = self.effort[index];
+            let value = q[body.qpos_adr];
+            let rate = qd[body.dof_adr];
+            tau[body.dof_adr] = (-kp * value - kd[body.dof_adr] * rate).clamp(-effort, effort);
+        }
+        Ok(())
+    }
+
+    /// Where each bounded single-degree-of-freedom joint sits in its range, as
+    /// a fraction from 0 at the lower bound to 1 at the upper, in **external**
+    /// degree-of-freedom order with `None` for a joint without a limit.
+    ///
+    /// Reported for the replay, which colours a joint by how close it is to its
+    /// stop.
+    #[must_use]
+    pub fn limit_fractions(&self, q: &[f64]) -> Vec<Option<f64>> {
+        let mut out = vec![None; self.model.bodies.len()];
+        for (index, body) in self.model.bodies.iter().enumerate() {
+            let Some((lo, hi)) = self.limits[index] else {
+                continue;
+            };
+            if body.qpos_num != 1 || body.qpos_adr >= q.len() {
+                continue;
+            }
+            let span = hi - lo;
+            if span.abs() <= f64::EPSILON {
+                continue;
+            }
+            out[body.ext_dof_adr] = Some((q[body.qpos_adr] - lo) / span);
+        }
+        out
+    }
+
+    /// Converts a position vector from the model's internal order to the
+    /// external order the rest of the workspace uses.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositeError::WidthMismatch`] on a wrong width.
+    pub fn q_external(&self, internal: &[f64]) -> Result<Vec<f64>, CompositeError> {
+        self.model.qpos_to_external(internal)
+    }
+
+    /// Converts a velocity vector from internal to external order.
+    ///
+    /// The **values** are not converted, only their order. A `Free` joint's
+    /// velocity still means what this path means by it -- world-frame linear
+    /// first, body-frame angular second -- which is not what
+    /// [`crate::articulated`] means by the same slots. See
+    /// [`Self::from_articulated_velocity`].
+    ///
+    /// # Errors
+    ///
+    /// [`CompositeError::WidthMismatch`] on a wrong width.
+    pub fn qd_external(&self, internal: &[f64]) -> Result<Vec<f64>, CompositeError> {
+        self.model.dof_to_external(internal)
     }
 
     /// Total kinetic energy at a state.
@@ -1186,5 +1333,122 @@ mod tests {
             (q[free.qpos_adr] - 0.0).abs() > 1e-12 || (q[free.qpos_adr + 1] - 0.0).abs() > 1e-12,
             "the spread should have moved the base"
         );
+    }
+    #[test]
+    fn a_stance_hold_keeps_the_g1_standing_through_the_new_path() {
+        // The property the zero-torque collapse cannot show. With joints held
+        // by a clamped proportional-derivative law the robot should stay up,
+        // which exercises the contact solve, the limit rows and the stance
+        // controller together -- and is what `robot sim multibody --floating`
+        // demonstrates on the legacy path.
+        let dt_seconds = 5e-4;
+        let (mut world, mut state) = standing_world();
+        let kd = world
+            .stable_damping(&state.q, 30.0, dt_seconds)
+            .expect("the damping bound is computable at the start posture");
+        let mut tau = vec![0.0; world.nv()];
+        let free = world
+            .model()
+            .bodies
+            .iter()
+            .find(|b| b.kind == JointKind::Free)
+            .expect("Free joint")
+            .clone();
+        let pelvis = free.qpos_adr + 2;
+        let start = state.q[pelvis];
+        let mut lowest = f64::INFINITY;
+        for step in 0..4000 {
+            world
+                .stance_torques(&state.q, &state.qd, 300.0, &kd, &mut tau)
+                .expect("widths match");
+            let report = world.step(&mut state, &tau).expect("the step succeeds");
+            assert!(
+                state.q.iter().chain(&state.qd).all(|v| v.is_finite()),
+                "step {step} diverged"
+            );
+            assert_eq!(report.limit_torque.len(), world.nv());
+            lowest = lowest.min(state.q[pelvis]);
+        }
+        // The pelvis settles rather than collapsing. On the zero-torque run it
+        // ends up below the plane; held, it stays within a few centimetres of
+        // where it started.
+        assert!(
+            lowest > start - 0.08,
+            "the held pelvis fell to {lowest} from {start}"
+        );
+        // And it is still standing at the end, not just transiently.
+        assert!(
+            state.q[pelvis] > start - 0.08,
+            "the pelvis ended at {} from {start}",
+            state.q[pelvis]
+        );
+    }
+
+    #[test]
+    fn the_limit_torque_is_a_projection_of_the_solve_that_moved_the_robot() {
+        // The legacy path reported a limit torque from a separate active-set
+        // pass, which could disagree with the forces that actually integrated.
+        // Here it is `J' f` over the limit rows of the same solve, so a
+        // non-zero limit torque implies a limit row carried force and the
+        // converse.
+        let profile = g1();
+        let mut world = World::from_profile(
+            &profile,
+            SimOptions {
+                timestep: Duration::from_micros(200),
+                limit_margin: 0.1,
+                ..SimOptions::default()
+            },
+        );
+        let (dof, _, _, _) = world
+            .model()
+            .bodies
+            .iter()
+            .enumerate()
+            .find_map(|(i, b)| world.limits[i].map(|(lo, hi)| (b.dof_adr, b.qpos_adr, lo, hi)))
+            .expect("the G1 has bounded joints");
+        let mut state = world.rest_state();
+        let mut tau = vec![0.0; world.nv()];
+        tau[dof] = 60.0;
+        let mut saw_limit_torque = false;
+        for _ in 0..3000 {
+            let report = world.step(&mut state, &tau).unwrap();
+            let total: f64 = report.limit_torque.iter().map(|t| t.abs()).sum();
+            assert_eq!(
+                report.limits > 0,
+                total > 0.0 || report.limits == 0,
+                "a limit row must be the only source of limit torque"
+            );
+            if total > 0.0 {
+                saw_limit_torque = true;
+                // It opposes the drive: the joint is being pushed to its stop.
+                assert!(
+                    report.limit_torque[dof] * tau[dof] <= 0.0,
+                    "limit torque {} should oppose the drive {}",
+                    report.limit_torque[dof],
+                    tau[dof]
+                );
+            }
+        }
+        assert!(saw_limit_torque, "the drive never reached a limit");
+    }
+
+    #[test]
+    fn external_ordering_round_trips_a_state() {
+        let world = World::from_profile(&g1(), SimOptions::default());
+        let state = world.rest_state();
+        let qe = world.q_external(&state.q).unwrap();
+        assert_eq!(qe.len(), world.nq());
+        let back = world.model().qpos_to_internal(&qe).unwrap();
+        assert_eq!(back, state.q);
+        let fractions = world.limit_fractions(&state.q);
+        assert_eq!(fractions.len(), world.model().bodies.len());
+        // The zero posture sits inside every range it has one for.
+        for f in fractions.iter().flatten() {
+            assert!(
+                (-0.1..=1.1).contains(f),
+                "the zero posture is outside a joint range at fraction {f}"
+            );
+        }
     }
 }
