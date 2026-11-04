@@ -17,7 +17,7 @@ profile of SPECS.md Section 7.1. Depends only on `robot-types`.
 | `urdf` | §7.1 | A minimal authored XML reader plus the URDF kinematic/mass subset this project supports |
 | `importer` | — | `ModelImporter` trait (associated `Error`) as the plug-in seam for description formats; `UrdfImporter` wraps `urdf::import_from_str` without changing it |
 | `usd` | §7.1, ADR 0015 | Builds a `RobotProfile` from an OpenUSD robot layer read with `robot-usd`: links and masses from `physics:*`, revolute joints with their frames, limits, drives and gains, and the collision shapes. Refuses anything outside that subset by name |
-| `fixtures` | §3 | Vendored real-robot descriptions built into validated `RobotProfile`s: Unitree's G1 humanoid, 29-DOF rev 1.0, from the URDF (`unitree_g1_29dof`), from the URDF with a floating base (`unitree_g1_29dof_floating_base`), and from the official the reference simulator scene description (`unitree_g1_29dof_mujoco`) |
+| `fixtures` | §3 | Vendored real-robot descriptions built into validated `RobotProfile`s: Unitree's G1 humanoid, 29-DOF rev 1.0, from the URDF (`unitree_g1_29dof`), from the URDF with a floating base (`unitree_g1_29dof_floating_base`), and from the official OpenUSD layers, fixed-base and floating-base (`unitree_g1_29dof_usd`, `unitree_g1_29dof_usd_floating_base`) |
 
 ## Why `RigidPose` instead of `robot_types::frames::Transform`
 

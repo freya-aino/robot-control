@@ -24,7 +24,7 @@ The Python prior art is gone. `training/`, `unitree/` and `test.ipynb` were remo
 
 Recorded from a review of the current working tree. Anything marked not implemented has no code behind it yet.
 
-- Repository: 22 crates with a standard-library-only default dependency closure (ADR 0003). `AGENT.md` is committed as `881d39a`.
+- Repository: 24 crates with a standard-library-only default dependency closure (ADR 0003). `AGENT.md` is committed as `881d39a`.
 - Simulation: `robot sim multibody --floating` runs the vendored Unitree G1 (35 DOF, floating base) with sphere ground contact (ADR 0010). A clamped PD stance hold keeps the pelvis above the plane for 2 s (min 0.787 m). Zero torque reports a FAIL (pelvis falls to −0.77 m). This is a supported-stance check, not a balance claim. Ground contact covers only the 8 ankle-roll sphere shapes; box, cylinder and mesh shapes are not modelled.
 - Visualization: test-purpose only. `robot sim multibody --out <dir>` writes per-step CSV and JSON Lines frames plus a std-only SVG per frame, and `robot-viewer` reads them back through `Timeline` with strict validation (ADR 0009). No interactive viewer exists; Rerun and egui are still `unverified` candidates.
 - Plug-in seams: `Environment` (`robot_sim::env`) and `HardwareAdapter` (`robot_hardware::device`) are complemented by `Policy`/`LoopOperation` in `robot-nn`/`robot-control`, `Backend` in `robot-sim`, and `ModelImporter` in `robot-model`.

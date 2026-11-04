@@ -9,7 +9,7 @@ to work here.
 
 A Rust humanoid robotics platform: motion processing, simulation, policy
 training, and hardware control (including boxing research). It is a Cargo
-workspace of 23 crates under `crates/`, with one `robot` CLI binary in
+workspace of 24 crates under `crates/`, with one `robot` CLI binary in
 `crates/robot-cli` and the developer-only `exclusion-gate` binary in
 `crates/robot-devtools`. Each crate has its own `README.md` that states what is
 implemented, the reasoning behind deviations, and what is deliberately not
@@ -22,8 +22,7 @@ Key locations:
 - `docs/decisions/`: architecture decision records (ADRs). Check these before
   reversing any architectural choice.
 - `docs/ledger/`: `evidence-ledger.md` and `automation-log.md`.
-- `docs/acceptance/`, `docs/benchmarks/`, `docs/knowledge-base/`: supporting docs.
-- `fixtures/` (models, motion, profiles) and `assets/robots/`: test and sample data.
+- `fixtures/` (motion) and `assets/` (robots, scenes): test and sample data.
 - `devenv.nix`, `devenv.yaml`, `devenv.lock`: the pinned development environment.
 
 ## Setup and commands

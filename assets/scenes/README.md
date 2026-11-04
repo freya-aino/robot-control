@@ -7,8 +7,8 @@ collider:
 
 - `/ground` is a `Plane` with `PhysicsCollisionAPI`, normal along Z, at the
   height of its `xformOp:translate` (zero). `physics:dynamicFriction` is its
-  Coulomb friction coefficient; `robot:contactStiffness` (N/m) and
-  `robot:contactDamping` (N per m/s) are the penalty contact law of ADR 0010.
+  Coulomb friction coefficient; `sim:contactStiffness` (N/m) and
+  `sim:contactDamping` (N per m/s) are the penalty contact law of ADR 0010.
 
 The ground was added here, in a separate layer, and not written into the
 Unitree layer. The Unitree layer is pinned by SHA-256 in its PROVENANCE.md, and

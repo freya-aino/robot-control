@@ -106,7 +106,7 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
   friction solver are not ported. Contact in the multibody path is modelled for
   only the ten ankle spheres of the USD model (five per ankle); the foot boxes,
   knee and shoulder cylinders and mesh shapes are captured but not modelled, and
-  modelled, and the pelvis and torso have no collision geometry. At `dt=1e-4`, a clamped-PD
+  the pelvis and torso have no collision geometry. At `dt=1e-4`, a clamped-PD
   supported-stance hold keeps the vendored G1 pelvis above the plane for 2 s
   (minimum 0.787 m); this is not a balance result. With zero torque, the pelvis
   falls to −0.77 m below the plane. The fidelity harness reports an analytic
