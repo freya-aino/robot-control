@@ -17,5 +17,6 @@ pub mod csv;
 pub mod frame;
 pub mod jsonl;
 pub mod pose;
+pub mod skeleton;
 pub mod svg;
 pub mod timeline;

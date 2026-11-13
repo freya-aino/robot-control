@@ -13,10 +13,11 @@ SPECS.md §6 and PLAN.md's Phase 2. Depends on `robot-types` and
 | `pose` | `PoseFrame` (pelvis pose and joint angles per step), `FrameDump` (transactional `--out` writer), `load_committed` (strict read-back) |
 | `csv`, `jsonl` | Strict readers for the two frame formats written by `FrameDump` |
 | `svg` | Std-only SVG renderer for one `PoseFrame`, pinned by a golden file in `tests/golden/` |
+| `skeleton` | Skeleton rendering through the robot profile's own forward kinematics at the frame's pelvis pose, side and front views, pinned by `tests/golden/g1_skeleton.svg`. `render_playback` shows a run's frames in turn with SMIL `<set>` elements, which is markup and not script (SPECS.md §2) |
 
 The frame dump format, bounds and commit protocol are fixed by `docs/decisions/0009-test-render-format.md`.
 
-## Why there's no rendering here
+## Why there's no rendering toolkit here
 
 SPECS.md §11.2's viewer shortlist is "Rerun or egui; `urdf-viz` for model
 inspection," but Appendix B.1 marks every survey candidate `unverified`,
@@ -24,8 +25,8 @@ and Appendix B.6's dependency-qualification gate has not been run against
 any of them. This workspace also keeps `[workspace.dependencies]` empty by
 policy (`docs/decisions/0003-std-only-default-closure.md`). So this crate
 is the data a renderer would need — frames keyed by timestamp, source and
-target skeleton poses, contact state, per-joint tracking error — and stops
-there. PLAN.md's own framing supports this: §4's CLI surface and §3's
+target skeleton poses, contact state, per-joint tracking error — plus a
+std-only per-frame SVG (`svg`) for inspection, and stops there. PLAN.md's own framing supports this: §4's CLI surface and §3's
 Phase 2 description describe the viewer as a `devenv processes`-hosted
 development service (SPECS.md §2.5 item 5: "Nothing declared there is...
 a runtime dependency of a deployed robot"), not something `robot-control`
@@ -51,8 +52,8 @@ missing comparison look like a perfect one.
 
 ## What's not implemented
 
-Rendering is limited to the std-only per-frame SVG in `svg`: no viewer, no skeleton (only the pelvis and joint bars are drawn), no interactive playback. Frame dumps are read back from their own directory layout (`pose::load_committed`), not from `robot-artifacts` episode/run storage. Runs are capped at 999 999 steps by the six-digit SVG names, and frame files are bounded by line length, joint count and JSON nesting depth (ADR 0009 §5).
+Rendering is std-only SVG: the per-frame pelvis and joint-bar picture of `svg`, and `skeleton`'s profile-driven side and front skeleton views with a declarative (SMIL, no script) playback of a whole run. There is no interactive viewer application: Rerun and egui are still unqualified (Appendix B.6). Frame dumps are read back from their own directory layout (`pose::load_committed`), not from `robot-artifacts` episode/run storage. Runs are capped at 999 999 steps by the six-digit SVG names, and frame files are bounded by line length, joint count and JSON nesting depth (ADR 0009 §5).
 
 ## Testing
 
-`cargo test -p robot-viewer` runs unit tests for the `Timeline` lookups and rejections, the CSV and JSONL strict readers (malformed, truncated and extra-record inputs), the streaming pair verifier (including `-0.0` vs `0.0`), the frame-line and nesting bounds, and the SVG renderer. Integration tests in `tests/pose_frames.rs` cover the golden SVG, the round trip and the commit protocol. Regenerate the golden with `ROBOT_VIEWER_UPDATE_GOLDEN=1 cargo test -p robot-viewer --test pose_frames`. (`robot-model` also gained one small addition in this pass: `LinkPoses::from_poses`, letting a consumer build a `LinkPoses` from poses it already has, e.g. read back from a recording, without needing a `RobotProfile` and joint values to recompute them.)
+`cargo test -p robot-viewer` runs unit tests for `skeleton` (bone count and ground height on the G1, the golden file, SMIL playback without script, width refusal), for the `Timeline` lookups and rejections, the CSV and JSONL strict readers (malformed, truncated and extra-record inputs), the streaming pair verifier (including `-0.0` vs `0.0`), the frame-line and nesting bounds, and the SVG renderer. Integration tests in `tests/pose_frames.rs` cover the golden SVG, the round trip and the commit protocol. Regenerate the golden with `ROBOT_VIEWER_UPDATE_GOLDEN=1 cargo test -p robot-viewer --test pose_frames`. (`robot-model` also gained one small addition in this pass: `LinkPoses::from_poses`, letting a consumer build a `LinkPoses` from poses it already has, e.g. read back from a recording, without needing a `RobotProfile` and joint values to recompute them.)
