@@ -27,6 +27,8 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod format;
+pub mod gru;
 pub mod init;
 pub mod layer;
 pub mod mlp;

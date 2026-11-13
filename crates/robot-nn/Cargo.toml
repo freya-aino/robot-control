@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Forward-only inference and the exportable operator set shared by learner and runtime"
+description = "Inference networks: MLP, GRU recurrent policy, the robot-mlp/1 weights format, and the Policy seams (SPECS.md Sections 7.4, 9.2)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }

@@ -14,19 +14,30 @@ isolation" to warrant existing.
 | Module | Contents |
 | --- | --- |
 | `layer` | `Activation` (identity/tanh/ReLU/sigmoid) and `Linear`, a dense `y = Wx + b` layer |
-| `mlp` | `Mlp`: a validated sequence of `Linear` + `Activation` pairs; `Scratch`: preallocated ping-pong buffers; `forward_with_trace` for backpropagation |
+| `mlp` | `Mlp`: a validated sequence of `Linear` + `Activation` pairs; `Scratch`: preallocated ping-pong buffers; `forward_with_trace` → `ForwardTrace` for backpropagation; `ParamGroup`/`frozen_mask` for named, freezable parameter ranges |
 | `init` | Fan-in-scaled normal initialization driven by a `robot_types::rng::Rng`, so network init is part of one reproducible seed stream |
 | `policy` | `Policy` (deterministic observation→action seam, implemented for `Mlp`) and `StochasticPolicy: Policy` (allocation-free sampling with log-probability), the plug-in contract `ControlLoop` is generic over |
+| `format` | `robot-mlp/1`, the versioned binary weights format of §7.4: magic, version, per-layer widths and activation code, `f64` parameters. Decoding refuses an unknown activation code as an unsupported operator naming its layer. It also refuses widths that do not chain, a size mismatch either way, non-finite values, and parameter counts over `MAX_PARAMETERS` |
+| `gru` | `GruPolicy`: a GRU cell plus linear head with owned state, `reset`, width-checked `set_state`, and `spec()` returning the bundle's `RecurrentStateSpec`. `step` allocates nothing. Inference only (see below) |
 
-## Why the operator set needs no "unsupported operator" check
+## Unsupported operators fail before deployment
 
 SPECS.md §7.4 requires that "Unsupported operators must fail before
 deployment" — written with ONNX import in mind, where a parser might accept a
 graph using an operator the runtime doesn't implement. This crate has no
 analogous gap: `Activation` is a four-variant closed enum and `Linear` is the
 only layer kind. A bundle referencing an operator this crate doesn't support
-is not *representable*, so there's nothing to validate at load time that the
-type system hasn't already excluded at construction time.
+is not *representable* in memory. A file is another matter: `format::decode`
+is where an unknown activation code read from disk is refused, naming the
+layer, before any network exists.
+
+## Recurrent policies are inference-only
+
+`GruPolicy` covers §7.4's recurrent-state specification and §10.3's reset
+contract for a deployed recurrent component. Training one needs
+backpropagation through time, which `robot-learn` does not implement,
+because no task in this workspace has needed memory yet (§9.2: "recurrent
+policy support when needed").
 
 ## Why inference is allocation-free
 
@@ -51,7 +62,7 @@ second implementation to drift out of sync with the first. The test
 
 ## Testing
 
-`cargo test -p robot-nn` — 20 tests: activation derivatives checked against
+`cargo test -p robot-nn`: 28 tests (the original 22, plus the weights-format round trip, unknown-operator, truncation, padding, NaN and size-limit refusals, and GRU memory, reset, state carry and parameter validation): parameter-group frozen masks (exact frozen indices, rejection of tables that do not fit), activation derivatives checked against
 central-difference numerics, forward passes checked against hand-traced
 arithmetic, determinism across repeated calls, and rejection of every
 malformed shape (mismatched adjacent widths, wrong activation count,
