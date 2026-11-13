@@ -1,13 +1,14 @@
 # 0008. Fidelity report schema and battery contract
 
-- Status: accepted; format selected before the writer; schema v7 (`[[probe]]`
-  table for the measured G1 zero-torque probe, battery identifier
-  `shared-analytic-v7`) amended for Step 5 of the source-faithful plan. Schema
+- Status: accepted; format selected before the writer; schema v8 (battery
+  identifier `shared-analytic-v8`, the contact, friction-cone and narrow-phase
+  rows of the amendment below) is current. Schema v7 (`[[probe]]` table for the
+  measured G1 zero-torque probe, `shared-analytic-v7`) was the Step 5 amendment;
   v6 (seventh check `pendulum_trajectory`, per-check `sample`, `tolerance_abs`
   and `tolerance_rel` columns) and v5 (`scope` key, per-tier `[[contact]]`
-  rows, `BatteryError::CheckFailed`) are the earlier baselines; v5 and v6 reports
-  are refused by the v7 reader.
-- Date: 2026-10-29 (v6 and v7 amendments).
+  rows, `BatteryError::CheckFailed`) are the earlier baselines. The v8 reader
+  refuses v5, v6 and v7 reports.
+- Date: 2026-10-29 (v6 and v7 amendments); 2026-11-01 (v8 amendment).
 - Scope: the archival battery is an **analytic subset**. It contains no
   ground-contact check, so no report qualifies the floating-base G1 contact path.
   The sphere/box contact check is deferred until it can be measured inside the

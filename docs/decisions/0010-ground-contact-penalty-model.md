@@ -1,9 +1,20 @@
 # 0010. Ground contact for the floating-base multibody path: penalty sphere model
 
-Status: accepted for the contact law, the integration, the stance-damping rule
-and the tests. The floating-base G1 **stance** is a supported-stance
-qualification with a stated dt range. It is not a balance claim, and the
-zero-torque collapse is recorded as a known limitation of the sphere-only model.
+> Superseded for the contact law by the example-governed formulation
+> (`crates/robot-sim/specs/06-equality-constraints-and-solver.md`, Appendix D
+> section 1.0.2, robot-sim specs 0.1.6-draft; SPECS.md 0.8.6-draft records it).
+> The dt-range measurements below describe the retired penalty path, which is
+> reached by no command. Kept as history.
+
+- Status: accepted (2026-10-28) for the contact law, the integration, the
+  stance-damping rule and the tests; the contact law is superseded as above.
+- Date: 2026-10-28
+- Touches: see the "Touches" section at the end.
+
+The floating-base G1 **stance** this record qualified was a supported-stance
+qualification with a stated dt range on the penalty path. It was not a balance
+claim, and the zero-torque collapse was recorded as a known limitation of the
+sphere-only model.
 
 ## Context
 

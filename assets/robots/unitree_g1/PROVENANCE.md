@@ -40,8 +40,10 @@ Verified directly against the file (not assumed):
 - **Mesh geometry.** The URDF references `.STL` files under `meshes/` for
   visual and collision geometry. Those binary mesh files are **not**
   vendored here — this project has no rendering toolkit to show them
-  (see `robot-viewer`'s README) and no physics engine that currently
-  consumes collision meshes (see `robot-sim`'s README). The filenames are
+  (see `robot-viewer`'s README), and the physics engine consumes mesh
+  colliders only from the OpenUSD layer in `assets/robots/unitree_g1_usd/`,
+  where `robot_model::usd` reduces them to convex hulls (ADR 0015); the URDF
+  path is kinematics-only. The filenames are
   retained as opaque reference strings by the importer, exactly as
   `robot_model::urdf::parse_link`'s own doc comment describes: resolving
   them to a content-addressed blob is `robot-artifacts`' job, not this

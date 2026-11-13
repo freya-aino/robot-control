@@ -10,6 +10,7 @@ no FFI, no `unsafe`.
 | --- | --- |
 | `compression` | LZ4 block decompression, the `TfFastCompression` container, and the integer codec of `integerCoding.cpp` |
 | `crate_file` | `PXR-USDC` reader: bootstrap, table of contents, TOKENS, STRINGS, FIELDS, FIELDSETS, PATHS, SPECS, and every value representation the G1 files use |
+| `error` | `UsdError` (`Malformed`, `Unsupported`, I/O) and the crate `Result` |
 | `diagnostics` | Non-fatal findings: `shader_warnings` reports MDL material sources that exist only in Omniverse (the four G1 materials, all `OmniPBR.mdl`) |
 | `layer` | `Layer` and `Spec`: the format-independent view of one file, with format detection |
 | `stage` | Composition: sublayers, variant selections, internal and external references, payloads |

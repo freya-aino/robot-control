@@ -1,6 +1,6 @@
 # 0015 — the simulation model is the OpenUSD description used by Isaac Sim
 
-- Status: accepted. Implemented on 2026-10-30: the reader (`crates/robot-usd`), the importer (`robot_model::usd`), the replay writer (`robot_usd::replay`), and the simulator's use of the USD model. Their evidence state is `code_inspected` for the layouts and `reproduced_in_sim` for the G1 runs listed in the replay folder README; no hardware evidence exists.
+- Status: accepted. Implemented on 2026-10-30: the reader (`crates/robot-usd`), the importer (`robot_model::usd`), the replay writer (`robot_usd::replay`), and the simulator's use of the USD model. Their evidence state is `code_inspected` for the layouts and `reproduced_in_sim` for the G1 runs whose commands, commits and numbers are recorded in `docs/ledger/automation-log.md` (entries of 2026-10-30 and 2026-11-01); the replay files themselves live in the gitignored `outputs/` directory and are not an archive. No hardware evidence exists.
 - Date: 2026-10-30
 - Supersedes: ADR 0005 (the target wording), ADR 0011 (the reference-oracle plan) and ADR 0014 (the withdrawn G1 import path). ADR 0014 is retained as a tombstone.
 - Touches: SPECS.md §2 (dependency policy), §7.1 (embodiment description), §7.3 (episode record), §7.5 (storage), §14 (acceptance); `crates/robot-usd` (new), `crates/robot-model`, `crates/robot-sim`, `assets/robots/unitree_g1_usd/`.

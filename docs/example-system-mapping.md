@@ -1,6 +1,6 @@
 # Example system: mapping to the parent specifications
 
-Status: **non-normative guidance**. This document introduces no requirement, changes no acceptance row and does not alter any parent specification. Every parent file named here keeps its current text. Nothing below is evidence under `SPECS.md` Section 3.
+Status: **non-normative guidance** for the parent `SPECS.md`. This document introduces no requirement, changes no acceptance row and does not alter any parent specification. Note the precedence recorded since in `crates/robot-sim/specs/appendix-d-mathematical-challenges.md` sections 1.0.1 and 1.0.2: for the mathematics and execution model of multi-body simulation inside `robot-sim`, the example folder is the single source of truth and its specifications are MUST, so rule 3 below applies to the project's goals, scope, policy and evidence discipline rather than to the simulator's algorithms. The "Current state" column was revised on 2026-11-07 against the code. Nothing below is evidence under `SPECS.md` Section 3.
 
 ## 1. What the example folder is, and how it is used
 
@@ -20,8 +20,8 @@ Each row names a parent area, the example sections worth reading, what to take f
 
 | Example | What to take | Current state | Candidate work |
 | --- | --- | --- | --- |
-| `01` §9.1 Euler, §9.2 implicit and implicitfast | The Euler update with the velocity sub-step, and implicit treatment of joint damping in the velocity equation | Semi-implicit Euler with implicit joint damping in `integrators.rs` | Compare the two damping treatments on the G1 at the step sizes used |
-| `01` §9.4 Runge-Kutta 4 | Stage order, and that time advances only at the full step | Not implemented | Only if an integrator with higher order is needed for a fidelity tier (`09-fidelity-tiers.md`) |
+| `01` §9.1 Euler, §9.2 implicit and implicitfast | The Euler update with the velocity sub-step, and implicit treatment of joint damping in the velocity equation | Semi-implicit Euler and `implicitfast` (`Integrator::ImplicitFast`, `qH = M + h diag(kd)`) selectable per run in `world.rs`; full `implicit` not ported | Compare the two damping treatments on the G1 at the step sizes used |
+| `01` §9.4 Runge-Kutta 4 | Stage order, and that time advances only at the full step | Implemented (`Integrator::Rk4`, Munthe-Kaas correction `composite::rk_correct_free_velocity`), solver run per stage | Only if an integrator with higher order is needed for a fidelity tier (`09-fidelity-tiers.md`) |
 | `11` §3.4 `mjd_freeMhat`, §3.3 `mjd_freeBias_vel` | The effective mass `M + hD` and the velocity-derivative blocks used by implicit integration of a free body | Not used | Use as the reference for an implicit free-base update |
 
 ### 2.2 State, coordinates and kinematics (parent `01-state-and-coordinates.md`, `02-pure-dynamics-core.md`)
@@ -30,7 +30,7 @@ Each row names a parent area, the example sections worth reading, what to take f
 | --- | --- | --- | --- |
 | `02` §1.2 quaternion algebra, §1.3 spatial algebra | Quaternion and spatial conventions, with the sign rules for normalisation | Free-base quaternion stored as `(w, x, y, z)` in `articulated.rs`, integrated by `integrate_free_position` | Check the integration against `11` §1.7 `mjd_quatIntegrate` on a spinning free body |
 | `02` §2.1 body poses, §2.3 centre-of-mass frames | How the composite inertial frame is built from body poses | Body poses from `joint_transform` and `compose_pose` | None needed now |
-| `02` §2.9 composite rigid body, §2.10 factorisation, §2.11 back-substitution | Mass matrix by composite rigid body and sparse factorisation | The dynamics use the articulated-body algorithm, with no mass matrix formed | The hard-limit solve (see `06-equality-constraints-and-solver.md` below) takes its columns from forward dynamics. A factorised `M` would avoid repeated solves if the number of limited joints grows |
+| `02` §2.9 composite rigid body, §2.10 factorisation, §2.11 back-substitution | Mass matrix by composite rigid body and sparse factorisation | `composite::crb` forms `M`; `factor_m`/`solve_ld` factorise it; the articulated-body algorithm is kept as the oracle | The hard-limit solve (see `06-equality-constraints-and-solver.md` below) takes its columns from forward dynamics. A factorised `M` would avoid repeated solves if the number of limited joints grows |
 | `02` §3.3 inverse dynamics (`mj_rne`) | Recursive Newton-Euler as the bias-force reference | Implemented as `inverse_dynamics` | Check against the example's bias-force convention on a model with gravity |
 | `13` (inertia from geoms and meshes, frame conventions) | How the inertia of a body is derived from its geometry and expressed in its principal frame | The G1 inertia comes from the USD `physics:*` attributes | Check that the principal-axes convention in the importer agrees with the example's, on one link |
 
@@ -38,7 +38,7 @@ Each row names a parent area, the example sections worth reading, what to take f
 
 | Example | What to take | Current state | Candidate work |
 | --- | --- | --- | --- |
-| `10` actuator gain and bias types (the position servo) | Separation of an actuator into gain, bias and dynamics, which makes the servo a composition of three choices | Joint PD gains `PdGains` and effort limits | Describe the G1 actuators in the same three-part form when the actuator model is extended |
+| `10` actuator gain and bias types (the position servo) | Separation of an actuator into gain, bias and dynamics, which makes the servo a composition of three choices | The model's `PhysicsDriveAPI` drives through `World::actuator_torques` (`passive::affine_actuator_force`), selectable by `ActuationMode` | Describe the G1 actuators in the same three-part form when the actuator model is extended |
 | `09` springs and dampers | Passive spring and damper forces as functions of position and velocity only | Not implemented as passive joint forces in this crate | Use as the form of any passive joint spring or damper |
 | `10` sensors (touch and limit sensors) | Sensor outputs defined from the constraint rows and contact list | Proximity signal in outer 5 and 95 percent of range (`SPECS.md` Section 9.1) | The example defines a limit sensor from the same geometry, which is a useful check on the proximity signal |
 
@@ -48,39 +48,39 @@ This is the area the example treats most fully, and the one where this repositor
 
 | Example | What to take | Current state | Candidate work |
 | --- | --- | --- | --- |
-| `07` §2.1 to §2.4, the convex problem and impedance | Contact and limit forces as the solution of one convex problem, with each row having a reference acceleration `a_ref` and an impedance `d` that sets how much of the row is enforced | Ground and pair contacts are penalty springs with fixed stiffness and damping (ADR 0010). Joint limits are an active-set solve (`articulated.rs`) | Test a soft-constraint form for contact whose stiffness comes from a time constant and damping ratio. This may remove the energy growth seen in the zero-torque run, which is the open question recorded under `docs/ledger` |
-| `07` §12.3 impedance sigmoid | A smooth transition from the soft to the hard value over a width | Not used; the penalty is linear in depth | Use the sigmoid as the penetration-to-stiffness map if a smooth contact onset is needed |
+| `07` §2.1 to §2.4, the convex problem and impedance | Contact and limit forces as the solution of one convex problem, with each row having a reference acceleration `a_ref` and an impedance `d` that sets how much of the row is enforced | One convex problem (`solver`, `newton`) with `A_ii`-proportional impedance over contact, limit and equality rows; limit rows carry `limit_margin` | Test a soft-constraint form for contact whose stiffness comes from a time constant and damping ratio. This may remove the energy growth seen in the zero-torque run, which is the open question recorded under `docs/ledger` |
+| `07` §12.3 impedance sigmoid | A smooth transition from the soft to the hard value over a width | `solver::row_impedance` uses the `solimp` sigmoid | Use the sigmoid as the penetration-to-stiffness map if a smooth contact onset is needed |
 | `07` §8 limit rows | A limit is active when its distance is below a margin, one row per side, and the activation test is strictly below the margin | Hard limits with a proximity band of 5 and 95 percent of range | The margin in the example is the same idea as the proximity band. Keep the two definitions aligned in documentation |
-| `08` §6 primal Newton and conjugate gradient, §6.8 exact line search | Solving the convex problem by a primal method with an exact line search | Not implemented | Only if a joint-coupled solve replaces the active-set limit solve |
+| `08` §6 primal Newton and conjugate gradient, §6.8 exact line search | Solving the convex problem by a primal method with an exact line search | Implemented (`newton::solve_newton`), the default algorithm | Only if a joint-coupled solve replaces the active-set limit solve |
 | `08` §8 islands | Splitting a problem into independent groups of coupled constraints | Not implemented | Useful once many bodies sleep or contact groups separate, so that only active groups are solved |
 
 ### 2.5 Collision (parent `07-collision-pipeline.md`, `SPECS.md` Section 9.1)
 
 | Example | What to take | Current state | Candidate work |
 | --- | --- | --- | --- |
-| `03` §2 filters (AABB, sphere, body pair) | Cheap rejection of pairs before any narrow-phase call | All pairs of contact shapes are tested (`contact_wrenches`) | Add an AABB filter before `collision::proximity` if the shape count grows |
+| `03` §2 filters (AABB, sphere, body pair) | Cheap rejection of pairs before any narrow-phase call | Bounding-sphere and AABB rejection (`collision::spheres_apart`, `aabbs_apart`) plus contype, weld and parent-child filters | Add an AABB filter before `collision::proximity` if the shape count grows |
 | `03` §3 sweep-and-prune with principal axis | A sorted sweep along the axis of largest spread, to produce candidate pairs | Not implemented | Use when all-pairs cost becomes a measured bottleneck on the GPU machine |
-| `03` §5 midphase tree | Bounding-volume hierarchy for meshes | Not implemented; meshes are not in contact | Needed for mesh contact (the convex-hull mode of `SPECS.md` Section 9.1) |
+| `03` §5 midphase tree | Bounding-volume hierarchy for meshes | Not implemented; meshes collide as convex hulls with an exhaustive support scan, no BVH | Needed for mesh contact (the convex-hull mode of `SPECS.md` Section 9.1) |
 | `03` §6.4 greedy farthest-point reduction | Reducing a large contact set to a fixed number of points that cover its extent | Not implemented | Use when a convex-hull contact produces more points than the solver budget |
-| `03` §6.6 and §6.7 contact parameter mixing | The rule that combines friction and solver parameters of the two geoms in a pair | Friction uses the scene value; pair contact is frictionless | Define the mixing rule explicitly before adding pair friction |
+| `03` §6.6 and §6.7 contact parameter mixing | The rule that combines friction and solver parameters of the two geoms in a pair | Friction uses the scene value for the ground; pair friction through `World::with_pair_friction(mu)` | Define the mixing rule explicitly before adding pair friction |
 
 ### 2.6 Primitive contacts (parent `07-collision-pipeline.md`, `SPECS.md` Section 9.1 primitive mode)
 
 | Example | What to take | Current state | Candidate work |
 | --- | --- | --- | --- |
-| `04` §1.3 plane-cylinder, up to four contacts | An exact rule that picks the cylinder rim points nearest the plane, with a stated order of operations | Cylinder rim sampled at eight points (`collision::plane_contact_points`) | Replace the sampling with the exact four-point rule, which gives a stable flat rest |
-| `04` §1.4 plane-box, up to four contacts | Corner selection for a box on a plane, lower half only | Box corners, all eight | Compare with the four-point rule for the lower corners only |
+| `04` §1.3 plane-cylinder, up to four contacts | An exact rule that picks the cylinder rim points nearest the plane, with a stated order of operations | Exact four-point rule (`collision::plane_contact_points`) | Replace the sampling with the exact four-point rule, which gives a stable flat rest |
+| `04` §1.4 plane-box, up to four contacts | Corner selection for a box on a plane, lower half only | Exact four-point manifold, lower corners only | Compare with the four-point rule for the lower corners only |
 | `04` §2.4 capsule-capsule, up to two contacts | Two contacts along a capsule pair, from the segment closest points | One contact from the closest points (`capsule_pair`) | Return the two-contact manifold when a capsule lies along another |
 | `04` §3.3 capsule-box | A heuristic that places up to two contacts on the capsule axis | Covered by the general GJK path | Use if a capsule-box pair is common enough to need its own routine |
-| `04` §3.4 box-box, separating axis theorem with face clipping, up to eight contacts | A complete contact manifold for two boxes, from the 15 candidate axes and clipping of the incident face | GJK and EPA give one contact point (`gjk_epa`) | Important for stable stacking of boxes. Add the SAT and clipping path |
+| `04` §3.4 box-box, separating axis theorem with face clipping, up to eight contacts | A complete contact manifold for two boxes, from the 15 candidate axes and clipping of the incident face | `box_box_contacts`: SAT with face clipping | Important for stable stacking of boxes. Add the SAT and clipping path |
 
 ### 2.7 Convex collision: GJK, EPA and multiple contacts (parent `07-collision-pipeline.md`, `SPECS.md` Section 9.1 convex-hull mode)
 
 | Example | What to take | Current state | Candidate work |
 | --- | --- | --- | --- |
 | `05` §5.2 Minkowski support and §5.3 GJK loop | The support map of the difference body, and the loop that reduces the simplex | `gjk_epa` in `collision.rs`, with a simplex reduction written from first principles | Keep. Check against `05` §5.3 for iteration limits |
-| `05` §5.4 signed-volume subdistance (Montanari and others, 2017) | A robust closest-feature computation for the simplex, with exact sign tests | The reduction uses the triangle and tetrahedron region tests of Ericson | Replace only if a degenerate-simplex failure is measured |
-| `05` §6.3 EPA main loop | The stopping rule on the gap between the upper and lower bounds of the penetration, with an iteration cap | EPA stops when the new support point lies on the current face (tolerance `1e-10`), with a cap of 128 iterations | Adopt the bound-gap stopping rule, which gives a measured accuracy |
+| `05` §5.4 signed-volume subdistance (Montanari and others, 2017) | A robust closest-feature computation for the simplex, with exact sign tests | Signed-volume S1D/S2D/S3D subdistance | Replace only if a degenerate-simplex failure is measured |
+| `05` §6.3 EPA main loop | The stopping rule on the gap between the upper and lower bounds of the penetration, with an iteration cap | EPA stops on the bound gap, with `CcdConfig::{iterations, max_faces}` as the budget | Adopt the bound-gap stopping rule, which gives a measured accuracy |
 | `05` §8 MultiCCD | Multiple contact points for one convex pair, from clipped face polygons | One contact per pair | This is the manifold needed by the convex-hull mode, and the same role as `04` §3.4 for boxes |
 | `05` §4.3 contact budget per pair | A stated maximum number of contacts for a pair, which sizes the buffers | Not applicable | Relevant to the GPU buffers (see Section 2.9) |
 
@@ -106,7 +106,7 @@ This is the area the example treats most fully, and the one where this repositor
 | Example | What to take | Current state | Candidate work |
 | --- | --- | --- | --- |
 | `13` (compile order, element numbering, fusing of static bodies) | Fusing a chain of bodies joined by fixed joints into one body, before simulation | Not implemented. The G1 has no fixed-joint chains of this kind in its simulated links | Keep as a candidate for other robots |
-| `13` (mesh convex hull and qhull) | Computing the convex hull of a collision mesh once, at compile time | Mesh collision is not in contact (`unmodelled_collision_shape_count`) | Required for the convex-hull mode. Compute the hull in the importer, not per step |
+| `13` (mesh convex hull and qhull) | Computing the convex hull of a collision mesh once, at compile time | Convex hull computed at import (`robot_model::hull`), collided through the support query | Required for the convex-hull mode. Compute the hull in the importer, not per step |
 
 ### 2.11 Out of scope for this repository
 
@@ -118,7 +118,7 @@ These example sections describe features this project does not plan to use in th
 
 ## 3. Divergences to keep in mind
 
-- The example describes a simulator whose defaults and tolerances were chosen for that engine. Our penalty stiffness of 2e4 N/m and damping of 200 N s/m are scene values, not defaults borrowed from it.
+- The example describes a simulator whose defaults and tolerances were chosen for that engine. Our contact impedance follows the example's formulation (`solref`/`solimp`, step 06) with constants measured here, not copied; the retired penalty law's stiffness and damping survive only in the scene layer for the replay record and the legacy probe.
 - The example's GPU sections describe a float32 implementation with specific algorithm variants. Our GPU backend (`robot-sim-gpu`) is a separate design, and the example's variants are not required to match it.
 - Where the example gives an exact rule, such as the four-point cylinder rule or the eight-face box clipping, our current code approximates it. The approximation is a known gap, recorded here and not treated as a defect of the parent specification.
 

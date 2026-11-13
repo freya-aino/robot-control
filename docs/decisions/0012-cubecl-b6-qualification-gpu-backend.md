@@ -1,5 +1,8 @@
 # 0012. CubeCL Appendix B.6 qualification and the GPU backend
 
+- Date: 2026-10-29
+- Touches: `crates/robot-sim-gpu/` (feature `cubecl`, `tolerances.toml`, tests and examples), `devenv.nix` native inputs, SPECS.md Appendix B.6 record.
+
 Status: accepted for the f32 functional subset only (Appendix B.6).
 Gate 4 (determinism) is measured within one process on one device for the RK4 and equality batches, on the Intel and Lavapipe ICDs; it is not cross-device. Gate 3 (timing and resources) is measured for the RK4 and equality batches only, as dev-build medians and count-only resource formulas; no throughput claim is made. The GPU backend
 is a partial implementation in the unpublished crate `crates/robot-sim-gpu`, behind the
@@ -9,7 +12,7 @@ zero external dependencies in its default build.
 ## Context
 
 ADR 0011 gated the CubeCL GPU backend (step 7 of the robot-sim plan) behind the
-Appendix B.6 dependency-promotion gates in `SPECS.md` (heading at line 1229). The plan
+Appendix B.6 dependency-promotion gates in `SPECS.md`. The plan
 requires the qualification and this ADR before any CubeCL dependency enters the
 workspace, and it requires CPU-vs-GPU agreement tests against the pure CPU reference.
 

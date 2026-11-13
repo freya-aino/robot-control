@@ -518,7 +518,9 @@ passing stance run.
 
 #### 1.7.5 The command moved over, with the before and after
 
-`robot sim multibody` now runs the corrected path by default. `--contact` keeps
+`robot sim multibody` now runs the corrected path by default. (Superseded in
+0.1.6-draft: `--contact` was removed under the MUST rule of 1.0.2, and the
+legacy contact is reachable from no command.) At this point `--contact` kept
 both legacy contact models reachable (`penalty`, `impedance`), because retiring
 them silently would throw away the only way to reproduce a number this command
 printed before, and because the articulated-body algorithm is the independent

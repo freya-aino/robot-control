@@ -8,7 +8,8 @@ carries every knob old Section 12 enumerates as a per-run parameter —
 `condim` (all four of the example's values), `contact_slots`, `margin`, `gap`,
 `limit_margin`, `warm_start`,
 `solref`, `solimp` and the convex-collision budget (`CcdConfig`: tolerance,
-iterations, `max_faces`). They are **validated rather than clamped**: an invalid
+iterations, `max_faces`). `contact_slots` is validated and recorded but not yet
+enforced on the CPU path, and no exhaustion counter exists. They are **validated rather than clamped**: an invalid
 combination is refused, not silently adjusted. `SimOptions::record()` emits them
 as key/value pairs so a run carries the configuration that produced it, which is
 Section 12.1's requirement. Appendix D M-21 is closed.
@@ -57,7 +58,7 @@ tiers themselves remain open under Appendix B S-03.
 
 **Open questions**: Appendix B S-03 (exact tier names and settings, grounded in a CPU fidelity sweep) is blocking for the named-tier item of this step. The knob enumeration is not blocked.
 
-**Status (updated 2026-11-01)**: the knobs of Section 12.1 **are** a per-run configuration, `robot_sim::options::SimOptions`. All seven are explicit fields with documented defaults, invalid values are rejected rather than clamped (`condim` 4 and 6 are refused because they are unimplemented, not silently treated as 3), and `record` returns every knob as text so a run can carry its own configuration -- which Section 12.1 requires and without which a fidelity claim cannot be audited. A tier is a plain bundle a caller can override one field of, which is the section's closing requirement. Appendix D M-21 is closed. The *named* tiers and their per-knob settings remain open under Appendix B S-03, which wants them grounded in a measured sweep rather than guessed.
+**Status (updated 2026-11-01)**: the knobs of Section 12.1 **are** a per-run configuration, `robot_sim::options::SimOptions`. The seven Section 12.1 knobs, plus `limit_margin`, `warm_start`, `solref`, `solimp` and the `CcdConfig` budget, are explicit fields with documented defaults, invalid values are rejected rather than clamped (`condim` 2, 5 and anything above 6 are refused; 4 and 6 add torsional and rolling rows on the rotational Jacobian since 0.1.9-draft), and `record` returns every knob as text so a run can carry its own configuration -- which Section 12.1 requires and without which a fidelity claim cannot be audited. A tier is a plain bundle a caller can override one field of, which is the section's closing requirement. Appendix D M-21 is closed. The *named* tiers and their per-knob settings remain open under Appendix B S-03, which wants them grounded in a measured sweep rather than guessed.
 
 **Challenges (as first recorded)**: [Appendix D](appendix-d-mathematical-challenges.md) M-21 (**gap**). Section 12.1 requires each of seven knobs to be "an explicit, per-run, queryable parameter ... never a compile-time constant". Today only the timestep is one. Integrator and solver exist as `Tier` fields but are `String`s validated to accept a single value each; the solver iteration/tolerance budget is the private constants `CONTACT_PGS_SWEEPS = 500` and `CONTACT_PGS_TOLERANCE = 1e-10`; `condim`, the contact-slot budget and collision margin/gap do not exist on the CPU path at all. Appendix D adds three further constants that belong on the enumeration because they change the physics and not only the cost: `RIM_SAMPLES = 8` (it scales contact stiffness — M-04), `ADJACENT_OVERLAP_ALLOWANCE = 0.003` (M-16) and `CONTACT_REFERENCE_MASS = 1.0` (M-09).
 

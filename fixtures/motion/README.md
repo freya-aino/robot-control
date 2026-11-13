@@ -20,6 +20,6 @@ and the `fixture-internal` license they cite is defined here:
 
 A file added here needs a row in the table above with its origin, the
 license text or URL, the accessed date and the permissions it grants; the
-`robot motion validate` command imports any file without such a row as
-`unaudited`, which is the correct conservative default. A fixture does not
+`robot motion validate` command imports every file as `unaudited` (there is
+no lookup against this table yet), which is the correct conservative default. A fixture does not
 make a corpus admissible: that is a C-07 decision record.

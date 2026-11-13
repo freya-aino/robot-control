@@ -2,6 +2,9 @@
 
 > Superseded by ADR 0015. Kept as history.
 
+- Date: 2026-10-29
+- Touches: `crates/robot-sim/specs/04-fidelity-loop.md`, `crates/robot-sim/src/oracle.rs`, `crates/robot-sim/src/fidelity.rs`, the gating of `crates/robot-sim-gpu`.
+
 Status: accepted for the source-reference decision, the oracle approach, the
 pure-core rule and the gating of the GPU stage. The CubeCL GPU backend is not
 accepted: it is gated by the Appendix B.6 qualification, which has not run.
@@ -14,7 +17,7 @@ GPU-batched simulator "on par with the reference simulator" and named reference 
 `800a109a4bdd02cb60404d565db4ae16fb04a53b` as the research reference
 (Appendix A). An earlier draft of step 04 proposed running the reference simulator in a
 non-default `reference-baseline` devenv profile and committing its trace files
-under `fixtures/robot-sim/reference/`, with the Rust gate replaying them. That
+under `fixtures/robot-sim/reference/` (a planned location, never created), with the Rust gate replaying them. That
 draft was superseded. It would have put a foreign runtime and generated data
 into the repository, against `SPECS.md` Section 2 and ADR 0005, which keeps
 the reference simulator as a design reference, not a dependency.
