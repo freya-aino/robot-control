@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Resampling, filtering, contact estimation and segmentation (SPECS.md Section 8.2)"
+description = "Motion conditioning, filtering, resampling, contacts, segmentation and augmentation (SPECS.md Sections 6, 8.2)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }

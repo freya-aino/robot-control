@@ -8,13 +8,11 @@
 //! not from a filtered window — and that zero is the "documented" value
 //! this module records, not an unstated default.
 //!
-//! What this module does not do: anti-aliasing. Linear interpolation
-//! resampling to a *lower* rate than the source can introduce aliasing on
-//! fast motion (exactly the "real strike-speed characteristics" the section
-//! warns about preserving); this module does not filter before
-//! downsampling, and a caller resampling boxing strikes to a much lower
-//! rate should treat that as an open qualification question, not as
-//! handled here.
+//! [`resample`] itself does not anti-alias: linear interpolation to a
+//! *lower* rate than the source can alias fast motion (exactly the "real
+//! strike-speed characteristics" the section warns about preserving).
+//! [`resample_anti_aliased`] low-pass filters first when downsampling, and
+//! returns the filter's measured peak-speed retention.
 
 use core::fmt;
 use robot_types::frames::Transform;
@@ -23,6 +21,8 @@ use robot_types::motion::{
 };
 use robot_types::time::{Duration, Timestamp};
 use robot_types::units::Hertz;
+
+use crate::filter::{lowpass, uniform_rate, FilterError, FilterMode, FilterReport};
 
 /// Why resampling failed.
 #[derive(Clone, PartialEq, Debug)]
@@ -119,7 +119,7 @@ pub fn resample<K: MotionKind>(
     )?;
     new_record.provenance = record.provenance.clone();
     new_record.record_step(
-        ProvenanceStep::new("resample", "motion-process/0.1")
+        ProvenanceStep::new("resample", crate::REVISION)
             .with_parameter("target_rate_hz", target_rate.value().to_string())
             .with_phase_delay(Duration::ZERO),
     );
@@ -128,6 +128,56 @@ pub fn resample<K: MotionKind>(
     new_record.subject_height = record.subject_height;
     Ok(new_record)
 }
+
+/// Resamples `record` to `target_rate`, first low-pass filtering at
+/// `0.4 * target_rate` (80 % of the new Nyquist frequency) when the target is
+/// lower than the source rate, so that downsampling does not alias.
+///
+/// The pre-filter is [`FilterMode::ZeroPhase`], so the documented phase
+/// delay of the combined operation stays zero; its speed retention is
+/// returned so a caller can see what the anti-aliasing cost a fast strike.
+/// When the target rate is not lower than the source, no filter runs and
+/// `None` is returned in place of a report.
+pub fn resample_anti_aliased<K: MotionKind>(
+    record: &MotionRecord<K>,
+    target_rate: Hertz,
+) -> Result<(MotionRecord<K>, Option<FilterReport>), AntiAliasError> {
+    let source_rate = uniform_rate(record).map_err(AntiAliasError::Filter)?;
+    if target_rate.value().is_finite() && target_rate.value() < source_rate.value() {
+        let mut filtered = record.clone();
+        let report = lowpass(
+            &mut filtered,
+            Hertz(0.4 * target_rate.value()),
+            FilterMode::ZeroPhase,
+        )
+        .map_err(AntiAliasError::Filter)?;
+        let out = resample(&filtered, target_rate).map_err(AntiAliasError::Resample)?;
+        Ok((out, Some(report)))
+    } else {
+        let out = resample(record, target_rate).map_err(AntiAliasError::Resample)?;
+        Ok((out, None))
+    }
+}
+
+/// Why anti-aliased resampling failed.
+#[derive(Clone, PartialEq, Debug)]
+pub enum AntiAliasError {
+    /// The pre-filter failed, typically on non-uniform input.
+    Filter(FilterError),
+    /// The resampler failed.
+    Resample(ResampleError),
+}
+
+impl fmt::Display for AntiAliasError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Filter(e) => write!(f, "anti-alias filter: {e}"),
+            Self::Resample(e) => write!(f, "resample: {e}"),
+        }
+    }
+}
+
+impl core::error::Error for AntiAliasError {}
 
 fn interpolate_frame(
     a: &MotionFrame,
@@ -299,6 +349,50 @@ mod tests {
             resample(&source, Hertz(-5.0)),
             Err(ResampleError::InvalidRate { .. })
         ));
+    }
+
+    #[test]
+    fn downsampling_with_anti_aliasing_suppresses_a_component_above_the_new_nyquist() {
+        // 40 Hz oscillation sampled at 200 Hz, resampled to 50 Hz: without
+        // a pre-filter it aliases to 10 Hz at full amplitude.
+        let rate = 200.0;
+        let record = crate::test_support::root_path(400, rate, |t| {
+            robot_types::frames::Vec3::new(
+                (2.0 * core::f64::consts::PI * 40.0 * t + 0.3).sin(),
+                0.0,
+                0.0,
+            )
+        });
+        let amplitude = |r: &MotionRecord<HumanSkeleton>| {
+            r.frames[20..r.frames.len() - 20]
+                .iter()
+                .map(|f| f.root.translation.x.abs())
+                .fold(0.0, f64::max)
+        };
+        let naive = resample(&record, Hertz(50.0)).unwrap();
+        let (filtered, report) = resample_anti_aliased(&record, Hertz(50.0)).unwrap();
+        assert!(amplitude(&naive) > 0.5);
+        // Two passes of a second-order section at twice the cutoff: about
+        // -21 dB, so an order of magnitude below the naive alias.
+        assert!(
+            amplitude(&filtered) < 0.1 * amplitude(&naive),
+            "{}",
+            amplitude(&filtered)
+        );
+        assert!(report.is_some());
+        assert_eq!(filtered.accumulated_phase_delay(), Duration::ZERO);
+        let ops: Vec<_> = filtered
+            .provenance
+            .iter()
+            .map(|s| s.operation.as_str())
+            .collect();
+        assert_eq!(ops, ["lowpass", "resample"]);
+    }
+
+    #[test]
+    fn upsampling_with_anti_aliasing_runs_no_filter() {
+        let (_, report) = resample_anti_aliased(&record_at(30.0), Hertz(60.0)).unwrap();
+        assert!(report.is_none());
     }
 
     #[test]
