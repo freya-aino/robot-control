@@ -45,6 +45,7 @@ impl ContactThresholds {
 
 /// A classifier for one contact site, holding the hysteresis state between
 /// calls.
+#[derive(Clone, Debug)]
 pub struct ContactClassifier {
     site: ContactSiteId,
     thresholds: ContactThresholds,

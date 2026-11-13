@@ -28,5 +28,9 @@
 #![warn(clippy::all)]
 
 pub mod attitude;
+pub mod base;
+pub mod consistency;
 pub mod contact;
 pub mod linear_kf;
+pub mod noise;
+pub mod opponent;
