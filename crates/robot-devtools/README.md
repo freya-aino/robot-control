@@ -14,6 +14,15 @@ any other shipping crate depends on it.
 | --- | --- |
 | `knowledge_base` | `KnowledgeBaseEntry`, `Citation`, `require_citation`, `update_version`/`refresh` |
 | `exclusion_gate` | `excluded_names_in_lock`, `foreign_packages_in_tree`, `devtools_dependents`: the text checks behind the `exclusion-gate` binary |
+| `inventory` | `lock_inventory` (Cargo.lock as the §13.1 primary key), the `kb-store/1` `Store` (entries with kind and dependencies, fault records), `orphans`, `sweep` (version change marks an entry and its dependents stale, transitively), local `search`, `ledger_cites_kb` |
+| `ledger` | Evidence-ledger rows from every table with a `State` column, and `diff`: added, removed and changed rows, promotions classed by Section 3's order, and promotions with no admitting artifact flagged as unsupported |
+
+The `devtools` binary runs them: `kb-sweep [--write]`, `kb-search
+<words>` and `ledger-diff <old> <new>`. It exits 1 on a finding: stale
+entries left unwritten, orphans, the ledger citing the base, or an
+unsupported promotion. `docs/kb/knowledge-base.toml` is the store. It has
+no entries, because the default build has no third-party crate and no
+hardware has been commissioned, so there is nothing cited to record.
 
 ## The exclusion gate (SPECS.md §2.1 item 4, row A-25; ADR 0013)
 
@@ -53,13 +62,11 @@ clears it.
 
 ## What's not implemented
 
-The evidence-ledger tooling named in §13.1 (ledger diffing, automated
-staleness sweeps triggered by a real version bump in `Cargo.lock`) is not
-built in this revision — only the data model and its two core invariants.
-The "no shipping crate imports `robot-devtools`" assertion is built (the
-gate above) but runs only where `devenv test` runs; no hosted CI exists.
-`docs/ledger/evidence-ledger.md` and `docs/ledger/automation-log.md` are
-maintained by hand for now.
+- **Hosted CI.** The gate and the `devtools` commands run wherever
+  `devenv test` or a developer runs them. No hosted CI exists.
+- **Generated ledgers.** The ledger and the automation log are still
+  written by hand. `ledger-diff` checks a change to them; it does not
+  author one.
 
 ## Testing
 
@@ -72,3 +79,13 @@ cited fresh entry accepted, a version change both marking an entry stale
 and causing `require_citation` to refuse it even with its old citation
 still attached, and `refresh` restoring usability with a new citation and
 version.
+
+The ledger and knowledge-base tooling adds tests for:
+- reading the lockfile inventory with its origin;
+- staleness propagating to dependents and surviving a round trip;
+- orphans, search, and ledger citations of the base;
+- ledger rows and an unsupported promotion;
+- a demotion needing no artifact.
+
+`ledger-diff` run on the committed ledger against the working copy reports
+one renamed row and no unsupported promotion.

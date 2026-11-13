@@ -5,11 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Development-time automation, the evidence ledger and the dependency knowledge base (SPECS.md Sections 2.3.1, 13.1)"
+description = "Development-time automation: the exclusion gate, the dependency knowledge base with staleness sweeps, and evidence-ledger diffing (SPECS.md Sections 2.3.1, 3, 13.1)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }
 robot-artifacts = { path = "../robot-artifacts" }
+
+[[bin]]
+name = "devtools"
+path = "src/bin/devtools.rs"
 
 [[bin]]
 name = "exclusion-gate"

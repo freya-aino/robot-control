@@ -1,0 +1,12 @@
+# The dependency knowledge base of SPECS.md Section 13.1, in the kb-store/1
+# format read by `cargo run -p robot-devtools --bin devtools`.
+#
+# It holds cited, versioned facts about low-level dependencies (crates by
+# their Cargo.lock name, firmware, drivers, OS and kernel options, bus
+# parameters, robot profiles) and diagnosed fault records. It is never
+# evidence for an acceptance row or a hazard control (item 3), and a
+# version change marks entries stale (item 4: `devtools kb-sweep`).
+#
+# No entry exists yet: the default build has no third-party crate, and no
+# hardware has been commissioned, so there is nothing cited to record.
+schema = "kb-store/1"

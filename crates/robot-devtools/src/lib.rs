@@ -15,4 +15,6 @@
 #![warn(clippy::all)]
 
 pub mod exclusion_gate;
+pub mod inventory;
 pub mod knowledge_base;
+pub mod ledger;
