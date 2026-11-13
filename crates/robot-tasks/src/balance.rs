@@ -57,6 +57,33 @@ fn upright_term(ctx: &TaskContext<'_>) -> f64 {
     -(wrapped * wrapped)
 }
 
+/// +1 for every step that does not end in a fall.
+///
+/// Without it every per-step reward is negative (`-distance^2`), and a fall
+/// ends the episode with zero future value: near the fall angle, falling is
+/// worth more to the critic than staying up imperfectly, so the task pays the
+/// agent to fall. That was the cause of the pendulum negative result recorded
+/// in `robot-learn`'s README. The bonus is withheld on the falling step
+/// itself, so terminating always forfeits it.
+fn alive_term(ctx: &TaskContext<'_>) -> f64 {
+    let theta = ctx.next_observation[0];
+    let raw = (theta - core::f64::consts::PI).rem_euclid(core::f64::consts::TAU);
+    let distance = if raw > core::f64::consts::PI {
+        core::f64::consts::TAU - raw
+    } else {
+        raw
+    };
+    // The fall angle is not visible to a term function, so the bonus uses
+    // the widest fall angle a config may set (pi): it is paid on every step
+    // the pendulum has not gone fully past horizontal-down; `evaluate`
+    // zeroes it on the terminating step for any configured fall angle.
+    if distance < core::f64::consts::PI {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 fn effort_term(ctx: &TaskContext<'_>) -> f64 {
     -ctx.action.iter().map(|a| a * a).sum::<f64>()
 }
@@ -74,13 +101,19 @@ impl BalanceTask {
                 is_style_term: false,
             },
             RewardTermSpec {
+                name: "alive-v1",
+                weight: 1.0,
+                compute: alive_term,
+                is_style_term: false,
+            },
+            RewardTermSpec {
                 name: "effort-v1",
                 weight: effort_weight,
                 compute: effort_term,
                 is_style_term: false,
             },
         ])
-        .expect("the two built-in term names are distinct");
+        .expect("the built-in term names are distinct");
         Self { config, registry }
     }
 
@@ -118,6 +151,20 @@ impl BalanceTask {
             }
         };
         let fallen = physics_failure || distance_from_upright > self.config.fall_angle;
+        // The falling step forfeits the alive bonus, whatever the fall angle.
+        let terms = if fallen {
+            let mut out = RewardTerms::new();
+            for t in terms.terms() {
+                let mut t = t.clone();
+                if t.name == "alive-v1" {
+                    t.value = 0.0;
+                }
+                out.push(t).expect("names copied from a valid set");
+            }
+            out
+        } else {
+            terms
+        };
         let termination = if fallen {
             Termination::Terminal
         } else if step_count >= self.config.max_steps {
@@ -132,6 +179,22 @@ impl BalanceTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staying_up_earns_the_alive_bonus_and_falling_forfeits_it() {
+        let task = BalanceTask::new(BalanceTaskConfig {
+            fall_angle: 1.0,
+            ..BalanceTaskConfig::default()
+        });
+        let up = [core::f64::consts::PI, 0.0];
+        let (r, t) = task.evaluate(&up, &[0.0], &up, 1, false);
+        assert_eq!(r.get("alive-v1").unwrap().value, 1.0);
+        assert_eq!(t, Termination::Continuing);
+        let down = [core::f64::consts::PI - 1.5, 0.0];
+        let (r, t) = task.evaluate(&up, &[0.0], &down, 2, false);
+        assert_eq!(r.get("alive-v1").unwrap().value, 0.0);
+        assert_eq!(t, Termination::Terminal);
+    }
 
     #[test]
     fn upright_is_the_maximum_of_the_upright_term() {
