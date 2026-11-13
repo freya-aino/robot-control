@@ -17,5 +17,7 @@
 #![warn(clippy::all)]
 
 pub mod device;
+pub mod link;
 pub mod loopback;
 pub mod replay;
+pub mod wire;

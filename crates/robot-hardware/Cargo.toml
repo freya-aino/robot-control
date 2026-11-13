@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Device traits, loopback and replay devices, protocol adapters (SPECS.md Section 7.1)"
+description = "Device traits, loopback and replay devices, and the robot-wire/1 protocol adapter with its reference firmware peer (SPECS.md Sections 4, 5, 6)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }
