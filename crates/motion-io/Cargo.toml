@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Motion import and export; BVH ingestion (SPECS.md Section 8.1)"
+description = "Motion import and export: BVH, C3D, AMASS npz, live capture, content-addressed originals (SPECS.md Section 8.1)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }
