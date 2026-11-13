@@ -31,15 +31,17 @@
 //! an explicit `world` link with six unconstrained degrees of freedom,
 //! and `robot_model::fixtures::unitree_g1_29dof_floating_base` is a real
 //! floating-base G1 (`robot sim multibody --floating` in `robot-cli`).
-//! Ground contact exists only as the penalty sphere model of ADR 0010
-//! ([`contact::GroundContact`], applied through
-//! `ArticulatedBody::step_with_ground`): the 8 ankle-roll spheres touch a
-//! `+z` plane, the 28 box, cylinder and mesh shapes do not, and there is
-//! no general collision pipeline or contact solver. A humanoid can hold a
-//! clamped PD stance here within the qualified `dt` range; it cannot
-//! balance or walk, and under zero torque it collapses through its
-//! unmodelled geometry. That is a documented limitation (see
-//! [`articulated`] and [`contact`]), not a balance claim.
+//! Contact runs through [`world::World`]: the collision pipeline of
+//! [`collision`] (plane manifolds, GJK/EPA, convex hulls for mesh colliders)
+//! feeds the unified contact, limit and equality solver of [`solver`] and
+//! [`newton`], so every one of the G1's 33 declared colliders is simulated.
+//! The penalty sphere model of ADR 0010 ([`contact::GroundContact`], applied
+//! through `ArticulatedBody::step_with_ground`) is the legacy path, kept as
+//! an oracle and reached by no command. A humanoid holds a stance under its
+//! declared drives within the qualified `dt` range; it cannot balance or
+//! walk, and under zero torque it folds onto its limb hulls because the
+//! pelvis and torso carry no collision geometry. That is a documented
+//! limitation (see [`world`] and [`articulated`]), not a balance claim.
 //!
 //! SPECS.md Section 9.1 separately asks to qualify Rapier's multibody and
 //! collision capabilities, or a verified alternative, before authoring
@@ -73,6 +75,7 @@ pub mod options;
 pub mod oracle;
 pub mod passive;
 pub mod pendulum;
+pub mod sensors;
 pub mod solver;
 pub mod spatial;
 pub mod world;

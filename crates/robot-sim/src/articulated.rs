@@ -13,9 +13,11 @@
 //! a humanoid's pelvis) fall and move under gravity and applied wrench;
 //! `crates/robot-sim/SIMULATION_SPECS.md` Section 3 is the design record
 //! for why this is a `robot-model`/`robot-sim` construct never importable
-//! from URDF. Ground contact is a penalty model applied to sphere collision
-//! shapes only (see [`crate::contact::GroundContact`]); box, cylinder and
-//! mesh shapes are counted but not modelled.
+//! from URDF. Ground contact here is the legacy penalty model applied to
+//! sphere collision shapes only (see [`crate::contact::GroundContact`]); box,
+//! cylinder and mesh shapes are counted but not modelled on this path. The
+//! default simulation path is [`crate::world`], which models all of them;
+//! this module is kept as its dynamics oracle.
 //!
 //! Every joint kind other than `Free` has at most one degree of freedom,
 //! so most of the algebra below is genuinely scalar; `Free`'s six degrees

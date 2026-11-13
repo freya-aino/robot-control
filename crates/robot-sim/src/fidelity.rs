@@ -509,7 +509,8 @@ pub const G1_PROBE_LABEL: &str = "g1-zero-torque-dt-5e-4";
 const G1_PROBE_START_CLEARANCE: f64 = 0.005;
 /// Gravity magnitude of the G1 probe, in m/s^2 (the `robot-cli` value).
 const G1_PROBE_GRAVITY: f64 = 9.806_65;
-/// Ground contact of the G1 probe (the `robot-cli` `FLOATING_GROUND` values).
+/// Ground contact of the G1 probe (formerly `robot-cli`'s `FLOATING_GROUND` values,
+/// which the legacy penalty path used).
 const G1_PROBE_GROUND: GroundContact = GroundContact {
     stiffness: 2.0e4,
     normal_damping: 200.0,

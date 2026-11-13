@@ -32,16 +32,19 @@
 //!
 //! # What this module does not do
 //!
-//! - Actuation is a generalized force the caller supplies. The transmission,
-//!   activation-dynamics and gain/bias factoring of `specs/05` is not applied
-//!   here; `crate::passive::affine_actuator_force` is the ported formula and is
-//!   still not wired to a model's `ActuatorSpec`.
+//! - Actuation is the model's declared position servos through
+//!   [`World::actuator_torques`] (`crate::passive::affine_actuator_force` with
+//!   the force clamp, target clamp and transmission), or a generalized force
+//!   the caller supplies. Activation dynamics and the non-affine gain/bias
+//!   types of `specs/05` are not applied.
 //! - Equality constraints are not built from a profile, because `robot-model`
 //!   has nothing to declare one with. The solver accepts them and
 //!   `crate::constraint` builds a scalar joint coupling, so the gap is in the
 //!   model layer.
-//! - Only the ground plane and shape-pair contacts are detected, as before.
-//!   Mesh geometry is counted and not collided.
+//! - Only the ground plane and shape-pair contacts are detected. Mesh
+//!   colliders take part as the convex hulls `robot_model::usd` builds at
+//!   import; a raw `Mesh` reference (a degenerate hull) is counted and not
+//!   collided.
 
 use crate::backend::Backend;
 use crate::collision::{self, Placed, Primitive, Proximity};
@@ -1328,6 +1331,27 @@ impl WorldEnv {
     #[must_use]
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// Adds `delta_v` (world frame, m/s) to the floating base's linear
+    /// velocity: an impulsive push, as a perturbation task applies it.
+    /// Returns `false`, changing nothing, when the model has no free joint.
+    pub fn push_base(&mut self, delta_v: Vec3) -> bool {
+        let Some(body) = self
+            .world
+            .model()
+            .bodies
+            .iter()
+            .find(|b| b.kind == JointKind::Free)
+        else {
+            return false;
+        };
+        // This path's free-joint velocity is world linear first.
+        let adr = body.dof_adr;
+        self.state.qd[adr] += delta_v.x;
+        self.state.qd[adr + 1] += delta_v.y;
+        self.state.qd[adr + 2] += delta_v.z;
+        true
     }
 
     /// The world, for a caller that needs to query the configuration.

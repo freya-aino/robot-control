@@ -3,7 +3,7 @@
 [Index](README.md) · [Appendix A](appendix-a-citations.md)
 
 **Status**: **USD import exists and is audited; one of this step's MUSTs is
-violated.** Sensors are not started.
+violated.** Sensors: the ideal joint encoders and site IMU of section 9 item 1 exist (`robot_sim::sensors`); noise lives in `robot_perception::noise`, per Appendix B S-06's default.
 
 The official OpenUSD G1 description is the project's model standard (ADR 0015),
 and `robot_model::usd` imports it. Audited against the flattened layer on
@@ -48,7 +48,7 @@ collapse. That count is also why [`World`](../src/world.rs) must take the
 actuated-joint mapping from the profile rather than infer it from a degree-of-
 freedom offset, which is recorded in Appendix D section 1.7.5.
 
-Sensors: not started. The sensor-noise injection point is undecided
+Sensors: `robot_sim::sensors::SensorSuite` gives noise-free joint encoders and an IMU at any link site (specific force and angular velocity by finite differences of the site pose, one-sample lag stated). The noise injection point follows Appendix B S-06's default: `robot_perception::noise` (white noise, bias random walk, quantization, delay, with a record naming the point and seed). Previously: the sensor-noise injection point was undecided
 (Appendix B S-06).
 
 **Goal**: Geometry-based inertia inference as an opt-in import mode, an optional static-body fusing pass, convex-hull reduction for meshes, a sensor type set, and an explicit sensor-noise policy. Covers old §9 and §10.

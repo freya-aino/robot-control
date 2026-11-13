@@ -19,30 +19,42 @@ what it's becoming.
 | Module | Contents |
 | --- | --- |
 | `pendulum` | `Pendulum`: a damped, actuated pendulum integrated by semi-implicit Euler — the first qualification benchmark Appendix B.4 names |
-| `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names. `GroundContact`: the per-sphere penalty law (regularised Coulomb friction, separation clamp) used by articulated bodies; see ADR 0010. `plane_sphere_contact`: pure `+z` plane-sphere geometry from the standard formulation (signed distance, normal, contact point, margin); the penalty force stays in `GroundContact` |
+| `contact` | `ContactBody`: a point mass with penalty-spring/Coulomb-friction ground contact — the second benchmark Appendix B.4 names. `GroundContact`: the per-sphere penalty law (regularised Coulomb friction, separation clamp) used by articulated bodies; see ADR 0010. `plane_sphere_contact`: pure plane-sphere geometry from the standard formulation against a plane given in its own frame (signed distance, normal, contact point, margin). `GroundContact` is the legacy penalty law; no command reaches it since the 0.1.6 switch-over |
 | `env` | `Environment` trait (reset/step/seeded randomization) and `PendulumEnv`, a trainable RL environment wrapping `pendulum` |
 | `backend` | `Backend: Environment` adds `backend_name()`; implemented for `PendulumEnv` (`cpu-pendulum`) |
 | `multibody_env` | `MultibodyEnv`: `Environment` and `Backend` over `ArticulatedBody`. Without `with_ground` it steps `MultibodyState::step` (`cpu-multibody`, a floating base falls). With a `GroundContact` attached it steps `step_with_ground` (`cpu-multibody-ground`). Rejects a wrong-length `q_home` with `WidthMismatch` |
 | `spatial` | Spatial-vector algebra on plain arrays (`[f64; 3]` vectors, row-major `[f64; 9]` rotations, `[f64; 6]` motion/force vectors, `[f64; 36]` spatial inertia) — the 6D motion/force representation the multi-body solver is built on. Uses `std` only; no `robot_types` or `robot_model` types |
-| `fidelity` | Fidelity harness (ADR 0008, schema v7): `FidelityCheck` plug-in trait, `run_checks`, the archival seven-check analytic battery (the v6 seventh check `pendulum_trajectory` compares the 1 rad angle series with `oracle::pendulum_closed_form` through `oracle::compare_series`, abs-only, with a per-check `sample` index) at the `reference` (100 µs) and `coarse` (1 ms) tiers, per-check `system` attribution, `[[contact]]` G1 applicability per tier, GPU checks recorded as not applicable, the measured G1 zero-torque `[[probe]]` row (v7, scenario runner `g1_zero_torque_probe`), and a strict TOML report reader/writer through `robot-artifacts`. Scope is the analytic subset plus one measured probe; it does not qualify G1 ground contact |
+| `fidelity` | Fidelity harness (ADR 0008, schema v8): `FidelityCheck` plug-in trait, `run_checks`, the archival ten-check analytic battery (v8 added `plane_normal_force_balance`, `friction_cone_bound` and `narrowphase_depth`; (the v6 seventh check `pendulum_trajectory` compares the 1 rad angle series with `oracle::pendulum_closed_form` through `oracle::compare_series`, abs-only, with a per-check `sample` index) at the `reference` (100 µs) and `coarse` (1 ms) tiers, per-check `system` attribution, `[[contact]]` G1 applicability per tier, GPU checks recorded as not applicable, the measured G1 zero-torque `[[probe]]` row (v7, scenario runner `g1_zero_torque_probe`), and a strict TOML report reader/writer through `robot-artifacts`. Scope is the analytic subset plus one measured probe; it does not qualify G1 ground contact |
 | `oracle` | Pure `std` oracle module, no `robot_types`, `robot-model` or `HashMap` types: `pendulum_closed_form` (exact pendulum angle for any release angle, Landen/AGM `sn`, domain `\|theta0\| < pi`, complementary modulus from `cos`), `pendulum_period`, `energy_drift` (zero and non-finite `E(0)` guarded only), `compare_series` (explicit `LengthMismatch`, `EmptySeries`, `InvalidTolerance` errors; pass per sample `\|r - c\| <= abs + rel*\|r\|`) returning `OracleReport` |
-| `integrators` | Pure `std` integrators implemented from the standard formulation: `semi_implicit_euler_step` (`mj_advance` order), `implicit_damping_euler_step` (`mj_EulerSkip` damping branch, Cholesky solve, `None` and unchanged state on a non-SPD system or non-finite inputs), `rk4_step` (`mj_RungeKutta`, N=4). Scalar joints only; not wired into `MultibodyState::step` |
+| `integrators` | Pure `std` integrators implemented from the standard formulation: `semi_implicit_euler_step` (`mj_advance` order), `implicit_damping_euler_step` (`mj_EulerSkip` damping branch, Cholesky solve, `None` and unchanged state on a non-SPD system or non-finite inputs), `rk4_step` (`mj_RungeKutta`, N=4). Scalar joints only; `World::step` selects semi-implicit Euler, `implicitfast` or RK4 per run through `SimOptions::integrator`, while `MultibodyState` remains the legacy semi-implicit stepper |
 | `passive` | Pure `std` passive and actuator forces from the standard formulation: `joint_spring_force` and `joint_damper_force` (`mj_springdamper`, linear case), `affine_actuator_force` (`mj_fwdActuation`, `GAIN_AFFINE`/`BIAS_AFFINE`). Polynomial, muscle, tendon, flex and gravity-compensation terms are not ported |
-| `constraint` | Pure `std` equality-constraint subset implemented from the standard formulation: `joint_equality_row` (`mjEQ_JOINT`, one or two scalar joints with the quartic coupling), `impedance`, `stiffness_damping`, `effective_timeconst` (`2*dt` clamp, mixed-format refusal), and `solve_equality`, a closed-form solve of an equality-only problem returning forces, `qacc` and clamped rows. Not wired into `MultibodyState::step`. Not ported: connect, weld and tendon rows, friction, limit and contact rows, the iterative solvers |
-| `articulated` | `ArticulatedBody`: multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, including a floating base. Sphere ground contact (`forward_dynamics_with_ground`, `step_with_ground`, `lowest_contact_height`), a clamped PD `stance_torques` hold, plus `MultibodyState`, a semi-implicit-Euler stepper. Box, cylinder and mesh shapes are counted, not modelled (ADR 0010) |
+| `constraint` | Pure `std` equality-constraint subset implemented from the standard formulation: `joint_equality_row` (`mjEQ_JOINT`, one or two scalar joints with the quartic coupling), `impedance`, `stiffness_damping`, `effective_timeconst` (`2*dt` clamp, mixed-format refusal), and `solve_equality`, a closed-form solve of an equality-only problem returning forces, `qacc` and clamped rows. Kept as the CPU oracle for the GPU equality kernel; simulation uses `solver`/`newton`, which carry contact, friction, limit and equality rows together. Not ported: connect, weld and tendon rows |
+| `articulated` | `ArticulatedBody`: multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, including a floating base. Sphere ground contact (`forward_dynamics_with_ground`, `step_with_ground`, `lowest_contact_height`), a clamped PD `stance_torques` hold, plus `MultibodyState`, a semi-implicit-Euler stepper. Legacy path: its ABA/RNE recursions are the oracle the `composite` path is validated against, and its sphere-penalty contact is retired and reached by no command |
+| `composite` | Example `02`'s dynamics on plain arrays: `crb` (composite-rigid-body mass matrix), `factor_m`/`solve_ld` (`L' D L`), `rne` bias forces, `forward_dynamics`, `integrate_pos` with the `Free`-joint quaternion path, and `rk_correct_free_velocity` (Munthe-Kaas correction for RK4) |
+| `collision` | Broad-phase rejection (`spheres_apart`, `aabbs_apart`) and pair filters, signed-volume GJK with EPA (`CcdConfig` budget), exact plane manifolds for sphere, box, cylinder and convex hull (`Primitive::Hull`, support query over the import-time hull), and box-box SAT with face clipping |
+| `solver` | The unified constraint problem of examples `07` and `08`: contact rows as the generator-direction pyramid (`contact_rows`, all four `condim` values, `sliding_friction`, `decode_pyramid`), limit and equality rows, `solref`/`solimp` impedance (`row_impedance`) and the projected Gauss-Seidel `solve` used as the cross-check |
+| `newton` | `solve_newton`: the primal Newton solver of example `08` section 6, the default algorithm (Gauss-Seidel needs about a thousand sweeps where Newton needs one on sixteen pyramidal rows) |
+| `options` | `SimOptions` (every Section 12.1 knob plus `limit_margin`, `warm_start`, `solref`, `solimp` and `CcdConfig`), `Integrator` (`Euler`, `ImplicitFast`, `Rk4`), `SolverAlgorithm`; validated rather than clamped, and `record()` emits them so a run carries its configuration |
+| `sensors` | `SensorSuite`: noise-free joint encoders and an IMU at a link site (specific force `R'(a - g)` and angular velocity from finite differences of the site pose); noise is `robot-perception`'s, per specs Appendix B S-06 |
+| `world` | `World`: the default simulation path (`robot sim multibody`) — composite dynamics, exact collision manifolds, the unified solver, the model's declared actuators through `actuator_torques` (`ActuationMode`), `Ground` from the scene layer; `WorldEnv` is its `Environment`/`Backend` (`cpu-world`) |
 
 ## What this crate has and does not yet have
 
-Steps 5 and 6 (standard-formulation ports, pure `std`: `integrators`,
-`passive`, `constraint`, and the plane-sphere geometry in `contact`) are
-implemented as standalone functions with hand-derived tests. Not yet
-implemented: wiring them into `MultibodyState::step`; free and ball
-joint integration (`mj_integratePos` quaternion path); sparse-`M`
-`implicit`/`implicitfast`; polynomial, muscle, DC-motor, PID, tendon, flex,
-gravity-compensation, fluid and contact passive terms; connect, weld and
-tendon equality rows; friction, limit and contact rows, the shared
-contact-plus-equality solver and its iterative solvers; and the non-plane
-collision pairs.
+The `world` path (specs 0.1.5-draft onward, see `specs/README.md`) runs
+composite dynamics, exact collision manifolds, the unified contact, limit
+and equality solver with primal Newton as default, the model's declared
+actuators, and semi-implicit Euler, `implicitfast` or RK4 per run. Every
+one of the G1's 33 declared colliders is contacted (10 spheres, 2 boxes, 6
+cylinders and 15 meshes reduced to convex hulls at import). Not yet
+implemented: `Ball` joints; full `implicit` (the qLU path and
+`mjd_freeMhat`'s free-body gyroscopic block); polynomial, muscle, DC-motor,
+PID, tendon, flex, gravity-compensation and fluid passive terms; connect,
+weld and tendon equality rows; the elliptic friction cone and constraint
+islands; a mid-phase BVH and hill-climbing hull support (the support query
+is an exhaustive vertex scan and a plane-hull contact yields one point);
+enforcement of the `contact_slots` budget; and named fidelity tiers
+(S-03). The paragraphs that follow describe the legacy `articulated` path,
+which is kept as the oracle.
 
 `spatial`/`articulated` are a real, validated multi-body dynamics solver
 (see their own doc comments and `SIMULATION_SPECS.md` §4 item 1: their
@@ -60,11 +72,12 @@ stance (`robot sim multibody --floating`, ADR 0010), which is a supported-stance
 qualification and not a balance result. `SIMULATION_SPECS.md` §3 item 1 named
 the floating-base gap; it is closed for the solver.
 
-What remains missing, named precisely: **contact is sphere-only**. Box,
-cylinder and mesh collision shapes are counted but not modelled, so the
-G1's pelvis and torso have no collision geometry and zero torque collapses
-through the plane. There is no joint-limit or actuator model, no balance
-controller, **no constraint solver wired into stepping; equality-only solver available as standalone** (penalty sphere contact forces used otherwise), and
+What remains missing, named precisely: there is no balance controller, so
+the robot cannot stand, balance or walk on its own; the declared drive
+gains are generated defaults (Appendix D M-28); the pelvis and torso carry
+no collision geometry in the vendored layer, so with zero torque the robot
+folds onto its limb hulls (the pelvis settles about 0.12 m above the plane
+at `dt = 1e-4`); and there is
 **no GPU batched execution path in this crate**. The separate unpublished crate `crates/robot-sim-gpu` (feature `cubecl`, ADR 0012) has CubeCL kernels for semi-implicit Euler, implicit-damping Euler and equality-only `solve_equality` (per-environment dense Cholesky, `nv,nrow ≤ 6`), spring/damper/actuator forces, equality residual, `solimp` impedance with its derivative `impP` (asserted for both sides of the midpoint), and plane-sphere contact. It also has a named pendulum RK4 kernel (`gpu_rk4_pendulum_step`, asserted over 4097 environments and 1000 steps). The general closure-based `rk4_step` is not ported and has no CPU fallback on the GPU, and there is no contact/friction/limit solver or batched G1/ABA on the GPU (`SIMULATION_SPECS.md` §11). Its gate 3 timing (dev build, RK4 and equality only) and gate 4 in-process repeatability are on one device per run, with no throughput claim. Tolerance records are in `crates/robot-sim-gpu/tolerances.toml`. Run its tests with `cargo test -p robot-sim-gpu --features cubecl` under a Vulkan ICD (see ADR 0012). The
 robot cannot stand, balance or walk on its own, and it cannot run as a
 GPU-batched training environment yet.
@@ -128,8 +141,10 @@ either way. The example's formulation has the same property. What removes it is
 the bounded manifolds, which cap the count geometrically. Two of that commit's
 tests were first written asserting the opposite, from penalty-spring intuition.
 
-**What is not done.** `MultibodyState::step` is still the stepper the CLI and the
-environments run, so `composite`, `solver` and `options` are available but not
+**What was not done at this point** (historical: the 0.1.5-draft switch-over
+made `world::World` the default path and closed M-17). `MultibodyState::step`
+was still the stepper the CLI and the
+environments ran, so `composite`, `solver` and `options` were available but not
 the default path (M-17); section 1.6.1 explains why that switch wants to be one
 change rather than several, since the `Free`-joint layout has to move everywhere
 at once. And the GPU backend's `f32` and six-degree-of-freedom limits are
@@ -182,8 +197,10 @@ pivot tolerance is relative to its matrix; `stiffness_damping` selects the
 `solref` format with one predicate; and an edge-edge box contact is placed on
 the edges instead of at a corner about 0.7 m away.
 
-**What is not done, and the honest reason.** The unified constraint solver of
-example files 07 and 08 is not built, so Appendix D M-04 and M-08 to M-12 stand:
+**What was not done at this point, and the honest reason** (historical: the
+unified solver, the Newton default and the switch-over all landed in
+0.1.4-draft and 0.1.5-draft; see the specs index). The unified constraint solver of
+example files 07 and 08 was not yet built, so Appendix D M-04 and M-08 to M-12 stood:
 contact is still the penalty and coupled-impedance pair, friction is still
 outside the solve, and limits are still a separate active set plus a position
 clamp. `MultibodyState::step` is still the stepper the CLI and the environments
@@ -278,8 +295,14 @@ would have passed unnoticed.
 
 ## A real limit found by actually running it, not by theory
 
-Running the vendored G1 fixture (`robot sim multibody` in `robot-cli`)
-through the stepper surfaced a genuine, now-documented instability. With zero
+This probe still runs the legacy `MultibodyState::step_with_ground`
+sphere-penalty path, not `world`. Since hard joint limits landed (2026-10-30)
+the probe completes its 4000 steps and its row is `pass`; the failure
+described below is the earlier, superseded measurement. On the `world` path
+the zero-torque G1 folds onto its hull geometry instead.
+
+Running the vendored G1 fixture through the legacy stepper (then the path
+behind `robot sim multibody`) surfaced a genuine, now-documented instability. With zero
 applied torque on the floating G1 and sphere ground contact, semi-implicit Euler
 at `dt = 5e-4` s hits a singular joint inertia matrix at step 2236 (about 1.12
 simulated seconds), recorded as a measured `[[probe]]` row (`status = "fail"`, `error = "SingularJointInertia"`, owned by `fidelity.rs`); the row does not change `all_pass`. The failure is also a model-coverage limit: the pelvis and torso carry no collision geometry, so the trunk reaches the plane through unmodelled shapes once the legs fold, and the row does not isolate the integrator's share. The clamped PD stance hold stays finite over 2 s at the same `dt`. `SIMULATION_SPECS.md` §4 item 3 ties this directly to a
@@ -325,7 +348,7 @@ not a tautology).
 
 ## Testing
 
-`cargo test -p robot-sim` — 191 unit tests and 9 integration tests (`tests/fidelity_extension.rs`, the external `FidelityCheck` API, including the v6 series-tolerance rejections for `rel > 0` and `abs = NaN`). The `oracle` tests cover the separatrix period asymptote, a 3.0 rad RK4 cross-check, the largest admissible `theta0` below `pi`, and the energy zero policy. The articulated-body and spatial-algebra modules have dedicated regression coverage for the dense solver and array adapters. Fidelity tests (`cargo test -p robot-sim fidelity`) cover the pass rule, every declared tier, the report round trip, strict reader rejection (tampered pass/all_pass, relabelled system, wrong scope, contact rows that disagree with the timestep rule), duplicate names, the step budget, and failure injection at a 200 ms tier. Earlier coverage: the pendulum (analytic period,
+`cargo test -p robot-sim` — 301 unit tests and 9 integration tests (`tests/fidelity_extension.rs`, the external `FidelityCheck` API, including the v6 series-tolerance rejections for `rel > 0` and `abs = NaN`). The `oracle` tests cover the separatrix period asymptote, a 3.0 rad RK4 cross-check, the largest admissible `theta0` below `pi`, and the energy zero policy. The articulated-body and spatial-algebra modules have dedicated regression coverage for the dense solver and array adapters. Fidelity tests (`cargo test -p robot-sim fidelity`) cover the pass rule, every declared tier, the report round trip, strict reader rejection (tampered pass/all_pass, relabelled system, wrong scope, contact rows that disagree with the timestep rule), duplicate names, the step budget, and failure injection at a 200 ms tier. Earlier coverage: the pendulum (analytic period,
 energy bound, monotonic dissipation under damping, gravity-compensated PD
 convergence), the contact body (steady-state penetration depth, energy loss
 on impact, non-reversing friction, push-and-recover), the environment
