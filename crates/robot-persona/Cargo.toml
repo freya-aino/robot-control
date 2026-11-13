@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Bounded expressive intent over validated skills (SPECS.md Section 12.5)"
+description = "Bounded expressive intent: versioned styles over validated skills, an expression arbiter, session-scoped opponent memory and style evaluation (SPECS.md Section 12.5)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }

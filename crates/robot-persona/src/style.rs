@@ -16,6 +16,8 @@
 use core::fmt;
 use robot_skills::descriptor::SkillId;
 
+use crate::params::{BoundedParameter, Dimension};
+
 /// A versioned, sampled style configuration.
 ///
 /// SPECS.md Section 12.5's closing paragraph: candidates for this set "MAY
@@ -24,7 +26,7 @@ use robot_skills::descriptor::SkillId;
 /// already-validated skills... not a generated behavior." Nothing in this
 /// struct can call a model or synthesize a new skill; it only names which
 /// already-approved skills this persona prefers and how strongly.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct StyleConfig {
     /// Stable name for this style (e.g. `"aggressive-v1"`).
     pub name: String,
@@ -39,6 +41,81 @@ pub struct StyleConfig {
     /// (e.g. `"aggression"`, `"patience"`) rather than free-form, so a
     /// style cannot invent an unbounded-effect knob.
     pub tactical_preferences: Vec<(String, f64)>,
+    /// Positions inside validated ranges for the expressive dimensions
+    /// (see [`crate::params`]); a dimension not listed takes the caller's
+    /// neutral value.
+    pub parameters: Vec<BoundedParameter>,
+}
+
+/// Why a style configuration is invalid.
+#[derive(Clone, PartialEq, Debug)]
+pub enum StyleError {
+    /// Version 0 is reserved for "unversioned".
+    Unversioned,
+    /// A preference weight was negative or non-finite.
+    BadWeight,
+    /// An expressive skill is not in the validated set.
+    UnvalidatedSkill(SkillId),
+    /// A tactical key is not a tactical dimension.
+    UnknownTactic(String),
+    /// A dimension appears twice.
+    DuplicateDimension(Dimension),
+}
+
+impl StyleConfig {
+    /// Checks the configuration against the validated skill set: a style
+    /// that names an unvalidated skill is not loadable, rather than being
+    /// filtered at expression time.
+    pub fn validate(&self, validated: &[SkillId]) -> Result<(), StyleError> {
+        if self.version == 0 {
+            return Err(StyleError::Unversioned);
+        }
+        let weights = self
+            .expressive_preferences
+            .iter()
+            .map(|(_, w)| *w)
+            .chain(self.tactical_preferences.iter().map(|(_, w)| *w));
+        if weights.into_iter().any(|w| !w.is_finite() || w < 0.0) {
+            return Err(StyleError::BadWeight);
+        }
+        if let Some((id, _)) = self
+            .expressive_preferences
+            .iter()
+            .find(|(id, _)| !validated.contains(id))
+        {
+            return Err(StyleError::UnvalidatedSkill(*id));
+        }
+        if let Some((k, _)) = self.tactical_preferences.iter().find(|(k, _)| {
+            !Dimension::ALL
+                .iter()
+                .any(|d| d.is_tactical() && d.name() == k)
+        }) {
+            return Err(StyleError::UnknownTactic(k.clone()));
+        }
+        for (i, p) in self.parameters.iter().enumerate() {
+            if self.parameters[..i]
+                .iter()
+                .any(|q| q.dimension == p.dimension)
+            {
+                return Err(StyleError::DuplicateDimension(p.dimension));
+            }
+        }
+        Ok(())
+    }
+
+    /// The position for `dimension`, or `neutral` when the style does not
+    /// set it.
+    #[must_use]
+    pub fn position(&self, dimension: Dimension, neutral: f64) -> BoundedParameter {
+        self.parameters
+            .iter()
+            .find(|p| p.dimension == dimension)
+            .copied()
+            .unwrap_or(BoundedParameter {
+                dimension,
+                position: neutral,
+            })
+    }
 }
 
 /// Why an expressive skill could not be selected.
@@ -134,6 +211,7 @@ mod tests {
             version: 1,
             expressive_preferences: vec![(SkillId(10), 0.9), (SkillId(11), 0.1)],
             tactical_preferences: vec![("aggression".to_owned(), 0.6)],
+            parameters: Vec::new(),
         }
     }
 
@@ -191,12 +269,45 @@ mod tests {
     }
 
     #[test]
+    fn validation_refuses_unvalidated_skills_unknown_tactics_and_version_zero() {
+        let mut s = style();
+        assert_eq!(s.validate(&[SkillId(10), SkillId(11)]), Ok(()));
+        assert_eq!(
+            s.validate(&[SkillId(10)]),
+            Err(StyleError::UnvalidatedSkill(SkillId(11)))
+        );
+        s.tactical_preferences.push(("recklessness".into(), 1.0));
+        assert_eq!(
+            s.validate(&[SkillId(10), SkillId(11)]),
+            Err(StyleError::UnknownTactic("recklessness".into()))
+        );
+        s.tactical_preferences.clear();
+        s.version = 0;
+        assert_eq!(
+            s.validate(&[SkillId(10), SkillId(11)]),
+            Err(StyleError::Unversioned)
+        );
+    }
+
+    #[test]
+    fn an_unset_dimension_takes_the_neutral_position() {
+        let mut s = style();
+        s.parameters.push(BoundedParameter {
+            dimension: Dimension::Cadence,
+            position: 0.8,
+        });
+        assert_eq!(s.position(Dimension::Cadence, 0.5).position, 0.8);
+        assert_eq!(s.position(Dimension::IdleAmplitude, 0.5).position, 0.5);
+    }
+
+    #[test]
     fn a_style_with_no_positive_weights_samples_nothing() {
         let empty = StyleConfig {
             name: "none".to_owned(),
             version: 1,
             expressive_preferences: vec![],
             tactical_preferences: vec![],
+            parameters: Vec::new(),
         };
         assert_eq!(sample_preference(&empty, 0.5), None);
     }
