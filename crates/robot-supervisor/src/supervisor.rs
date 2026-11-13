@@ -13,6 +13,7 @@
 //! (which does the heap work), and every subsequent call writes into
 //! caller-owned buffers and a fixed-capacity [`crate::fault::FaultLog`].
 
+use crate::envelope::EnvelopeMonitor;
 use crate::fault::{Fault, FaultLog};
 use crate::policy::{FaultPolicy, Response};
 use robot_model::profile::RobotProfile;
@@ -112,6 +113,10 @@ pub struct Supervisor<const N: usize> {
     command_kind: CommandKind,
     last_safe_command: Vec<f64>,
     log: FaultLog<N>,
+    envelope: Option<EnvelopeMonitor>,
+    // This tick's torque clamp per joint: the effort limit, lowered by the
+    // envelope monitor when one is installed.
+    torque_now: Vec<f64>,
 }
 
 impl<const N: usize> Supervisor<N> {
@@ -145,10 +150,27 @@ impl<const N: usize> Supervisor<N> {
             command_kind,
             last_safe_command: vec![0.0; width],
             log: FaultLog::new(),
+            envelope: None,
+            torque_now: joints.iter().map(|j| j.limits.effort.value()).collect(),
         }
     }
 
     /// Number of actuated joints this supervisor was built for.
+    /// Installs the envelope monitor (torque-speed, thermal derating,
+    /// saturation duration, contact energy, interlocks).
+    #[must_use]
+    pub fn with_envelope(mut self, monitor: EnvelopeMonitor) -> Self {
+        self.envelope = Some(monitor);
+        self
+    }
+
+    /// The envelope monitor, to record a tick's measurements before
+    /// `check_tick`.
+    pub fn envelope_mut(&mut self) -> Option<&mut EnvelopeMonitor> {
+        self.envelope.as_mut()
+    }
+
+    /// Number of actuated joints this supervisor checks.
     #[must_use]
     pub fn width(&self) -> usize {
         self.joint_ids.len()
@@ -221,15 +243,39 @@ impl<const N: usize> Supervisor<N> {
                 }
                 CommandKind::Torque => {
                     let limit = self.torque_limits[i];
+                    let available = self.envelope.as_ref().and_then(|m| m.available_torque(i));
+                    self.torque_now[i] = available.map_or(limit.value(), |a| a.min(limit.value()));
                     if value.abs() > limit.value() {
                         self.log.push(Fault::TorqueLimitExceeded {
                             joint: self.joint_ids[i],
                             commanded: NewtonMetres(value),
                             limit,
                         });
+                    } else if value.abs() > self.torque_now[i] {
+                        self.log.push(Fault::TorqueSpeedExceeded {
+                            joint: self.joint_ids[i],
+                            commanded: NewtonMetres(value),
+                            available: NewtonMetres(self.torque_now[i]),
+                        });
                     }
                 }
                 CommandKind::Unbounded => {}
+            }
+        }
+
+        if self.envelope.is_some() {
+            for (i, &value) in raw.iter().enumerate() {
+                let clamped = value.is_finite() && self.clamp_one(i, value) != value;
+                if let Some(ticks) = self
+                    .envelope
+                    .as_mut()
+                    .and_then(|m| m.saturation(i, clamped))
+                {
+                    self.log.push(Fault::SustainedSaturation {
+                        joint: self.joint_ids[i],
+                        ticks,
+                    });
+                }
             }
         }
 
@@ -316,6 +362,21 @@ impl<const N: usize> Supervisor<N> {
                 self.log.push(Fault::UnauthorizedContact { site });
             }
         }
+
+        if let Some(m) = &self.envelope {
+            for (site, energy, budget) in m.over_budget() {
+                self.log.push(Fault::ContactEnergyExceeded {
+                    site,
+                    energy,
+                    budget,
+                });
+            }
+            for &interlock in input.mode.required_interlocks() {
+                if !m.is_closed(interlock) {
+                    self.log.push(Fault::InterlockOpen { interlock });
+                }
+            }
+        }
     }
 
     /// The most severe declared response among this tick's recorded faults,
@@ -372,10 +433,7 @@ impl<const N: usize> Supervisor<N> {
                 -self.velocity_limits[index].value(),
                 self.velocity_limits[index].value(),
             ),
-            CommandKind::Torque => value.clamp(
-                -self.torque_limits[index].value(),
-                self.torque_limits[index].value(),
-            ),
+            CommandKind::Torque => value.clamp(-self.torque_now[index], self.torque_now[index]),
             CommandKind::Unbounded => value,
         }
     }
@@ -491,6 +549,131 @@ mod tests {
             },
             CommandKind::Position,
         )
+    }
+
+    fn torque_supervisor(budget: f64) -> Supervisor<16> {
+        use crate::envelope::{EnvelopeConfig, EnvelopeMonitor};
+        let p = profile();
+        let monitor = EnvelopeMonitor::new(
+            &p,
+            EnvelopeConfig {
+                derate_start: 0.5,
+                max_saturated_ticks: 3,
+                contact_budgets: vec![(ContactSiteId::new(1), budget)],
+            },
+        );
+        Supervisor::new(
+            &p,
+            FaultPolicy::conservative_default(),
+            FreshnessLimits {
+                observation: Duration::from_millis(100),
+                comms: Duration::from_millis(200),
+            },
+            CommandKind::Torque,
+        )
+        .with_envelope(monitor)
+    }
+
+    const SUPPORTED: [robot_types::mode::Interlock; 3] = [
+        robot_types::mode::Interlock::EmergencyStop,
+        robot_types::mode::Interlock::SupportFixture,
+        robot_types::mode::Interlock::ReducedEnvelope,
+    ];
+
+    #[test]
+    fn the_torque_speed_envelope_and_thermal_derating_lower_the_clamp() {
+        let mut s = torque_supervisor(100.0);
+        let mut out = [0.0];
+        // At 1.5 rad/s the envelope gives 5 * (2 - 1.5) / (2 - 1) = 2.5 N m.
+        s.envelope_mut()
+            .unwrap()
+            .measure(&[1.5], &[Celsius(30.0)], &[], 0.01, &SUPPORTED);
+        let r = s.check_tick(&nominal_input(), &[4.0], &mut out).unwrap();
+        assert_eq!(r, Response::ClampAndContinue);
+        assert!((out[0] - 2.5).abs() < 1e-12, "{out:?}");
+        assert!(s
+            .log()
+            .entries()
+            .iter()
+            .flatten()
+            .any(|f| matches!(f, Fault::TorqueSpeedExceeded { .. })));
+        // Standing still but hot: derating starts at 52.5 C, zero at 80 C;
+        // 66.25 C leaves half of 5 N m.
+        s.envelope_mut()
+            .unwrap()
+            .measure(&[0.0], &[Celsius(66.25)], &[], 0.01, &SUPPORTED);
+        s.check_tick(&nominal_input(), &[4.0], &mut out).unwrap();
+        assert!((out[0] - 2.5).abs() < 1e-9, "{out:?}");
+    }
+
+    #[test]
+    fn sustained_saturation_escalates_after_its_tick_count() {
+        let mut s = torque_supervisor(100.0);
+        let mut out = [0.0];
+        let mut last = Response::ClampAndContinue;
+        for _ in 0..3 {
+            s.envelope_mut()
+                .unwrap()
+                .measure(&[0.0], &[Celsius(30.0)], &[], 0.01, &SUPPORTED);
+            last = s.check_tick(&nominal_input(), &[4.9], &mut out).unwrap();
+        }
+        assert_eq!(
+            last,
+            Response::ClampAndContinue,
+            "4.9 is inside the 5 N m effort limit"
+        );
+        for _ in 0..3 {
+            s.envelope_mut()
+                .unwrap()
+                .measure(&[1.5], &[Celsius(30.0)], &[], 0.01, &SUPPORTED);
+            last = s.check_tick(&nominal_input(), &[4.9], &mut out).unwrap();
+        }
+        assert_eq!(last, Response::HoldLastSafeCommand);
+        assert!(s
+            .log()
+            .entries()
+            .iter()
+            .flatten()
+            .any(|f| matches!(f, Fault::SustainedSaturation { ticks: 3, .. })));
+    }
+
+    #[test]
+    fn an_exhausted_contact_budget_and_an_open_interlock_stop_the_robot() {
+        let mut s = torque_supervisor(1.0);
+        let mut out = [0.0];
+        let site = ContactSiteId::new(1);
+        s.envelope_mut().unwrap().measure(
+            &[0.0],
+            &[Celsius(30.0)],
+            &[(site, 150.0)],
+            0.01,
+            &SUPPORTED,
+        );
+        assert_eq!(
+            s.check_tick(&nominal_input(), &[0.0], &mut out).unwrap(),
+            Response::EmergencyStop
+        );
+        assert!(s
+            .log()
+            .entries()
+            .iter()
+            .flatten()
+            .any(|f| matches!(f, Fault::ContactEnergyExceeded { .. })));
+
+        let mut s = torque_supervisor(100.0);
+        s.envelope_mut()
+            .unwrap()
+            .measure(&[0.0], &[Celsius(30.0)], &[], 0.01, &SUPPORTED[..2]);
+        assert_eq!(
+            s.check_tick(&nominal_input(), &[0.0], &mut out).unwrap(),
+            Response::EmergencyStop
+        );
+        assert!(s.log().entries().iter().flatten().any(|f| matches!(
+            f,
+            Fault::InterlockOpen {
+                interlock: robot_types::mode::Interlock::ReducedEnvelope
+            }
+        )));
     }
 
     #[test]

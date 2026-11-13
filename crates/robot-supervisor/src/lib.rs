@@ -26,6 +26,8 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod envelope;
 pub mod fault;
+pub mod hazard;
 pub mod policy;
 pub mod supervisor;

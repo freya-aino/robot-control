@@ -88,7 +88,12 @@ impl core::error::Error for PolicyError {}
 /// make sense of (there is no direction to clamp toward). A non-finite
 /// observation is the sensing-side twin of a stale one: the policy has nothing
 /// trustworthy to act on, so a clamp has nothing to clamp.
-const MUST_ESCALATE: [FaultCategory; 5] = [
+const MUST_ESCALATE: [FaultCategory; 7] = [
+    // An open interlock (a person in the area, e-stop path broken) and an
+    // exhausted contact-energy budget are stop conditions (SPECS.md 12.2,
+    // 12.3), never something a clamp addresses.
+    FaultCategory::InterlockOpen,
+    FaultCategory::ContactEnergyExceeded,
     FaultCategory::StaleObservation,
     FaultCategory::CommunicationsLost,
     FaultCategory::NonFiniteCommand,
@@ -97,7 +102,10 @@ const MUST_ESCALATE: [FaultCategory; 5] = [
 ];
 
 /// All fault categories, used to check a policy is total.
-const ALL_CATEGORIES: [FaultCategory; 10] = [
+const ALL_CATEGORIES: [FaultCategory; 13] = [
+    FaultCategory::SustainedSaturation,
+    FaultCategory::ContactEnergyExceeded,
+    FaultCategory::InterlockOpen,
     FaultCategory::StaleObservation,
     FaultCategory::NonFiniteObservation,
     FaultCategory::NonFiniteCommand,
@@ -119,7 +127,7 @@ const ALL_CATEGORIES: [FaultCategory; 10] = [
 /// `ClampAndContinue` for a category in [`MUST_ESCALATE`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct FaultPolicy {
-    responses: [Response; 10],
+    responses: [Response; 13],
 }
 
 impl FaultPolicy {
@@ -132,8 +140,11 @@ impl FaultPolicy {
             FaultCategory::PositionLimitExceeded
             | FaultCategory::VelocityLimitExceeded
             | FaultCategory::TorqueLimitExceeded => Response::ClampAndContinue,
-            FaultCategory::OverTemperature | FaultCategory::UnauthorizedContact => {
-                Response::HoldLastSafeCommand
+            FaultCategory::OverTemperature
+            | FaultCategory::UnauthorizedContact
+            | FaultCategory::SustainedSaturation => Response::HoldLastSafeCommand,
+            FaultCategory::ContactEnergyExceeded | FaultCategory::InterlockOpen => {
+                Response::EmergencyStop
             }
             FaultCategory::StaleObservation
             | FaultCategory::NonFiniteObservation
@@ -147,7 +158,7 @@ impl FaultPolicy {
     /// Builds a policy from a total function, rejecting an assignment that
     /// violates the escalation rule.
     pub fn new(mut assign: impl FnMut(FaultCategory) -> Response) -> Result<Self, PolicyError> {
-        let mut responses = [Response::EmergencyStop; 10];
+        let mut responses = [Response::EmergencyStop; 13];
         for (slot, category) in responses.iter_mut().zip(ALL_CATEGORIES) {
             let response = assign(category);
             if response == Response::ClampAndContinue && MUST_ESCALATE.contains(&category) {

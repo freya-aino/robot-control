@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The independent supervisor of SPECS.md Section 12.1"
+description = "The independent supervisor: fixed limits, torque-speed and thermal envelope, saturation, contact energy, interlocks, and the hazard register (SPECS.md Section 12)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }

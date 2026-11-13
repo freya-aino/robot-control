@@ -18,7 +18,9 @@ check.
 | --- | --- |
 | `fault` | `Fault` (ten categories, each carrying its measurement and limit), `FaultLog<N>`: a fixed-capacity, allocation-free record with an overflow counter |
 | `policy` | `Response` (clamp / hold / reject / e-stop), `FaultPolicy`: a validated, total category→response mapping |
-| `supervisor` | `Supervisor<N>`: construction-time setup from a `RobotProfile`, then a per-tick `check_tick` that allocates nothing |
+| `supervisor` | `Supervisor<N>`: construction-time setup from a `RobotProfile`, then a per-tick `check_tick` that allocates nothing; `with_envelope` installs the monitor below |
+| `envelope` | `EnvelopeMonitor`: each actuator's torque-speed envelope through its transmission, thermal derating from `derate_start` of the limit to zero at it, consecutive-saturation counting, per-site contact energy budgets, and the interlocks the current mode requires |
+| `hazard` | `HazardRegister`: §12.2's per-robot, per-mode register. `validate` refuses an incomplete entry, a hazard nobody accepted, or one whose only control is learned. `ready_for` gates hardware modes on an analysed, valid register. `initial` gives the section's starting table, marked as not analysed |
 
 ## "Clamp-and-continue is not sufficient for every fault"
 
@@ -31,6 +33,21 @@ build a policy that assigns `Response::ClampAndContinue` to `NonFiniteObservatio
 `StaleObservation`, `CommunicationsLost`, `NonFiniteCommand` or
 `ActuationNotPermitted`. A caller that tries gets a `PolicyError` back, not a
 policy that silently does the wrong thing on a robot.
+
+## Faults beyond fixed limits
+
+Four checks join the original ten categories:
+- **`TorqueSpeedExceeded`.** It shares the torque category, so the
+  response is the clamp, now to the lower available torque.
+- **`SustainedSaturation`.** The conservative default holds the last safe
+  command.
+- **`ContactEnergyExceeded` and `InterlockOpen`.** These are added to the
+  categories a policy may not answer with a clamp: an exhausted energy
+  budget and an open interlock are stop conditions (§12.2, §12.3).
+
+The interlock check runs only with an envelope monitor installed, because
+something must report which interlocks are closed. A test shows
+`hw-supported` stopping when `ReducedEnvelope` is not reported.
 
 ## Allocation discipline
 
@@ -56,9 +73,17 @@ using such a semantics needs its own bounding logic upstream, because
 bounding a residual or a latent vector requires the reference or decoder the
 supervisor deliberately has no access to.
 
+## What is not here
+
+- **Recorded fault traces.** The tests drive the supervisor with synthetic
+  traces, tick by tick. No recorded fault data exists to replay yet.
+- **The hardware emergency stop itself.** §12.3 requires it to work with
+  the host off. That is wiring and firmware, tested on the robot, and
+  nothing in this crate can stand in for it.
+
 ## Testing
 
-`cargo test -p robot-supervisor` — 21 tests: the escalation rule's
+`cargo test -p robot-supervisor`: 27 tests (the original 21, plus the torque-speed and thermal clamp, sustained saturation, contact energy and open-interlock stops, and the hazard register rules): the escalation rule's
 construction-time refusal (including the "custom policy may still choose any
 non-clamp response freely" positive case), clamping arithmetic, every
 escalation path (stale observation, non-finite command, unauthorized

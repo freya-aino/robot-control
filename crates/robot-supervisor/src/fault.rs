@@ -90,6 +90,37 @@ pub enum Fault {
         /// The mode at the time.
         mode: robot_types::mode::OperatingMode,
     },
+    /// A torque command exceeds what the actuator supplies at the measured
+    /// speed and temperature (torque-speed envelope, thermal derating).
+    TorqueSpeedExceeded {
+        /// The joint.
+        joint: JointId,
+        /// Commanded torque.
+        commanded: NewtonMetres,
+        /// Torque available now.
+        available: NewtonMetres,
+    },
+    /// A joint's command has been clamped for too many consecutive ticks.
+    SustainedSaturation {
+        /// The joint.
+        joint: JointId,
+        /// Consecutive clamped ticks.
+        ticks: u32,
+    },
+    /// A contact site has used more energy than its budget allows.
+    ContactEnergyExceeded {
+        /// The site.
+        site: ContactSiteId,
+        /// Energy delivered so far, joules.
+        energy: f64,
+        /// The budget, joules.
+        budget: f64,
+    },
+    /// An interlock the current mode requires is not closed.
+    InterlockOpen {
+        /// The interlock.
+        interlock: robot_types::mode::Interlock,
+    },
 }
 
 /// The category of a fault, discarding its payload. Used to look up the
@@ -117,6 +148,12 @@ pub enum FaultCategory {
     UnauthorizedContact,
     /// See [`Fault::ActuationNotPermitted`].
     ActuationNotPermitted,
+    /// See [`Fault::SustainedSaturation`].
+    SustainedSaturation,
+    /// See [`Fault::ContactEnergyExceeded`].
+    ContactEnergyExceeded,
+    /// See [`Fault::InterlockOpen`].
+    InterlockOpen,
 }
 
 impl Fault {
@@ -134,6 +171,10 @@ impl Fault {
             Self::CommunicationsLost { .. } => FaultCategory::CommunicationsLost,
             Self::UnauthorizedContact { .. } => FaultCategory::UnauthorizedContact,
             Self::ActuationNotPermitted { .. } => FaultCategory::ActuationNotPermitted,
+            Self::TorqueSpeedExceeded { .. } => FaultCategory::TorqueLimitExceeded,
+            Self::SustainedSaturation { .. } => FaultCategory::SustainedSaturation,
+            Self::ContactEnergyExceeded { .. } => FaultCategory::ContactEnergyExceeded,
+            Self::InterlockOpen { .. } => FaultCategory::InterlockOpen,
         }
     }
 }
@@ -160,10 +201,18 @@ pub fn excess_magnitude(fault: &Fault) -> Option<f64> {
         Fault::OverTemperature {
             measured, limit, ..
         } => Some((measured.value() - limit.value()).max(0.0)),
+        Fault::TorqueSpeedExceeded {
+            commanded,
+            available,
+            ..
+        } => Some((commanded.value().abs() - available.value()).max(0.0)),
+        Fault::ContactEnergyExceeded { energy, budget, .. } => Some((energy - budget).max(0.0)),
         Fault::NonFiniteObservation { .. }
         | Fault::NonFiniteCommand { .. }
         | Fault::UnauthorizedContact { .. }
-        | Fault::ActuationNotPermitted { .. } => None,
+        | Fault::ActuationNotPermitted { .. }
+        | Fault::SustainedSaturation { .. }
+        | Fault::InterlockOpen { .. } => None,
     }
 }
 
