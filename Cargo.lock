@@ -2173,7 +2173,11 @@ dependencies = [
 name = "motion-validate"
 version = "0.1.0"
 dependencies = [
+ "motion-process",
+ "motion-retarget",
+ "robot-artifacts",
  "robot-model",
+ "robot-sim",
  "robot-types",
 ]
 

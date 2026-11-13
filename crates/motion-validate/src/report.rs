@@ -2,114 +2,213 @@
 //!
 //! SPECS.md Section 8.3: "A validation report must separate kinematic
 //! error, dynamics violations, contact consistency and task success."
-//! [`ValidationReport`] has one field per concern — never a single pass/fail
-//! bit — and "No universal fidelity percentage is a release criterion"
+//! [`ValidationReport`] has one field per concern, never a single pass/fail
+//! bit, and "No universal fidelity percentage is a release criterion"
 //! (same section): [`AcceptanceThresholds`] is a value the caller supplies
 //! per robot and task, not a constant this crate bakes in.
+//!
+//! A rejection names every violating frame, not only the first, and every
+//! [`RejectionReason`] has a stable [`RejectionReason::code`] so a curation
+//! manifest can retain rejected examples "with machine-readable reasons"
+//! (Section 8.2 item 9).
 
 use core::fmt;
 use robot_model::joint::JointSpec;
 use robot_types::units::Radians;
 
-/// Per-sample kinematic error for one retargeted frame.
-#[derive(Clone, Copy, Debug)]
+use crate::contact::ContactFrame;
+use crate::dynamics::TorqueExcess;
+use crate::tracking::TrackingResult;
+
+/// Kinematic error at one frame.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct KinematicError {
-    /// Endpoint position error, normalized by a body-size reference length
-    /// (SPECS.md Section 8.3: "Measure endpoint error normalized by body
-    /// size").
+    /// Worst mapped-endpoint error divided by body size.
     pub normalized_endpoint_error: f64,
-    /// Root drift from the reference trajectory's root position, in metres.
+    /// Horizontal distance of the base from the scaled human root, metres.
     pub root_drift: f64,
-    /// Planted-foot slip distance, in metres, where a foot was expected
-    /// planted; `None` when no contact constraint applied this frame.
+    /// Worst planted-foot slip, metres; `None` with no foot planted.
     pub planted_foot_slip: Option<f64>,
 }
 
-/// Per-sample joint-limit and actuator-feasibility violations.
-#[derive(Clone, Debug, Default)]
+/// Limit violations at one frame.
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct DynamicsViolation {
-    /// Joints whose commanded position exceeded their range, with the
-    /// excess in radians.
+    /// `(joint, excess)` beyond the position range.
     pub position_limit_excess: Vec<(usize, Radians)>,
-    /// Joints whose implied velocity (finite-differenced between frames)
-    /// exceeded their rated limit, with the excess in rad/s.
+    /// `(joint, speed)` beyond the velocity limit.
     pub velocity_limit_excess: Vec<(usize, f64)>,
+    /// Torques beyond the actuator's torque-speed envelope.
+    pub torque_excess: Vec<TorqueExcess>,
 }
 
 impl DynamicsViolation {
-    /// Whether any violation was recorded.
+    /// Whether no limit was exceeded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.position_limit_excess.is_empty() && self.velocity_limit_excess.is_empty()
+        self.position_limit_excess.is_empty()
+            && self.velocity_limit_excess.is_empty()
+            && self.torque_excess.is_empty()
     }
 }
 
-/// The full report for one retargeted motion.
-#[derive(Clone, Debug)]
+/// Per-joint summaries over the whole reference.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct DynamicsSummary {
+    /// Peak |acceleration| per joint.
+    pub peak_acceleration: Vec<f64>,
+    /// RMS jerk per joint: the temporal smoothness of SPECS.md Section 8.2
+    /// item 8.
+    pub rms_jerk: Vec<f64>,
+    /// Peak |torque| per joint.
+    pub peak_torque: Vec<f64>,
+}
+
+/// The full validation report.
+#[derive(Clone, PartialEq, Debug)]
 pub struct ValidationReport {
-    /// Per-frame kinematic error.
+    /// Kinematic error per frame.
     pub kinematic: Vec<KinematicError>,
-    /// Per-frame dynamics violations.
+    /// Limit violations per frame.
     pub dynamics: Vec<DynamicsViolation>,
-    /// Frames where a contact constraint was inconsistent with the
-    /// resulting pose (e.g. a planted foot slipped beyond tolerance).
+    /// Per-joint dynamics summaries.
+    pub summary: DynamicsSummary,
+    /// Contact consistency per frame.
+    pub contact: Vec<ContactFrame>,
+    /// Frames with any contact inconsistency.
     pub contact_inconsistent_frames: Vec<usize>,
-    /// Whether downstream tracking (a separate, later measurement this
-    /// report does not itself perform) is required before acceptance.
-    /// Recorded as a reminder, not a result: SPECS.md Section 8.3 measures
-    /// "downstream tracking success per skill and embodiment" separately
-    /// from the kinematic/dynamics checks this report covers.
+    /// Simulated tracking, when it was run.
+    pub tracking: Option<TrackingResult>,
+    /// Whether the report still lacks a tracking evaluation.
     pub requires_tracking_evaluation: bool,
 }
 
-/// Per-robot, per-task acceptance thresholds — a versioned artifact under
-/// SPECS.md Section 14, supplied by the caller rather than assumed.
-#[derive(Clone, Copy, Debug)]
+/// What the caller accepts. Every field is the caller's choice.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct AcceptanceThresholds {
-    /// Maximum acceptable normalized endpoint error.
+    /// Largest normalized endpoint error.
     pub max_normalized_endpoint_error: f64,
-    /// Maximum acceptable planted-foot slip, in metres.
+    /// Largest planted-foot slip, metres.
     pub max_planted_foot_slip: f64,
-    /// Whether any joint-limit violation at all is acceptable.
+    /// Largest root drift, metres.
+    pub max_root_drift: f64,
+    /// Accept position and velocity limit violations.
     pub allow_limit_violations: bool,
+    /// Accept torque-speed envelope violations.
+    pub allow_torque_violations: bool,
+    /// Accept contact inconsistencies.
+    pub allow_contact_inconsistency: bool,
+    /// Largest RMS joint tracking error of any labelled skill, radians.
+    pub max_tracking_rms: f64,
+    /// Refuse a report with no tracking evaluation.
+    pub require_tracking: bool,
 }
 
-/// The accept/reject outcome, with the specific reason(s) for a rejection —
-/// never a bare boolean, so a rejected motion's report says why.
-#[derive(Clone, Debug)]
+/// Accept or reject.
+#[derive(Clone, PartialEq, Debug)]
 pub enum Verdict {
-    /// Every threshold was met.
+    /// Every check passed.
     Accepted,
-    /// At least one threshold was not met.
+    /// Every reason found.
     Rejected(Vec<RejectionReason>),
 }
 
-/// One reason a motion was rejected.
-#[derive(Clone, Debug)]
+/// Why a reference was rejected.
+#[derive(Clone, PartialEq, Debug)]
 pub enum RejectionReason {
-    /// A frame's normalized endpoint error exceeded the threshold.
+    /// Endpoint error over the threshold.
     EndpointError {
-        /// The frame.
+        /// Frame.
         frame: usize,
-        /// The measured value.
+        /// Value.
         value: f64,
-        /// The threshold it exceeded.
+        /// Threshold.
         threshold: f64,
     },
-    /// A frame's planted-foot slip exceeded the threshold.
+    /// Planted-foot slip over the threshold.
     FootSlip {
-        /// The frame.
+        /// Frame.
         frame: usize,
-        /// The measured value.
+        /// Value.
         value: f64,
-        /// The threshold it exceeded.
+        /// Threshold.
         threshold: f64,
     },
-    /// A frame had a joint-limit violation and the thresholds forbid any.
+    /// Root drift over the threshold.
+    RootDrift {
+        /// Frame.
+        frame: usize,
+        /// Value.
+        value: f64,
+        /// Threshold.
+        threshold: f64,
+    },
+    /// A position or velocity limit was exceeded.
     LimitViolation {
-        /// The frame.
+        /// Frame.
         frame: usize,
     },
+    /// A torque-speed envelope was exceeded.
+    TorqueViolation {
+        /// Frame.
+        frame: usize,
+        /// Worst required over available ratio.
+        value: f64,
+    },
+    /// Labels, geometry or dynamics disagreed about contact.
+    ContactInconsistent {
+        /// Frame.
+        frame: usize,
+    },
+    /// A labelled skill was not tracked well enough.
+    TrackingFailed {
+        /// The label.
+        label: String,
+        /// Its RMS joint error.
+        value: f64,
+        /// Threshold.
+        threshold: f64,
+    },
+    /// The robot fell while tracking.
+    Fell {
+        /// Frame.
+        frame: usize,
+    },
+    /// Tracking was required and not run.
+    TrackingMissing,
+}
+
+impl RejectionReason {
+    /// A stable machine-readable code.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::EndpointError { .. } => "endpoint_error",
+            Self::FootSlip { .. } => "foot_slip",
+            Self::RootDrift { .. } => "root_drift",
+            Self::LimitViolation { .. } => "limit_violation",
+            Self::TorqueViolation { .. } => "torque_violation",
+            Self::ContactInconsistent { .. } => "contact_inconsistent",
+            Self::TrackingFailed { .. } => "tracking_failed",
+            Self::Fell { .. } => "fell",
+            Self::TrackingMissing => "tracking_missing",
+        }
+    }
+
+    /// The frame the reason applies to, if it is frame-specific.
+    #[must_use]
+    pub const fn frame(&self) -> Option<usize> {
+        match self {
+            Self::EndpointError { frame, .. }
+            | Self::FootSlip { frame, .. }
+            | Self::RootDrift { frame, .. }
+            | Self::LimitViolation { frame }
+            | Self::TorqueViolation { frame, .. }
+            | Self::ContactInconsistent { frame }
+            | Self::Fell { frame } => Some(*frame),
+            Self::TrackingFailed { .. } | Self::TrackingMissing => None,
+        }
+    }
 }
 
 impl fmt::Display for RejectionReason {
@@ -119,30 +218,47 @@ impl fmt::Display for RejectionReason {
                 frame,
                 value,
                 threshold,
-            } => {
-                write!(
-                    f,
-                    "frame {frame}: endpoint error {value} exceeds threshold {threshold}"
-                )
-            }
+            } => write!(
+                f,
+                "frame {frame}: endpoint error {value} exceeds threshold {threshold}"
+            ),
             Self::FootSlip {
                 frame,
                 value,
                 threshold,
-            } => {
-                write!(
-                    f,
-                    "frame {frame}: foot slip {value} exceeds threshold {threshold}"
-                )
-            }
+            } => write!(
+                f,
+                "frame {frame}: foot slip {value} exceeds threshold {threshold}"
+            ),
+            Self::RootDrift {
+                frame,
+                value,
+                threshold,
+            } => write!(
+                f,
+                "frame {frame}: root drift {value} exceeds threshold {threshold}"
+            ),
             Self::LimitViolation { frame } => write!(f, "frame {frame}: joint-limit violation"),
+            Self::TorqueViolation { frame, value } => {
+                write!(f, "frame {frame}: torque {value}x the available envelope")
+            }
+            Self::ContactInconsistent { frame } => write!(f, "frame {frame}: contact inconsistent"),
+            Self::TrackingFailed {
+                label,
+                value,
+                threshold,
+            } => write!(
+                f,
+                "skill {label}: tracking RMS {value} exceeds threshold {threshold}"
+            ),
+            Self::Fell { frame } => write!(f, "frame {frame}: fell while tracking"),
+            Self::TrackingMissing => f.write_str("tracking evaluation required but not run"),
         }
     }
 }
 
 impl ValidationReport {
-    /// Checks every frame against `thresholds`, returning the verdict with
-    /// every violating frame named — not just the first.
+    /// Evaluates the report against `thresholds`.
     #[must_use]
     pub fn evaluate(&self, thresholds: &AcceptanceThresholds) -> Verdict {
         let mut reasons = Vec::new();
@@ -163,13 +279,54 @@ impl ValidationReport {
                     });
                 }
             }
+            if k.root_drift > thresholds.max_root_drift {
+                reasons.push(RejectionReason::RootDrift {
+                    frame: i,
+                    value: k.root_drift,
+                    threshold: thresholds.max_root_drift,
+                });
+            }
         }
-        if !thresholds.allow_limit_violations {
-            for (i, d) in self.dynamics.iter().enumerate() {
-                if !d.is_empty() {
-                    reasons.push(RejectionReason::LimitViolation { frame: i });
+        for (i, d) in self.dynamics.iter().enumerate() {
+            if !thresholds.allow_limit_violations
+                && !(d.position_limit_excess.is_empty() && d.velocity_limit_excess.is_empty())
+            {
+                reasons.push(RejectionReason::LimitViolation { frame: i });
+            }
+            if !thresholds.allow_torque_violations && !d.torque_excess.is_empty() {
+                let worst = d
+                    .torque_excess
+                    .iter()
+                    .map(|t| t.required.abs() / t.available.max(f64::MIN_POSITIVE))
+                    .fold(0.0, f64::max);
+                reasons.push(RejectionReason::TorqueViolation {
+                    frame: i,
+                    value: worst,
+                });
+            }
+        }
+        if !thresholds.allow_contact_inconsistency {
+            for &frame in &self.contact_inconsistent_frames {
+                reasons.push(RejectionReason::ContactInconsistent { frame });
+            }
+        }
+        match &self.tracking {
+            Some(t) => {
+                if let Some(frame) = t.fell_at {
+                    reasons.push(RejectionReason::Fell { frame });
+                }
+                for s in &t.per_label {
+                    if s.joint_rms > thresholds.max_tracking_rms {
+                        reasons.push(RejectionReason::TrackingFailed {
+                            label: s.label.clone(),
+                            value: s.joint_rms,
+                            threshold: thresholds.max_tracking_rms,
+                        });
+                    }
                 }
             }
+            None if thresholds.require_tracking => reasons.push(RejectionReason::TrackingMissing),
+            None => {}
         }
         if reasons.is_empty() {
             Verdict::Accepted
@@ -179,8 +336,7 @@ impl ValidationReport {
     }
 }
 
-/// Checks one frame's joint values against `joints`' declared limits,
-/// building the [`DynamicsViolation`] record.
+/// Checks `values` against each joint's declared position range.
 #[must_use]
 pub fn check_position_limits(joints: &[JointSpec], values: &[f64]) -> DynamicsViolation {
     let mut violation = DynamicsViolation::default();
@@ -199,6 +355,12 @@ pub fn check_position_limits(joints: &[JointSpec], values: &[f64]) -> DynamicsVi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracking::SkillTracking;
+    use robot_model::joint::{JointKind, JointLimits};
+    use robot_model::pose::RigidPose;
+    use robot_types::frames::Vec3;
+    use robot_types::ids::{JointId, LinkId, Name};
+    use robot_types::units::{NewtonMetres, RadiansPerSecond, Range};
 
     fn report(endpoint_errors: &[f64]) -> ValidationReport {
         ValidationReport {
@@ -210,45 +372,93 @@ mod tests {
                     planted_foot_slip: None,
                 })
                 .collect(),
-            dynamics: vec![DynamicsViolation::default(); endpoint_errors.len()],
+            dynamics: Vec::new(),
+            summary: DynamicsSummary::default(),
+            contact: Vec::new(),
             contact_inconsistent_frames: Vec::new(),
+            tracking: None,
             requires_tracking_evaluation: true,
+        }
+    }
+
+    fn thresholds() -> AcceptanceThresholds {
+        AcceptanceThresholds {
+            max_normalized_endpoint_error: 0.05,
+            max_planted_foot_slip: 0.02,
+            max_root_drift: 0.1,
+            allow_limit_violations: false,
+            allow_torque_violations: false,
+            allow_contact_inconsistency: false,
+            max_tracking_rms: 0.05,
+            require_tracking: false,
         }
     }
 
     #[test]
     fn within_threshold_is_accepted() {
-        let r = report(&[0.01, 0.02, 0.015]);
-        let thresholds = AcceptanceThresholds {
-            max_normalized_endpoint_error: 0.05,
-            max_planted_foot_slip: 0.01,
-            allow_limit_violations: false,
-        };
-        assert!(matches!(r.evaluate(&thresholds), Verdict::Accepted));
+        assert_eq!(
+            report(&[0.01, 0.02]).evaluate(&thresholds()),
+            Verdict::Accepted
+        );
     }
 
     #[test]
     fn a_rejection_names_every_violating_frame_not_just_the_first() {
-        let r = report(&[0.01, 0.2, 0.3]);
-        let thresholds = AcceptanceThresholds {
-            max_normalized_endpoint_error: 0.05,
-            max_planted_foot_slip: 0.01,
-            allow_limit_violations: false,
+        let Verdict::Rejected(reasons) = report(&[0.1, 0.01, 0.2]).evaluate(&thresholds()) else {
+            panic!("expected rejection");
         };
-        let Verdict::Rejected(reasons) = r.evaluate(&thresholds) else {
-            panic!("expected rejection")
+        let frames: Vec<_> = reasons.iter().filter_map(RejectionReason::frame).collect();
+        assert_eq!(frames, vec![0, 2]);
+        assert!(reasons.iter().all(|r| r.code() == "endpoint_error"));
+    }
+
+    #[test]
+    fn tracking_is_judged_per_skill_and_its_absence_can_be_refused() {
+        let mut r = report(&[0.0]);
+        let strict = AcceptanceThresholds {
+            require_tracking: true,
+            ..thresholds()
         };
-        assert_eq!(reasons.len(), 2);
+        assert_eq!(
+            r.evaluate(&strict),
+            Verdict::Rejected(vec![RejectionReason::TrackingMissing])
+        );
+        r.tracking = Some(TrackingResult {
+            joint_rms: vec![0.0, 0.2],
+            base_error: vec![0.0, 0.0],
+            fell_at: None,
+            per_label: vec![
+                SkillTracking {
+                    label: "jab".into(),
+                    start: 0,
+                    end: 1,
+                    joint_rms: 0.01,
+                    max_base_error: 0.0,
+                    fell: false,
+                },
+                SkillTracking {
+                    label: "hook".into(),
+                    start: 1,
+                    end: 2,
+                    joint_rms: 0.2,
+                    max_base_error: 0.0,
+                    fell: false,
+                },
+            ],
+            steps: 2,
+            controller: "pd",
+        });
+        let Verdict::Rejected(reasons) = r.evaluate(&strict) else {
+            panic!()
+        };
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            matches!(&reasons[0], RejectionReason::TrackingFailed { label, .. } if label == "hook")
+        );
     }
 
     #[test]
     fn limit_violations_are_checked_against_the_declared_range() {
-        use robot_model::joint::{JointKind, JointLimits};
-        use robot_model::pose::RigidPose;
-        use robot_types::frames::Vec3;
-        use robot_types::ids::{JointId, LinkId, Name};
-        use robot_types::units::{NewtonMetres, RadiansPerSecond, Range};
-
         let joint = JointSpec {
             id: JointId::new(0),
             name: Name::new("j").unwrap(),
@@ -260,14 +470,15 @@ mod tests {
             limits: JointLimits::bounded(
                 Range::<Radians>::new(Radians(-1.0), Radians(1.0)).unwrap(),
                 RadiansPerSecond(5.0),
-                NewtonMetres(5.0),
+                NewtonMetres(10.0),
             ),
             sign: 1.0,
             zero_offset: 0.0,
         };
-        let violation = check_position_limits(&[joint], &[1.5]);
-        assert_eq!(violation.position_limit_excess.len(), 1);
-        assert!((violation.position_limit_excess[0].1.value() - 0.5).abs() < 1e-12);
-        assert!(!violation.is_empty());
+        let ok = check_position_limits(core::slice::from_ref(&joint), &[0.5]);
+        assert!(ok.is_empty());
+        let bad = check_position_limits(&[joint], &[1.5]);
+        assert_eq!(bad.position_limit_excess.len(), 1);
+        assert!((bad.position_limit_excess[0].1.value() - 0.5).abs() < 1e-12);
     }
 }

@@ -10,4 +10,14 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod contact;
+pub mod dynamics;
+pub mod kinematic;
+pub mod package;
 pub mod report;
+pub mod tracking;
+pub mod trajectory;
+pub mod validate;
+
+#[cfg(test)]
+mod test_support;
