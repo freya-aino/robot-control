@@ -11,15 +11,19 @@
 //! sensor-to-command age, decision age, deadline margin — as separate
 //! fields, per that section's explicit prohibition on collapsing them.
 //!
-//! This revision implements the policy tier only. The tactical tier
-//! (`robot-skills`) is a declared dependency but not yet wired into
-//! `tick`'s decision path — seeing this stated plainly here is the point of
-//! `control_loop`'s own module documentation.
+//! Two tiers run in one loop: the policy tier in `tick`, and the tactical
+//! tier of [`tactical`] as a `LoopOperation` at its own rate, whose
+//! proposals reach the policy tier as expiring, timestamped records.
+//! Temperature and contact feedback reach the supervisor through
+//! `ControlLoop::with_sensors`, contacts classified by `robot-perception`.
+//! [`incident`] is the reserved safety-event channel.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
 pub mod control_loop;
+pub mod incident;
 pub mod operation;
+pub mod tactical;
 pub mod timing;

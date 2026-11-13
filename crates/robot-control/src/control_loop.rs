@@ -8,26 +8,26 @@
 //! [`ControlLoop::tick`] touches none of its own buffers' capacity, only
 //! their contents.
 //!
-//! This is a policy-tier loop only in this revision: it runs inference,
-//! supervision and transmission every tick. The tactical tier
-//! (`robot_skills::tiers::Router`) is not part of this loop: the struct
-//! holds no router and nothing on the tick path consults one — that
-//! integration, and the per-tier compute-duration/decision-age split
-//! SPECS.md Section 5.1 asks for across *two* learned tiers, is future
-//! work this module does not claim. What is implemented — the policy tier's own timing split
-//! (compute duration, sensor-to-command age, deadline margin) — is real and
-//! tested.
+//! The loop runs the policy tier every tick. An upper tier attaches as a
+//! [`LoopOperation`]: the loop tells it the time
+//! ([`LoopOperation::observe_time`]) and records the age of the decision it
+//! applied ([`LoopOperation::decision_age`]) as the tick's decision age, so
+//! the two tiers' timing stays separate (SPECS.md Section 5.1).
+//! `crate::tactical::TacticalOperation` is that tier for the skill router.
 
 use crate::operation::{LoopOperation, NoOp, TickView, WidthMismatch};
 use crate::timing::TickTiming;
 use robot_hardware::device::HardwareAdapter;
 use robot_nn::mlp::{Mlp, MlpError, Scratch};
 use robot_nn::policy::Policy;
+use robot_perception::contact::ContactClassifier;
 use robot_supervisor::policy::Response;
 use robot_supervisor::supervisor::{FreshnessLimits, Supervisor, TickInput};
+use robot_types::ids::ContactSiteId;
 use robot_types::mode::OperatingMode;
 use robot_types::obs::{Normalizer, VectorError};
 use robot_types::time::{Duration, MonotonicClock, Timestamp};
+use robot_types::units::{Celsius, Newtons};
 
 /// Why a tick could not run to completion.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,6 +114,13 @@ pub enum ConfigError {
         /// The adapter's width.
         found: usize,
     },
+    /// A sensor tap indexes past the feedback width.
+    SensorTap {
+        /// The tap index.
+        index: usize,
+        /// The feedback width.
+        width: usize,
+    },
 }
 
 /// Which policy width a single-width hardware adapter must match.
@@ -128,6 +135,12 @@ pub enum AdapterComponent {
 impl core::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::SensorTap { index, width } => {
+                write!(
+                    f,
+                    "sensor tap index {index} is past the feedback width {width}"
+                )
+            }
             Self::Normalizer { expected, found } => {
                 write!(f, "normalizer width is {found}, policy consumes {expected}")
             }
@@ -203,6 +216,33 @@ pub struct ControlLoop<
     raw_action: Vec<f64>,
     command: Vec<f64>,
     last_feedback_time: Option<Timestamp>,
+
+    // Sensor taps into the feedback vector (see `with_sensors`); the
+    // buffers are sized there and only cleared and refilled per tick.
+    temperature_taps: Vec<usize>,
+    temperatures: Vec<Celsius>,
+    contact_taps: Vec<(ContactSiteId, usize, ContactClassifier)>,
+    active_contacts: Vec<ContactSiteId>,
+    permitted_contacts: Vec<ContactSiteId>,
+}
+
+/// Which feedback entries carry supervisor inputs.
+///
+/// Before this, the loop passed the supervisor empty temperature and
+/// contact lists, so its thermal and contact checks never saw data. A
+/// temperature tap names the feedback index of an actuator temperature, in
+/// profile actuator order; a contact tap names the feedback index of a
+/// site's normal force, classified with hysteresis by
+/// `robot_perception::contact::ContactClassifier`.
+#[derive(Clone, Debug)]
+pub struct SensorTaps {
+    /// Feedback indices of actuator temperatures, degrees Celsius.
+    pub temperatures: Vec<usize>,
+    /// Contact sites, the feedback index of each one's normal force, and
+    /// its classifier.
+    pub contacts: Vec<(ContactSiteId, usize, ContactClassifier)>,
+    /// Sites the current mode permits to be in contact.
+    pub permitted_contacts: Vec<ContactSiteId>,
 }
 
 impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy>
@@ -306,6 +346,11 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
             raw_action: vec![0.0; action_width],
             command: vec![0.0; action_width],
             last_feedback_time: None,
+            temperature_taps: Vec::new(),
+            temperatures: Vec::new(),
+            contact_taps: Vec::new(),
+            active_contacts: Vec::new(),
+            permitted_contacts: Vec::new(),
         })
     }
 
@@ -328,6 +373,47 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
         &mut self.operation
     }
 
+    /// Wires temperature and contact feedback into the supervisor. Taps
+    /// that index past the feedback width are refused here, not on the
+    /// first tick.
+    pub fn with_sensors(mut self, taps: SensorTaps) -> Result<Self, ConfigError> {
+        let width = self.feedback.len();
+        if let Some(&i) = taps
+            .temperatures
+            .iter()
+            .chain(taps.contacts.iter().map(|(_, i, _)| i))
+            .find(|&&i| i >= width)
+        {
+            return Err(ConfigError::SensorTap { index: i, width });
+        }
+        self.temperatures = Vec::with_capacity(taps.temperatures.len());
+        self.active_contacts = Vec::with_capacity(taps.contacts.len());
+        self.temperature_taps = taps.temperatures;
+        self.contact_taps = taps.contacts;
+        self.permitted_contacts = taps.permitted_contacts;
+        Ok(self)
+    }
+
+    /// Contact sites classified in contact on the last tick.
+    #[must_use]
+    pub fn active_contacts(&self) -> &[ContactSiteId] {
+        &self.active_contacts
+    }
+
+    fn read_sensors(&mut self) {
+        self.temperatures.clear();
+        for &i in &self.temperature_taps {
+            self.temperatures.push(Celsius(self.feedback[i]));
+        }
+        self.active_contacts.clear();
+        for (site, i, classifier) in &mut self.contact_taps {
+            let (in_contact, _) = classifier.update(Newtons(self.feedback[*i]));
+            if in_contact {
+                self.active_contacts.push(*site);
+            }
+        }
+    }
+
     /// Checks `raw_action` against the supervisor and transmits the resulting
     /// command. A transmission error takes precedence over any earlier error
     /// from the same tick; the supervisor's fault log still records what
@@ -343,9 +429,9 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
             observation_age: observation_age
                 .unwrap_or(self.observation_freshness_limit + Duration::from_nanos(1)),
             comms_age,
-            temperatures: &[],
-            active_contacts: &[],
-            permitted_contacts: &[],
+            temperatures: &self.temperatures,
+            active_contacts: &self.active_contacts,
+            permitted_contacts: &self.permitted_contacts,
         };
         let response: Response = self
             .supervisor
@@ -399,9 +485,9 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
             observation_age: observation_age
                 .unwrap_or(self.observation_freshness_limit + Duration::from_nanos(1)),
             comms_age: self.adapter.link_age(now).unwrap_or(Duration::ZERO),
-            temperatures: &[],
-            active_contacts: &[],
-            permitted_contacts: &[],
+            temperatures: &self.temperatures,
+            active_contacts: &self.active_contacts,
+            permitted_contacts: &self.permitted_contacts,
         };
         self.supervisor
             .reject_observation(&supervisor_input, index, &mut self.command)
@@ -438,6 +524,7 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
         if let Some(header) = feedback_header {
             self.last_feedback_time = Some(header.timestamp);
         }
+        self.read_sensors();
 
         let observation_age = match self.last_feedback_time {
             Some(t) => now.since(t).ok().map(|(age, _)| age),
@@ -459,6 +546,7 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
             });
         }
 
+        self.operation.observe_time(now);
         self.operation.before_tick(&self.normalized);
         let log_prob = match self.operation.select_action(
             &self.policy,
@@ -497,7 +585,7 @@ impl<A: HardwareAdapter, C: MonotonicClock, const N: usize, P: Policy, O: LoopOp
         Ok(TickTiming {
             compute_duration,
             sensor_to_command_age,
-            decision_age: None,
+            decision_age: self.operation.decision_age(compute_end),
             deadline_margin: self.budget - compute_duration,
         })
     }
@@ -868,6 +956,15 @@ mod tests {
         operation: O,
         feedback: [f64; 2],
     ) -> ControlLoop<ReplayDevice, SteppedClock, 8, P, O> {
+        build_loop_with_replay_in(OperatingMode::HwSupported, policy, operation, feedback)
+    }
+
+    fn build_loop_with_replay_in<P: Policy, O: LoopOperation<P>>(
+        mode: OperatingMode,
+        policy: P,
+        operation: O,
+        feedback: [f64; 2],
+    ) -> ControlLoop<ReplayDevice, SteppedClock, 8, P, O> {
         let profile = two_joint_profile();
         let supervisor = Supervisor::new(
             &profile,
@@ -894,7 +991,7 @@ mod tests {
                 supervisor,
                 adapter,
                 clock: SteppedClock::new(0, ClockId::Simulation),
-                mode: OperatingMode::HwSupported,
+                mode,
                 budget: Duration::from_millis(8),
                 freshness: FreshnessLimits {
                     observation: Duration::from_millis(50),
@@ -903,6 +1000,137 @@ mod tests {
             },
             operation,
         )
+    }
+
+    #[test]
+    fn the_tactical_tier_runs_inside_the_loop_and_reports_decision_age() {
+        use crate::tactical::{SkillBank, TacticalConfig, TacticalOperation};
+        use robot_skills::descriptor::{EmbeddingVersion, SkillDescriptor, SkillId};
+        use robot_skills::index::ExactIndex;
+        use robot_skills::selection::{
+            FeasibilityState, GuardTable, Selector, SelectorConfig, Stance,
+        };
+        use robot_skills::tiers::{Router, WorkingSet};
+        use robot_types::ids::Name;
+        use robot_types::tier::Generation;
+
+        let skill = |id: u32| SkillDescriptor {
+            id: SkillId(id),
+            name: Name::new(&format!("s{id}")).unwrap(),
+            tags: Vec::new(),
+            embedding: vec![0.0],
+            embedding_version: EmbeddingVersion(1),
+            embodiment_compatibility: Vec::new(),
+            initiation_guards: Vec::new(),
+            termination_condition: Name::new("done").unwrap(),
+            expected_duration: Duration::from_millis(100),
+            assumes_ground_contact: true,
+            supported_disturbances: Vec::new(),
+            inference_memory_bytes: 0,
+            outgoing_transitions: Vec::new(),
+        };
+        fn features(obs: &[f64], out: &mut [f64]) {
+            out[0] = obs[0];
+        }
+        fn feasible(_: &[f64]) -> FeasibilityState {
+            FeasibilityState {
+                stance: Stance::Double,
+                joint_speed_fraction: 0.0,
+                support_available: false,
+                actuator_health: 1.0,
+                opponent_distance: None,
+                falling: false,
+            }
+        }
+        let mut router = Router::new();
+        router.install(WorkingSet::new(
+            Generation(2),
+            ExactIndex::build(1, vec![(SkillId(1), vec![0.0])]).unwrap(),
+            vec![SkillId(1)],
+        ));
+        let selector = Selector::new(
+            SelectorConfig {
+                ood_distance: 100.0,
+                min_margin: 0.0,
+                hysteresis: 0.0,
+                min_dwell_ns: 0,
+                proposal_ttl_ns: 100_000_000,
+                recovery: None,
+            },
+            vec![skill(1)],
+            GuardTable::default(),
+            1,
+        );
+        let op = TacticalOperation::new(
+            TacticalConfig {
+                policy_period: Duration::from_millis(10),
+                tactical_period: Duration::from_millis(40),
+                proposal_ttl: Duration::from_millis(100),
+            },
+            selector,
+            router,
+            1,
+            features,
+            feasible,
+        )
+        .unwrap();
+        let bank = SkillBank::new(vec![(SkillId(1), identity_policy())], SkillId(1)).unwrap();
+        let mut loop_ =
+            build_loop_with_replay_in(OperatingMode::OfflineReplay, bank, op, [0.1, 0.2]);
+        let timing = loop_.tick().unwrap();
+        assert!(timing.decision_age.is_some());
+        assert_eq!(loop_.operation().stats.decisions, 1);
+    }
+
+    #[test]
+    fn a_temperature_tap_reaches_the_supervisor() {
+        let mut loop_ =
+            build_loop_with_replay(identity_policy(), crate::operation::NoOp, [500.0, 0.0])
+                .with_sensors(SensorTaps {
+                    temperatures: vec![0, 1],
+                    contacts: Vec::new(),
+                    permitted_contacts: Vec::new(),
+                })
+                .unwrap();
+        let _ = loop_.tick();
+        let over = loop_
+            .supervisor_log()
+            .entries()
+            .iter()
+            .flatten()
+            .any(|f| matches!(f, robot_supervisor::fault::Fault::OverTemperature { .. }));
+        assert!(over, "{:?}", loop_.supervisor_log().entries());
+    }
+
+    #[test]
+    fn a_contact_tap_classifies_with_hysteresis_and_a_bad_tap_is_refused() {
+        use robot_perception::contact::{ContactClassifier, ContactThresholds};
+        use robot_types::units::Newtons;
+        let site = ContactSiteId::new(3);
+        let classifier = ContactClassifier::new(
+            site,
+            ContactThresholds::new(Newtons(20.0), Newtons(5.0)).unwrap(),
+        );
+        let mut loop_ =
+            build_loop_with_replay(identity_policy(), crate::operation::NoOp, [0.0, 40.0])
+                .with_sensors(SensorTaps {
+                    temperatures: Vec::new(),
+                    contacts: vec![(site, 1, classifier.clone())],
+                    permitted_contacts: vec![site],
+                })
+                .unwrap();
+        let _ = loop_.tick();
+        assert_eq!(loop_.active_contacts(), &[site]);
+        let bad = build_loop_with_replay(identity_policy(), crate::operation::NoOp, [0.0, 0.0])
+            .with_sensors(SensorTaps {
+                temperatures: vec![7],
+                contacts: Vec::new(),
+                permitted_contacts: Vec::new(),
+            });
+        assert!(matches!(
+            bad,
+            Err(ConfigError::SensorTap { index: 7, width: 2 })
+        ));
     }
 
     /// A policy whose every evaluation fails.

@@ -8,7 +8,7 @@
 use robot_types::time::Duration;
 
 /// The timing record for one control tick.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TickTiming {
     /// Policy-path entry to command-ready.
     pub compute_duration: Duration,
@@ -110,6 +110,117 @@ impl<const N: usize> TimingHistory<N> {
             .flatten()
             .filter(|t| t.missed_deadline())
             .count()
+    }
+}
+
+/// p50, p95, p99, p99.9 and maximum of one quantity.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Tails {
+    /// Samples.
+    pub n: usize,
+    /// Median.
+    pub p50: Duration,
+    /// 95th percentile.
+    pub p95: Duration,
+    /// 99th percentile.
+    pub p99: Duration,
+    /// 99.9th percentile.
+    pub p999: Duration,
+    /// Maximum.
+    pub max: Duration,
+}
+
+impl Tails {
+    /// Nearest-rank tails of `samples` (nanoseconds); `None` when empty.
+    #[must_use]
+    pub fn of(mut samples: Vec<i64>) -> Option<Self> {
+        if samples.is_empty() {
+            return None;
+        }
+        samples.sort_unstable();
+        let at = |p: f64| {
+            // Nearest rank; the epsilon keeps 99.9 % of 1000 at rank 999
+            // when the product rounds to 999.0000000000001.
+            let rank = ((p / 100.0) * samples.len() as f64 - 1e-9).ceil() as usize;
+            Duration::from_nanos(samples[rank.clamp(1, samples.len()) - 1])
+        };
+        Some(Self {
+            n: samples.len(),
+            p50: at(50.0),
+            p95: at(95.0),
+            p99: at(99.0),
+            p999: at(99.9),
+            max: Duration::from_nanos(*samples.last().expect("non-empty")),
+        })
+    }
+}
+
+/// The report SPECS.md Section 5 requires: each of its four quantities
+/// separately, never collapsed, with deadline misses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TimingReport {
+    /// Compute duration tails.
+    pub compute: Option<Tails>,
+    /// Sensor-to-command age tails (ticks that had feedback).
+    pub sensor_to_command: Option<Tails>,
+    /// Decision age tails (ticks that applied an upper-tier decision).
+    pub decision_age: Option<Tails>,
+    /// Deadline margin tails.
+    pub deadline_margin: Option<Tails>,
+    /// Ticks whose compute exceeded the budget.
+    pub missed_deadlines: usize,
+    /// Ticks recorded.
+    pub ticks: usize,
+}
+
+impl<const N: usize> TimingHistory<N> {
+    /// The four-quantity report over the recorded ticks. Builds vectors:
+    /// call it off the control thread.
+    #[must_use]
+    pub fn report(&self) -> TimingReport {
+        let all = || self.entries.iter().flatten();
+        TimingReport {
+            compute: Tails::of(all().map(|t| t.compute_duration.nanos()).collect()),
+            sensor_to_command: Tails::of(
+                all()
+                    .filter_map(|t| t.sensor_to_command_age.map(|d| d.nanos()))
+                    .collect(),
+            ),
+            decision_age: Tails::of(
+                all()
+                    .filter_map(|t| t.decision_age.map(|d| d.nanos()))
+                    .collect(),
+            ),
+            deadline_margin: Tails::of(all().map(|t| t.deadline_margin.nanos()).collect()),
+            missed_deadlines: self.missed_deadline_count(),
+            ticks: self.filled,
+        }
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    #[test]
+    fn the_report_keeps_the_four_quantities_apart() {
+        let mut h: TimingHistory<1000> = TimingHistory::new();
+        for i in 0..1000 {
+            h.record(TickTiming {
+                compute_duration: Duration::from_micros(i + 1),
+                sensor_to_command_age: (i % 2 == 0).then(|| Duration::from_micros(2 * i)),
+                decision_age: None,
+                deadline_margin: Duration::from_micros(8000 - i),
+            });
+        }
+        let r = h.report();
+        let c = r.compute.unwrap();
+        assert_eq!(c.p50, Duration::from_micros(500));
+        assert_eq!(c.p999, Duration::from_micros(999));
+        assert_eq!(c.max, Duration::from_micros(1000));
+        assert_eq!(r.sensor_to_command.unwrap().n, 500);
+        assert!(r.decision_age.is_none());
+        assert_eq!(r.ticks, 1000);
     }
 }
 

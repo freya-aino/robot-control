@@ -17,6 +17,7 @@ use robot_nn::mlp::{MlpError, Scratch};
 use robot_nn::policy::{Policy, StochasticPolicy};
 use robot_supervisor::policy::Response;
 use robot_types::rng::{Rng, SeedStream};
+use robot_types::time::{Duration, Timestamp};
 
 /// A width an operation was built for that does not match the loop it was
 /// installed into.
@@ -118,6 +119,17 @@ pub trait LoopOperation<P: Policy> {
 
     /// Called once per tick after supervision.
     fn after_tick(&mut self, _tick: &TickView<'_>) {}
+
+    /// Called at the start of every tick with the loop's monotonic time,
+    /// before [`LoopOperation::before_tick`]. An operation that runs an
+    /// upper tier (a router at its own rate) keys its schedule on this.
+    fn observe_time(&mut self, _now: Timestamp) {}
+
+    /// The age, at `now`, of the upper-tier decision this tick applied,
+    /// if the operation applies one (SPECS.md Section 5's decision age).
+    fn decision_age(&self, _now: Timestamp) -> Option<Duration> {
+        None
+    }
 }
 
 /// The operation that does nothing. It is the default for
@@ -161,6 +173,17 @@ impl<P: Policy, A: LoopOperation<P>, B: LoopOperation<P>> LoopOperation<P> for (
     fn after_tick(&mut self, tick: &TickView<'_>) {
         self.0.after_tick(tick);
         self.1.after_tick(tick);
+    }
+
+    fn observe_time(&mut self, now: Timestamp) {
+        self.0.observe_time(now);
+        self.1.observe_time(now);
+    }
+
+    fn decision_age(&self, now: Timestamp) -> Option<Duration> {
+        self.0
+            .decision_age(now)
+            .or_else(|| self.1.decision_age(now))
     }
 }
 

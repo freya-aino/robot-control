@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The deterministic control runtime and tier machinery (SPECS.md Sections 5, 5.1, 10.3)"
+description = "The deterministic control runtime: policy and tactical tiers, sensor taps into the supervisor, timing reports and the incident channel (SPECS.md Section 5)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }
