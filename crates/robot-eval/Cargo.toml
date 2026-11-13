@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Acceptance profiles, statistics and regression gates (SPECS.md Section 14)"
+description = "Acceptance profiles as artifacts, t-based seed statistics, Welch and TOST, interval-based evaluation, regression gates and the acceptance matrix (SPECS.md Section 14)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }

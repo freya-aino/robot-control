@@ -1,17 +1,19 @@
-//! Acceptance profiles, statistics and regression gates, per SPECS.md
-//! Section 14.
+//! Acceptance and evaluation, per SPECS.md Section 14.
 //!
-//! [`acceptance::AcceptanceProfile`] carries every field Section 14
-//! requires and makes "immutable once a run has been evaluated against
-//! them" structural: [`acceptance::AcceptanceProfile::revise`] is the only
-//! way to change a threshold, and it always returns a new, higher-versioned
-//! profile rather than mutating the one a run was scored against.
-//! [`stats::summarize`] is the "multiple seeds and confidence intervals"
-//! statistic the section asks for.
+//! | Module | Contents |
+//! | --- | --- |
+//! | [`acceptance`] | `AcceptanceProfile`: every field Section 14 requires, immutable once evaluated, stored as `acceptance-profile/1` TOML with a content ID |
+//! | [`stats`] | Seed summaries with normal and Student-t intervals, Welch's test, TOST equivalence |
+//! | [`distribution`] | Student's t CDF and quantile (std-only) |
+//! | [`evaluate`] | Pass/fail/inconclusive by interval against a profile; the regression gate between evaluations of one profile |
+//! | [`matrix`] | The fifty acceptance rows, closed only by an artifact recorded in the evidence ledger |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
 pub mod acceptance;
+pub mod distribution;
+pub mod evaluate;
+pub mod matrix;
 pub mod stats;

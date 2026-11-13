@@ -15,16 +15,38 @@
 //! it always returns a new, differently-versioned profile and never
 //! mutates the one a run was evaluated against.
 
+use robot_artifacts::hash::ContentId;
+use robot_artifacts::toml::{self, Table, TomlError, Value};
 use robot_types::time::Duration;
+
+/// Which side of a threshold passes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Direction {
+    /// The metric must not exceed the threshold (a fall rate).
+    AtMost,
+    /// The metric must reach at least the threshold (a success rate).
+    AtLeast,
+}
+
+impl Direction {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::AtMost => "at_most",
+            Self::AtLeast => "at_least",
+        }
+    }
+}
 
 /// One metric's threshold, with the justification SPECS.md Section 14
 /// requires rather than a bare number.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct MetricThreshold {
     /// Metric name.
     pub metric: String,
     /// The threshold value.
     pub threshold: f64,
+    /// Which side passes.
+    pub direction: Direction,
     /// Why this value, in enough detail to defend it later (e.g. "95th
     /// percentile of three manual demonstrations" or "derived from
     /// actuator thermal time constant").
@@ -40,6 +62,8 @@ pub struct AcceptanceProfile {
     pub version: u32,
     /// Robot profile identity and firmware version this applies to.
     pub robot_profile: String,
+    /// Firmware version the profile applies to.
+    pub firmware_version: String,
     /// Control period this profile was evaluated under.
     pub control_period: Duration,
     /// Per-tick timing budget.
@@ -51,6 +75,8 @@ pub struct AcceptanceProfile {
     pub thresholds: Vec<MetricThreshold>,
     /// Seeds a run must use to be evaluated against this profile.
     pub seed_list: Vec<u64>,
+    /// Runs per seed.
+    pub run_count: u32,
     /// Required measurement duration per seed.
     pub measurement_duration: Duration,
     /// ISO-8601 date this version was authored.
@@ -69,11 +95,13 @@ impl AcceptanceProfile {
     pub fn new(
         name: impl Into<String>,
         robot_profile: impl Into<String>,
+        firmware_version: impl Into<String>,
         control_period: Duration,
         timing_budget: Duration,
         physical_envelope: impl Into<String>,
         thresholds: Vec<MetricThreshold>,
         seed_list: Vec<u64>,
+        run_count: u32,
         measurement_duration: Duration,
         date: impl Into<String>,
         author: impl Into<String>,
@@ -82,11 +110,13 @@ impl AcceptanceProfile {
             name: name.into(),
             version: 1,
             robot_profile: robot_profile.into(),
+            firmware_version: firmware_version.into(),
             control_period,
             timing_budget,
             physical_envelope: physical_envelope.into(),
             thresholds,
             seed_list,
+            run_count,
             measurement_duration,
             date: date.into(),
             author: author.into(),
@@ -140,6 +170,153 @@ impl AcceptanceProfile {
     }
 }
 
+/// Why a profile file could not be read.
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProfileFileError {
+    /// The TOML was rejected.
+    Toml(TomlError),
+    /// A field had the wrong type or value.
+    Field(String),
+}
+
+impl core::fmt::Display for ProfileFileError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Toml(e) => write!(f, "{e}"),
+            Self::Field(e) => write!(f, "acceptance profile field: {e}"),
+        }
+    }
+}
+
+impl core::error::Error for ProfileFileError {}
+
+impl From<TomlError> for ProfileFileError {
+    fn from(e: TomlError) -> Self {
+        Self::Toml(e)
+    }
+}
+
+impl AcceptanceProfile {
+    /// The profile as `acceptance-profile/1` TOML. The `evaluated` flag is
+    /// not part of the artifact: it is a property of a run's use of it.
+    #[must_use]
+    pub fn to_toml(&self) -> String {
+        let mut t = Table::new();
+        t.insert("schema", Value::String("acceptance-profile/1".into()));
+        t.insert("name", Value::String(self.name.clone()));
+        t.insert("version", Value::Integer(i64::from(self.version)));
+        t.insert("robot_profile", Value::String(self.robot_profile.clone()));
+        t.insert(
+            "firmware_version",
+            Value::String(self.firmware_version.clone()),
+        );
+        t.insert(
+            "control_period_ns",
+            Value::Integer(self.control_period.nanos()),
+        );
+        t.insert(
+            "timing_budget_ns",
+            Value::Integer(self.timing_budget.nanos()),
+        );
+        t.insert(
+            "physical_envelope",
+            Value::String(self.physical_envelope.clone()),
+        );
+        t.insert(
+            "seed_list",
+            Value::Array(
+                self.seed_list
+                    .iter()
+                    .map(|s| Value::Integer(*s as i64))
+                    .collect(),
+            ),
+        );
+        t.insert("run_count", Value::Integer(i64::from(self.run_count)));
+        t.insert(
+            "measurement_duration_ns",
+            Value::Integer(self.measurement_duration.nanos()),
+        );
+        t.insert("date", Value::String(self.date.clone()));
+        t.insert("author", Value::String(self.author.clone()));
+        t.insert(
+            "threshold",
+            Value::Array(
+                self.thresholds
+                    .iter()
+                    .map(|m| {
+                        let mut mt = Table::new();
+                        mt.insert("metric", Value::String(m.metric.clone()));
+                        mt.insert("threshold", Value::Float(m.threshold));
+                        mt.insert("direction", Value::String(m.direction.name().into()));
+                        mt.insert("justification", Value::String(m.justification.clone()));
+                        Value::Table(mt)
+                    })
+                    .collect(),
+            ),
+        );
+        toml::to_string(&t)
+    }
+
+    /// The content ID of [`Self::to_toml`]: the identity a run cites.
+    #[must_use]
+    pub fn content_id(&self) -> ContentId {
+        ContentId::of(self.to_toml().as_bytes())
+    }
+
+    /// Reads an `acceptance-profile/1` file. The result is unevaluated.
+    pub fn from_toml(text: &str) -> Result<Self, ProfileFileError> {
+        let t = toml::parse(text)?;
+        let field = |k: &str| ProfileFileError::Field(k.to_owned());
+        if t.require_str("schema")? != "acceptance-profile/1" {
+            return Err(field("schema"));
+        }
+        let int = |k: &str| t.require_integer(k).map_err(ProfileFileError::from);
+        let thresholds = t
+            .require_array("threshold")?
+            .iter()
+            .map(|v| {
+                let Value::Table(m) = v else {
+                    return Err(field("threshold"));
+                };
+                Ok(MetricThreshold {
+                    metric: m.require_str("metric")?.to_owned(),
+                    threshold: m.require_float("threshold")?,
+                    direction: match m.require_str("direction")? {
+                        "at_most" => Direction::AtMost,
+                        "at_least" => Direction::AtLeast,
+                        _ => return Err(field("direction")),
+                    },
+                    justification: m.require_str("justification")?.to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, ProfileFileError>>()?;
+        let seed_list = t
+            .require_array("seed_list")?
+            .iter()
+            .map(|v| match v {
+                Value::Integer(i) if *i >= 0 => Ok(*i as u64),
+                _ => Err(field("seed_list")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            name: t.require_str("name")?.to_owned(),
+            version: u32::try_from(int("version")?).map_err(|_| field("version"))?,
+            robot_profile: t.require_str("robot_profile")?.to_owned(),
+            firmware_version: t.require_str("firmware_version")?.to_owned(),
+            control_period: Duration::from_nanos(int("control_period_ns")?),
+            timing_budget: Duration::from_nanos(int("timing_budget_ns")?),
+            physical_envelope: t.require_str("physical_envelope")?.to_owned(),
+            thresholds,
+            seed_list,
+            run_count: u32::try_from(int("run_count")?).map_err(|_| field("run_count"))?,
+            measurement_duration: Duration::from_nanos(int("measurement_duration_ns")?),
+            date: t.require_str("date")?.to_owned(),
+            author: t.require_str("author")?.to_owned(),
+            evaluated: false,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,15 +325,18 @@ mod tests {
         AcceptanceProfile::new(
             "fixture-arm-balance",
             "fixture-arm/1.0",
+            "fw-0.0-fixture",
             Duration::from_millis(10),
             Duration::from_millis(8),
             "upright +/- 0.3 rad, torque <= 10 N*m",
             vec![MetricThreshold {
                 metric: "fall_rate".to_owned(),
                 threshold: 0.05,
+                direction: Direction::AtMost,
                 justification: "no more than 1 fall in 20 held-out episodes".to_owned(),
             }],
             vec![1, 2, 3],
+            4,
             Duration::from_secs(30),
             "2026-10-26",
             "freya",
@@ -174,6 +354,7 @@ mod tests {
             vec![MetricThreshold {
                 metric: "fall_rate".to_owned(),
                 threshold: 0.1,
+                direction: Direction::AtMost,
                 justification: "relaxed after reviewing held-out episode variance".to_owned(),
             }],
             "2026-10-27",
@@ -185,6 +366,25 @@ mod tests {
         assert!(p1.is_evaluated());
         assert_eq!(p1.threshold_for("fall_rate").unwrap().threshold, 0.05);
         assert_eq!(p2.threshold_for("fall_rate").unwrap().threshold, 0.1);
+    }
+
+    #[test]
+    fn the_artifact_round_trips_and_its_id_changes_with_any_threshold() {
+        let p = profile();
+        let back = AcceptanceProfile::from_toml(&p.to_toml()).unwrap();
+        assert_eq!(back.to_toml(), p.to_toml());
+        assert_eq!(back.firmware_version, "fw-0.0-fixture");
+        let q = p.revise(
+            vec![MetricThreshold {
+                metric: "fall_rate".to_owned(),
+                threshold: 0.051,
+                direction: Direction::AtMost,
+                justification: "x".to_owned(),
+            }],
+            "2026-10-27",
+            "freya",
+        );
+        assert_ne!(p.content_id(), q.content_id());
     }
 
     #[test]
