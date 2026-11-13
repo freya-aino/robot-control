@@ -9,7 +9,7 @@ dev-dependency, for the test suite only).
 
 | Module | Contents |
 | --- | --- |
-| `backprop` | Manual backward pass through a `robot_nn::mlp::Mlp` (the authored autodiff `docs/decisions/0003-std-only-default-closure.md` describes) |
+| `backprop` | Manual backward pass through a `robot_nn::mlp::Mlp` (authored against `std` under the policy of `docs/decisions/0003-std-only-default-closure.md`; Burn and CubeCL remain unqualified for training) |
 | `optimizer` | Adam, with its moment state (`AdamState`) exposed as an owned value so it can be checkpointed |
 | `gae` | Generalized advantage estimation, taking a correct per-step bootstrap value — see the bug below |
 | `gaussian_policy` | A diagonal Gaussian policy: a mean network plus a state-independent log-std vector |
@@ -31,31 +31,37 @@ fix are documented in `gae.rs`'s own doc comment, and
 `a_truncation_in_the_middle_of_a_buffer_bootstraps_from_its_own_next_value_not_a_neighbor`
 is the regression test that would have caught it.
 
-## Why the pendulum training test doesn't claim convergence
+## The pendulum negative result, and its correction
 
 `ppo::tests::training_pipeline_runs_without_diverging` runs the full
-pipeline — environment, task, rollout buffer, GAE, backprop, Adam, for both
-networks — for twenty update cycles and checks that nothing diverges
-(non-finite parameters, generation counter, buffer capacity). It does
-**not** assert that training beats a deterministic zero-action baseline.
-An earlier version of this test did, found and motivated the GAE fix above,
-and still failed to show reliable improvement afterward across several
-reset-range, fall-angle and iteration-count settings. Rather than keep
-adjusting hyperparameters until one seed happened to pass, the test now
-reports both numbers via `eprintln!` (visible under `--nocapture`) and
-states the situation plainly in its own doc comment: stabilizing an
-inverted pendulum with a co-trained value function is a harder tuning
-problem than this baseline's defaults currently solve in a small compute
-budget, and that is recorded as a negative result rather than hidden.
-`ppo_drives_a_one_step_bandit_policy_mean_toward_the_target` is the
-decisive test that the gradient machinery itself — clipped surrogate,
-entropy bonus, Adam, backprop — is correct: it isolates the policy-gradient
-update from every difficulty specific to multi-step credit assignment and
-converges cleanly.
+pipeline for twenty update cycles and checks only that nothing diverges.
+An earlier version asserted improvement over a zero-action baseline and
+could not show it across reset ranges, fall angles and iteration counts.
+That was recorded as a negative result rather than tuned away.
 
-This is SPECS.md §3's evidence discipline applied to this crate's own test
-suite: "A failed verification is a result: retain a correction record
-instead of preserving an unsupported claim."
+The cause was the task, not PPO. `robot-tasks`' `BalanceTask` paid only
+negative per-step rewards (`-distance²`), and a fall ended the episode
+with zero future value. Near the fall angle, falling was therefore worth
+more to the critic than staying up imperfectly: the task paid the agent to
+fall. Measured before the fix, at 100 updates of 2000 steps over three
+seeds, the deterministic return was −9.1 to −9.4 against −9.7 for zero
+action, the same within noise.
+
+`BalanceTask` now has an `alive-v1` term: +1 per step that does not end in
+a fall, withheld on the falling step. With it, PPO at learning rate 3e-3,
+initial log-std 0, and 150 updates of 2000 steps holds the pendulum up.
+Deterministic returns over 20 held-out resets are 90.8, 96.2 and 97.1 on
+seeds 1, 2 and 3, against 34.2 for zero action, out of a possible ~100.
+These were measured with this crate's test at the current revision in the
+devenv toolchain. `ppo_stabilizes_the_pendulum_on_two_seeds` asserts it
+for seeds 1 and 2 (above 85, and above baseline + 40); it is the evidence
+SPECS.md §14 row A-13 asks for ("PPO solves small reference tasks across
+multiple seeds"). `ppo_drives_a_one_step_bandit_policy_mean_toward_the_target`
+still isolates the gradient machinery.
+
+This is SPECS.md §3 applied to this crate's own history: the failed
+verification was kept as a record, and its correction is recorded with
+the measurement that supports it.
 
 ## Checkpointing
 
@@ -85,4 +91,4 @@ checked again on save, and re-validated on load.
 
 ## Testing
 
-`cargo test -p robot-learn` — 60 tests (`child_process_reads_checkpoint` is a helper that only does work when spawned by `checkpoint_is_loaded_by_a_separate_process`). They cover: every gradient (backprop through `Mlp`, the Gaussian policy's log-probability with respect to both mean and log-std) checked against central finite differences; Adam checked against a convex quadratic; GAE checked against a hand-computed trajectory, the truncation/termination distinction, and the cross-episode bootstrap case above; the rollout buffer's capacity-exhaustion and schema-rejection paths; the checkpoint round trip, the resumed-training bit-equivalence test, the separate-process load, and the rejection tests for schema version, missing chunk, swapped digest, corrupt chunk, truncated manifest and topology mismatch; parameter-group round trip and out-of-bounds rejection on load; a PPO update in which a frozen policy group stays bit-identical while unfrozen parameters change; invalid group tables leaving the agent unchanged; and the two PPO-level tests described above. `GaussianPolicy`'s deterministic trait action and allocation-free sampled action are checked against their existing reference paths. `robot-nn` adds mask tests for `Mlp::frozen_mask`.
+`cargo test -p robot-learn`: 62 tests (one of them, `child_process_reads_checkpoint`, is a helper that only does work when spawned by `checkpoint_is_loaded_by_a_separate_process`). They cover: every gradient (backprop through `Mlp`, the Gaussian policy's log-probability with respect to both mean and log-std) checked against central finite differences; Adam checked against a convex quadratic; GAE checked against a hand-computed trajectory, the truncation/termination distinction, and the cross-episode bootstrap case above; the rollout buffer's capacity-exhaustion and schema-rejection paths; the checkpoint round trip, the resumed-training bit-equivalence test, the separate-process load, and the rejection tests for schema version, missing chunk, swapped digest, corrupt chunk, truncated manifest and topology mismatch; parameter-group round trip and out-of-bounds rejection on load; a PPO update in which a frozen policy group stays bit-identical while unfrozen parameters change; invalid group tables leaving the agent unchanged; and the two PPO-level tests described above. `GaussianPolicy`'s deterministic trait action and allocation-free sampled action are checked against their existing reference paths. `robot-nn` adds mask tests for `Mlp::frozen_mask`.

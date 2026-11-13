@@ -1061,4 +1061,120 @@ mod tests {
         );
         assert_eq!(buffer.len(), 10);
     }
+
+    /// The deterministic (mean-action) return of `agent` over `episodes`
+    /// test episodes on the same resets as [`zero_action_baseline`].
+    fn deterministic_return(agent: &PpoAgent, episodes: usize, seed: u64) -> f64 {
+        let params = PendulumParams {
+            length: 1.0,
+            mass: 1.0,
+            gravity: 9.80665,
+            damping: 0.05,
+        };
+        let mut env = PendulumEnv::with_reset_range(
+            params,
+            4.0,
+            THETA_RANGE,
+            OMEGA_RANGE,
+            SeedStream::new(seed, 0),
+        );
+        let task = test_task();
+        let mut scratch = robot_nn::mlp::Scratch::new(64);
+        let mut total = 0.0;
+        for ep in 0..episodes {
+            let mut obs = [0.0; 2];
+            env.reset(SeedStream::new(seed, ep as u64), &mut obs);
+            for step in 1..=100u32 {
+                let mut n = [0.0; 2];
+                agent.normalizer.normalize(&obs, &mut n).unwrap();
+                let mut a = [0.0];
+                robot_nn::policy::Policy::act(&agent.policy.mean_net, &n, &mut a, &mut scratch)
+                    .unwrap();
+                let out = env.step(&a, robot_types::time::Duration::from_millis(20));
+                let (r, term) =
+                    task.evaluate(&obs, &a, &out.observation, step, out.physics_failure);
+                total += r.total();
+                obs = [out.observation[0], out.observation[1]];
+                if term.ends_episode() {
+                    break;
+                }
+            }
+        }
+        total / episodes as f64
+    }
+
+    /// SPECS.md Section 14 row A-13: "PPO solves small reference tasks
+    /// across multiple seeds before humanoid results are trusted."
+    ///
+    /// With the balance task's alive bonus (without which a fall was worth
+    /// more to the critic than staying up imperfectly), PPO at learning
+    /// rate 3e-3 and initial log-std 0, 150 updates of 2000 steps, holds
+    /// the pendulum up: on seeds 1 and 2 the deterministic return over 20
+    /// held-out resets is above 85 of a possible ~100, against about 34
+    /// for doing nothing. Measured values at the time of writing: 90.8
+    /// and 96.2 (seed 3, not run here for time: 97.1).
+    #[test]
+    fn ppo_stabilizes_the_pendulum_on_two_seeds() {
+        let baseline = zero_action_baseline(20, 1000);
+        for seed in [1u64, 2] {
+            let mut rng = Rng::new(SeedStream::new(seed, 1));
+            let p = initialize(
+                &[2, 16, 1],
+                vec![Activation::Tanh, Activation::Identity],
+                &mut rng,
+            )
+            .unwrap();
+            let v = initialize(
+                &[2, 16, 1],
+                vec![Activation::Tanh, Activation::Identity],
+                &mut rng,
+            )
+            .unwrap();
+            let mut config = PpoConfig::default();
+            config.policy_adam.learning_rate = 3e-3;
+            config.value_adam.learning_rate = 3e-3;
+            let mut agent = PpoAgent::new(GaussianPolicy::new(p, 0.0), v, config, 2);
+            let params = PendulumParams {
+                length: 1.0,
+                mass: 1.0,
+                gravity: 9.80665,
+                damping: 0.05,
+            };
+            let mut env = PendulumEnv::with_reset_range(
+                params,
+                4.0,
+                THETA_RANGE,
+                OMEGA_RANGE,
+                SeedStream::new(seed, 7),
+            );
+            let task = test_task();
+            let task_fn = |o: &[f64], a: &[f64], n: &[f64], step: u32, fail: bool| {
+                task.evaluate(o, a, n, step, fail)
+            };
+            let mut rollout_rng = Rng::new(SeedStream::new(seed, 5));
+            let mut buffer =
+                RolloutBuffer::new(agent.transition_schema("pendulum-fixture/1.0"), 2000);
+            for i in 0..150u64 {
+                buffer.clear();
+                agent.collect_rollout(
+                    &mut env,
+                    &task_fn,
+                    &mut buffer,
+                    2000,
+                    RolloutContext {
+                        env_id: EnvId::new(0),
+                        robot_profile: "pendulum-fixture/1.0",
+                        episode_seed_base: 9000 + i,
+                    },
+                    &mut rollout_rng,
+                );
+                agent.update(&buffer);
+            }
+            let learned = deterministic_return(&agent, 20, 1000);
+            assert!(
+                learned > 85.0 && learned > baseline + 40.0,
+                "seed {seed}: {learned} vs baseline {baseline}"
+            );
+        }
+    }
 }
