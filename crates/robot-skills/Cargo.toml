@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Skill descriptors, exact retrieval and the R0/R1/R2 tiers of SPECS.md Section 10.6"
+description = "Skill descriptors, exact retrieval, the R0/R1/R2 tiers, the R2 feasibility filter and router, expert staging and the Markdown catalog (SPECS.md Section 10)"
 
 [dependencies]
 robot-types = { path = "../robot-types" }

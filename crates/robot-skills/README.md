@@ -11,6 +11,9 @@ reserved for loading a skill manifest from a content-addressed blob).
 | `descriptor` | `SkillDescriptor`: the typed, authoritative record of §10.2 |
 | `index` | `ExactIndex`: brute-force nearest-neighbor search, with a zero-allocation `nearest_into` for the R2 path |
 | `tiers` | `WorkingSet` (R1, generation-tagged, immutable) and `Router` (R2, resident, stale-generation-rejecting) |
+| `selection` | `Selector`, the R2 decision. Recovery or the protective response comes first when falling, preempting dwell. Then nearest resident candidates, an out-of-distribution distance, a confidence margin, and `GuardTable` feasibility over `FeasibilityState` (stance, joint speed, support, actuator health, opponent distance), where an unknown guard fails closed. Then transition contracts, minimum dwell and hysteresis. A switch carries a `RecurrentAction::Reset` contract. Accepted proposals expire. Rejections are counted by reason and switches by skill in fixed arrays |
+| `cache` | `ExpertCache`: activation checks (schema, checksum, normalizer, memory budget) in §10.3's order, admission and eviction. `Stager` validates off the control thread with non-blocking `poll` |
+| `catalog` | §10.1's optional Markdown catalog: TF-IDF lexical search with no model call. `compose` can only reorder numerical candidates, never add one. `disagreements` flags prose that contradicts the typed contact assumption |
 
 ## Why exact search, and why it's zero-allocation on R2
 
@@ -23,21 +26,48 @@ file, query a database, compute an embedding, allocate, or block."
 `ExactIndex::nearest_into` writes into a caller-supplied fixed buffer and
 is the only query path `tiers::Router` calls.
 
-## What's explicitly not here
+## Decisions worth knowing
 
-This is a narrow slice of §10, named as such in the crate's own module
-docs: no learned embeddings (§10.1 asks for structured tags and numerical
-features *first*), no Markdown skill-descriptor catalog (§10.1's
-operator-facing, non-authoritative extension), and no feasibility-filter or
-hysteresis machinery beyond `Router::switch_to`'s residency check. A real
-feasibility filter needs the deployed robot's own state (stance, contact,
-reach) as input, which belongs with whatever crate owns that state at
-integration time.
+**R2 allocates nothing.** The selector's candidate buffer, descriptor
+table, guard table and counters are sized at R1. A decision reads only
+resident data (§10.6 item 1).
+
+**Unknown guards fail closed.** A descriptor naming an initiation guard no
+code implements is not feasible. Prose or a name is not a check.
+
+**Falling is not a guard-posture problem.** §10.4: "Guard posture is not a
+universal fallback when already falling." When falling, the configured
+recovery skill is taken if its own guards pass, preempting dwell.
+Otherwise the selector returns `Protective`, the robot-specific response
+the caller runs.
+
+**The catalog cannot widen the choice.** §10.1: the Markdown descriptor
+"MUST NOT replace [numerical retrieval] or relax any feasibility check".
+`compose` reorders the numerical candidates and nothing else, and
+feasibility runs afterwards.
+
+## What is not here
+
+- **Learned embeddings.** §10.1 adds them "only when they improve a
+  measured outcome", and no such measurement exists.
+- **The §10.5 design comparison.** It needs trained experts at equal
+  budgets. The counters it reports from (routing frequency, rejections,
+  fallbacks) are here.
 
 ## Testing
 
-`cargo test -p robot-skills` — 8 tests: nearest-neighbor ordering and
+`cargo test -p robot-skills`: 18 tests. 8 are the original ones: nearest-neighbor ordering and
 dimension validation, an empty-index report, R1→R2 generation rejection
 (including the "equal generation is not newer" edge case), the empty-result
 degrade-to-current-controller path, and a refused switch to a non-resident
-skill leaving state unchanged.
+skill leaving state unchanged. The new ones cover:
+- switching with a reset contract and proposal expiry;
+- dwell, out-of-distribution and unknown-guard rejections;
+- recovery preempting dwell, and the protective response;
+- an empty router keeping the current skill;
+- each activation check refusing in turn;
+- the memory budget;
+- off-thread staging;
+- TF-IDF ranking;
+- composition that never adds a candidate;
+- prose/typed disagreement.

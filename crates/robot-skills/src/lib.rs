@@ -13,17 +13,23 @@
 //! not this crate's concern — it is `robot-learn`'s offline track, kept
 //! deliberately unconflated with the runtime router here.
 //!
-//! Not implemented in this revision: learned embeddings (Section 10.1
-//! starts with "structured skill tags and numerical features" only), the
-//! Markdown skill-descriptor catalog of Section 10.1, and the
-//! feasibility-filter/hysteresis machinery of Sections 10.2–10.4 beyond the
-//! residency check `tiers::Router::switch_to` performs. These are named
-//! here rather than silently assumed complete.
+//! In-loop selection is [`selection::Selector`]: the state-conditioned
+//! feasibility filter, out-of-distribution and margin checks, transition
+//! contracts, dwell, hysteresis, recovery preemption and routing counters
+//! of Sections 10.1 to 10.4. [`cache`] stages optional experts off the
+//! control thread with the activation checks of Section 10.3, and
+//! [`catalog`] is Section 10.1's optional lexical Markdown catalog, which
+//! can only reorder numerical candidates. Learned embeddings are not
+//! implemented: Section 10.1 adds them "only when they improve a measured
+//! outcome", and no such measurement exists.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod cache;
+pub mod catalog;
 pub mod descriptor;
 pub mod index;
+pub mod selection;
 pub mod tiers;
