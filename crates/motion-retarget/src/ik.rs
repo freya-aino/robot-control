@@ -1,61 +1,163 @@
-//! Weighted task-space inverse kinematics via damped least squares.
+//! Weighted multi-task inverse kinematics, per SPECS.md Section 8.3:
+//! "weighted task-space IK ... Support end-effector positions/orientations,
+//! posture priors, planted-foot constraints, joint limits and self-collision
+//! penalties."
 //!
-//! SPECS.md Section 8.3: "Implement weighted task-space IK followed by
-//! temporal refinement... Qualify a Rust-native constrained solver before
-//! selecting differential-QP IK or whole-body optimization." No QP solver
-//! (Appendix B.2.8: Clarabel and the rest) has been qualified in this
-//! revision, per `docs/decisions/0003-std-only-default-closure.md`; this is
-//! the "feasible non-QP baseline" Appendix C's C-09 explicitly keeps open as
-//! an acceptable interim position.
+//! The problem is a weighted nonlinear least-squares over the actuated
+//! joints and, optionally, the six coordinates of a free base. Each
+//! [`Task`] contributes residual rows scaled by the square root of its
+//! weight; [`crate::collision::SelfCollision`] contributes one row per
+//! link pair, nonzero only while the pair is closer than its margin. Joint
+//! limits are hard: every iterate is projected back into the limits, so no
+//! returned solution violates them.
 //!
-//! The Jacobian is computed by central finite differences over
-//! `robot_model::kinematics::forward_kinematics`, not derived analytically.
-//! That is a legitimate choice for a first baseline — it needs no per-joint
-//! derivative bookkeeping — and it is validated the same way every other
-//! numerical routine in this workspace is: this module's own tests compare
-//! the solver's result against an independently computable target, not
-//! against itself.
+//! The method is Levenberg-Marquardt over a central finite-difference
+//! Jacobian: a damped least-squares step, accepted only if it lowers the
+//! cost, with the damping relaxed after an accepted step and raised after a
+//! rejected one. SPECS.md Section 8.3: "Qualify a Rust-native constrained
+//! solver before selecting differential-QP IK." No QP solver (Appendix
+//! B.2.8) has been qualified (`docs/decisions/0003-std-only-default-closure.md`);
+//! this is the non-QP baseline Appendix C's C-09 permits, with limits by
+//! projection and collision as a penalty rather than as constraints.
 //!
-//! Scope: end-effector **position** targets only. SPECS.md Section 8.3 also
-//! asks for orientation targets and posture priors; neither is implemented
-//! here, stated rather than silently assumed.
+//! Section 8.3 also requires "bounded iterations/deadlines and a validated
+//! response to infeasibility or timeout". Every solve is bounded by
+//! `max_iterations` and an optional wall-clock `deadline`, and reports why
+//! it stopped as a [`Termination`]; [`Termination::Stalled`] is the honest
+//! outcome for conflicting tasks (a local minimum with nonzero cost), and a
+//! caller decides from the per-task residuals whether it is acceptable.
 
 use core::fmt;
-use robot_model::kinematics::{forward_kinematics, KinematicsError};
+use robot_model::kinematics::{forward_kinematics, KinematicsError, LinkPoses};
+use robot_model::pose::RigidPose;
 use robot_model::profile::RobotProfile;
-use robot_types::frames::Vec3;
+use robot_types::frames::{Quat, Vec3};
 use robot_types::math::{LinalgError, Matrix};
 
-/// One end-effector position target.
+use crate::collision::SelfCollision;
+
+/// One end-effector position target (kept as the simplest entry point).
 #[derive(Clone, Copy, Debug)]
 pub struct PositionTarget {
-    /// Index into `profile.links` (not a [`robot_types::ids::LinkId`] —
+    /// Index into `profile.links` (not a [`robot_types::ids::LinkId`]:
     /// resolved once by the caller, since this solver runs many FK
-    /// evaluations per call and a linear ID lookup each time would be
-    /// wasted work).
+    /// evaluations per call).
     pub link_index: usize,
-    /// Desired position, in the profile's root-relative frame (see
-    /// `robot_model::kinematics`'s own note on what "root frame" means).
+    /// Desired position in the world frame (the profile's root frame when
+    /// the base is fixed at the identity).
     pub target: Vec3,
     /// Relative weight of this target in the combined error.
     pub weight: f64,
 }
 
+/// One weighted objective.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Task {
+    /// A link origin at a world position (3 rows).
+    Position {
+        /// Index into `profile.links`.
+        link: usize,
+        /// World position.
+        target: Vec3,
+        /// Weight.
+        weight: f64,
+    },
+    /// A link's world orientation (3 rows: the rotation vector of the
+    /// error rotation, so the residual is in radians).
+    Orientation {
+        /// Index into `profile.links`.
+        link: usize,
+        /// World orientation.
+        target: Quat,
+        /// Weight.
+        weight: f64,
+    },
+    /// A link's position relative to another link's (3 rows). This is the
+    /// task that preserves intent: a punch is the hand's displacement from
+    /// the shoulder, not the hand's absolute position.
+    RelativePosition {
+        /// Index into `profile.links` of the moving link.
+        link: usize,
+        /// Index into `profile.links` of the reference link.
+        base: usize,
+        /// Desired `link - base`, in world axes.
+        target: Vec3,
+        /// Weight.
+        weight: f64,
+    },
+    /// Joint values near a nominal posture (one row per actuated joint).
+    Posture {
+        /// Nominal values in `profile.actuated_joints()` order.
+        nominal: Vec<f64>,
+        /// Weight per joint, same order.
+        weights: Vec<f64>,
+    },
+}
+
+impl From<PositionTarget> for Task {
+    fn from(t: PositionTarget) -> Self {
+        Self::Position {
+            link: t.link_index,
+            target: t.target,
+            weight: t.weight,
+        }
+    }
+}
+
+impl Task {
+    fn rows(&self) -> usize {
+        match self {
+            Self::Position { .. } | Self::Orientation { .. } | Self::RelativePosition { .. } => 3,
+            Self::Posture { nominal, .. } => nominal.len(),
+        }
+    }
+}
+
+/// How the robot's base is placed.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Base {
+    /// The base pose (world from root link) the solve starts at.
+    pub pose: RigidPose,
+    /// `Some` lets the solver move the base, penalizing its translation
+    /// (metres) and rotation (radians) away from `pose` by these weights.
+    pub free: Option<BasePrior>,
+}
+
+impl Base {
+    /// The root link fixed at the world origin.
+    pub const FIXED_AT_ORIGIN: Self = Self {
+        pose: RigidPose::IDENTITY,
+        free: None,
+    };
+}
+
+/// Weights holding a free base near its starting pose.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BasePrior {
+    /// Weight on translation away from the starting pose.
+    pub translation_weight: f64,
+    /// Weight on rotation away from the starting pose.
+    pub rotation_weight: f64,
+}
+
 /// Solver configuration.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct IkConfig {
-    /// Maximum Gauss-Newton iterations.
+    /// Maximum Levenberg-Marquardt iterations.
     pub max_iterations: usize,
-    /// Convergence tolerance on the weighted error norm.
+    /// Convergence tolerance on the weighted residual norm.
     pub tolerance: f64,
-    /// Damped-least-squares regularization.
+    /// Initial damping (the `lambda` of the damped least-squares step).
     pub damping: f64,
     /// Finite-difference step for the numerical Jacobian.
     pub finite_difference_step: f64,
-    /// Maximum per-iteration joint-value change (radians), to keep a step
-    /// near a singularity from being physically implausible even though
-    /// the damped solve already bounds it algebraically.
+    /// Maximum per-iteration change of any variable (radians or metres).
     pub max_step: f64,
+    /// An accepted step improving the cost by less than this fraction ends
+    /// the solve as [`Termination::Stalled`].
+    pub stall_fraction: f64,
+    /// Wall-clock budget for one solve.
+    pub deadline: Option<std::time::Duration>,
 }
 
 impl Default for IkConfig {
@@ -66,8 +168,24 @@ impl Default for IkConfig {
             damping: 1e-3,
             finite_difference_step: 1e-6,
             max_step: 0.2,
+            stall_fraction: 1e-9,
+            deadline: None,
         }
     }
+}
+
+/// Why a solve stopped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Termination {
+    /// The residual norm reached the tolerance.
+    Converged,
+    /// No step lowered the cost meaningfully: a local minimum, which for
+    /// conflicting tasks is the expected answer.
+    Stalled,
+    /// `max_iterations` ran out while the cost was still falling.
+    MaxIterations,
+    /// The wall-clock deadline passed.
+    Deadline,
 }
 
 /// The result of one solve.
@@ -75,12 +193,21 @@ impl Default for IkConfig {
 pub struct IkSolution {
     /// Final joint values, in `profile.actuated_joints()` order.
     pub joint_values: Vec<f64>,
+    /// Final base pose (the starting pose when the base is fixed).
+    pub base: RigidPose,
     /// Iterations actually performed.
     pub iterations: usize,
-    /// Weighted error norm at the final iterate.
+    /// Weighted residual norm at the final iterate.
     pub final_error: f64,
-    /// Whether `tolerance` was reached before `max_iterations`.
+    /// Whether `tolerance` was reached.
     pub converged: bool,
+    /// Why the solve stopped.
+    pub termination: Termination,
+    /// Unweighted residual norm per task, in task order.
+    pub task_errors: Vec<f64>,
+    /// Largest self-collision penetration of the margin, metres (zero when
+    /// no collision model was given).
+    pub max_penetration: f64,
 }
 
 /// Why a solve could not run.
@@ -93,6 +220,14 @@ pub enum IkError {
         /// Width supplied.
         found: usize,
     },
+    /// A task named a link that does not exist, or a posture of the wrong
+    /// width.
+    InvalidTask {
+        /// Index of the task.
+        task: usize,
+    },
+    /// A weight was negative or non-finite.
+    InvalidWeight,
     /// Forward kinematics failed during the solve.
     Kinematics(KinematicsError),
     /// The damped least-squares step failed.
@@ -108,6 +243,8 @@ impl fmt::Display for IkError {
                     "initial joint vector has width {found}, profile expects {expected}"
                 )
             }
+            Self::InvalidTask { task } => write!(f, "task {task} is invalid for this profile"),
+            Self::InvalidWeight => f.write_str("weights must be finite and non-negative"),
             Self::Kinematics(e) => write!(f, "{e}"),
             Self::Linalg(e) => write!(f, "{e}"),
         }
@@ -121,6 +258,7 @@ impl From<KinematicsError> for IkError {
         Self::Kinematics(e)
     }
 }
+
 impl From<LinalgError> for IkError {
     fn from(e: LinalgError) -> Self {
         Self::Linalg(e)
@@ -128,13 +266,35 @@ impl From<LinalgError> for IkError {
 }
 
 /// Solves for joint values placing every target's link at its desired
-/// position, starting from `initial`.
+/// position, starting from `initial`, with the base fixed at the origin.
 pub fn solve(
     profile: &RobotProfile,
     initial: &[f64],
     targets: &[PositionTarget],
     config: &IkConfig,
 ) -> Result<IkSolution, IkError> {
+    let tasks: Vec<Task> = targets.iter().map(|&t| t.into()).collect();
+    solve_tasks(
+        profile,
+        initial,
+        Base::FIXED_AT_ORIGIN,
+        &tasks,
+        None,
+        config,
+    )
+}
+
+/// The full problem: `tasks`, an optional self-collision penalty, and a
+/// fixed or free base.
+pub fn solve_tasks(
+    profile: &RobotProfile,
+    initial: &[f64],
+    base: Base,
+    tasks: &[Task],
+    collision: Option<&SelfCollision>,
+    config: &IkConfig,
+) -> Result<IkSolution, IkError> {
+    let started = std::time::Instant::now();
     let dof = profile.dof();
     if initial.len() != dof {
         return Err(IkError::WidthMismatch {
@@ -142,215 +302,495 @@ pub fn solve(
             found: initial.len(),
         });
     }
-
-    let mut joints = initial.to_vec();
-    let mut error_vec = error_vector(profile, &joints, targets)?;
-    let mut error_norm = error_vec.norm();
-    let mut iterations = 0;
-
-    while iterations < config.max_iterations && error_norm > config.tolerance {
-        let jacobian =
-            numerical_jacobian(profile, &joints, targets, config.finite_difference_step)?;
-        let weights: Vec<f64> = targets
-            .iter()
-            .flat_map(|t| [t.weight, t.weight, t.weight])
-            .collect();
-        // `jacobian` is d(error)/d(joint); a Newton step toward zero error
-        // needs `jacobian * step ≈ -error_vec`, not `≈ error_vec`. An
-        // earlier version of this solver passed `error_vec` directly, which
-        // solves for the step that *increases* error fastest — the
-        // regression test that caught this is this module's own
-        // `converges_to_a_reachable_target_within_tolerance`.
-        let step = Matrix::damped_least_squares(
-            &jacobian,
-            &error_vec.scaled(-1.0),
-            config.damping,
-            Some(&weights),
-        )?;
-
-        for (j, s) in joints.iter_mut().zip(step.as_slice()) {
-            *j += s.clamp(-config.max_step, config.max_step);
+    validate_tasks(profile, tasks)?;
+    if let Some(prior) = base.free {
+        for w in [prior.translation_weight, prior.rotation_weight] {
+            if !w.is_finite() || w < 0.0 {
+                return Err(IkError::InvalidWeight);
+            }
         }
-        clamp_to_limits(profile, &mut joints);
-
-        error_vec = error_vector(profile, &joints, targets)?;
-        error_norm = error_vec.norm();
-        iterations += 1;
     }
+    let problem = Problem {
+        profile,
+        base,
+        tasks,
+        collision,
+        limits: profile
+            .actuated_joints()
+            .map(|j| j.limits.position.map(|r| (r.lo.value(), r.hi.value())))
+            .collect(),
+    };
 
+    let mut x = vec![0.0; problem.base_vars()];
+    x.extend_from_slice(initial);
+    problem.project(&mut x);
+    let mut r = problem.residual(&x)?;
+    let mut cost = r.norm();
+    let mut lambda = config.damping.max(1e-12);
+    let mut iterations = 0;
+    let termination = loop {
+        if cost <= config.tolerance {
+            break Termination::Converged;
+        }
+        if iterations >= config.max_iterations {
+            break Termination::MaxIterations;
+        }
+        if config.deadline.is_some_and(|d| started.elapsed() >= d) {
+            break Termination::Deadline;
+        }
+        iterations += 1;
+        let jac = problem.jacobian(&x, config.finite_difference_step)?;
+        let rhs = r.scaled(-1.0);
+        let mut accepted = None;
+        for _ in 0..10 {
+            let step = Matrix::damped_least_squares(&jac, &rhs, lambda, None)?;
+            let mut trial = x.clone();
+            for (v, s) in trial.iter_mut().zip(step.as_slice()) {
+                *v += s.clamp(-config.max_step, config.max_step);
+            }
+            problem.project(&mut trial);
+            let tr = problem.residual(&trial)?;
+            let tc = tr.norm();
+            if tc < cost {
+                accepted = Some((trial, tr, tc));
+                lambda = (lambda / 3.0).max(1e-12);
+                break;
+            }
+            lambda *= 4.0;
+        }
+        let Some((nx, nr, nc)) = accepted else {
+            break Termination::Stalled;
+        };
+        let improvement = (cost * cost - nc * nc) / (cost * cost);
+        x = nx;
+        r = nr;
+        cost = nc;
+        if improvement < config.stall_fraction && cost > config.tolerance {
+            break Termination::Stalled;
+        }
+    };
+
+    let (base_pose, poses) = problem.evaluate(&x)?;
     Ok(IkSolution {
-        joint_values: joints,
+        joint_values: x[problem.base_vars()..].to_vec(),
+        base: base_pose,
         iterations,
-        final_error: error_norm,
-        converged: error_norm <= config.tolerance,
+        final_error: cost,
+        converged: termination == Termination::Converged,
+        termination,
+        task_errors: tasks
+            .iter()
+            .map(|t| {
+                let mut rows = Vec::new();
+                problem.task_rows(
+                    t,
+                    &base_pose,
+                    &poses,
+                    &x[problem.base_vars()..],
+                    1.0,
+                    &mut rows,
+                );
+                rows.iter().map(|v| v * v).sum::<f64>().sqrt()
+            })
+            .collect(),
+        max_penetration: collision.map_or(0.0, |c| {
+            c.penetrations(&base_pose, &poses)
+                .into_iter()
+                .fold(0.0, f64::max)
+        }),
     })
 }
 
-fn error_vector(
-    profile: &RobotProfile,
-    joints: &[f64],
-    targets: &[PositionTarget],
-) -> Result<Matrix, IkError> {
-    let poses = forward_kinematics(profile, joints)?;
-    let mut rows = Vec::with_capacity(targets.len() * 3);
-    for t in targets {
-        let pose = poses
-            .by_index(t.link_index)
-            .expect("caller-supplied valid link index");
-        let current = pose.translation;
-        rows.push(t.target.x - current.x);
-        rows.push(t.target.y - current.y);
-        rows.push(t.target.z - current.z);
-    }
-    Ok(Matrix::column(&rows))
-}
-
-fn numerical_jacobian(
-    profile: &RobotProfile,
-    joints: &[f64],
-    targets: &[PositionTarget],
-    step: f64,
-) -> Result<Matrix, IkError> {
-    let rows = targets.len() * 3;
-    let cols = joints.len();
-    let mut jac = Matrix::zeros(rows, cols);
-    for c in 0..cols {
-        let mut plus = joints.to_vec();
-        plus[c] += step;
-        let mut minus = joints.to_vec();
-        minus[c] -= step;
-        let e_plus = error_vector(profile, &plus, targets)?;
-        let e_minus = error_vector(profile, &minus, targets)?;
-        for r in 0..rows {
-            // d(error)/d(joint) = -d(position)/d(joint); error_vector already
-            // returns (target - current), so this finite difference of the
-            // error directly gives the Jacobian the damped solve expects.
-            jac[(r, c)] = (e_plus[(r, 0)] - e_minus[(r, 0)]) / (2.0 * step);
+fn validate_tasks(profile: &RobotProfile, tasks: &[Task]) -> Result<(), IkError> {
+    let links = profile.links.len();
+    let dof = profile.dof();
+    let ok_w = |w: f64| w.is_finite() && w >= 0.0;
+    for (i, t) in tasks.iter().enumerate() {
+        let valid = match t {
+            Task::Position { link, weight, .. } | Task::Orientation { link, weight, .. } => {
+                if !ok_w(*weight) {
+                    return Err(IkError::InvalidWeight);
+                }
+                *link < links
+            }
+            Task::RelativePosition {
+                link, base, weight, ..
+            } => {
+                if !ok_w(*weight) {
+                    return Err(IkError::InvalidWeight);
+                }
+                *link < links && *base < links
+            }
+            Task::Posture { nominal, weights } => {
+                if !weights.iter().all(|w| ok_w(*w)) {
+                    return Err(IkError::InvalidWeight);
+                }
+                nominal.len() == dof && weights.len() == dof
+            }
+        };
+        if !valid {
+            return Err(IkError::InvalidTask { task: i });
         }
     }
-    Ok(jac)
+    Ok(())
 }
 
-fn clamp_to_limits(profile: &RobotProfile, joints: &mut [f64]) {
-    for (j, joint_spec) in joints.iter_mut().zip(profile.actuated_joints()) {
-        if let Some(range) = joint_spec.limits.position {
-            *j = range.clamp(robot_types::units::Radians(*j)).value();
+struct Problem<'a> {
+    profile: &'a RobotProfile,
+    base: Base,
+    tasks: &'a [Task],
+    collision: Option<&'a SelfCollision>,
+    limits: Vec<Option<(f64, f64)>>,
+}
+
+impl Problem<'_> {
+    fn base_vars(&self) -> usize {
+        if self.base.free.is_some() {
+            6
+        } else {
+            0
         }
+    }
+
+    fn project(&self, x: &mut [f64]) {
+        let nb = self.base_vars();
+        for (v, lim) in x[nb..].iter_mut().zip(&self.limits) {
+            if let Some((lo, hi)) = lim {
+                *v = v.clamp(*lo, *hi);
+            }
+        }
+    }
+
+    fn evaluate(&self, x: &[f64]) -> Result<(RigidPose, LinkPoses), IkError> {
+        let nb = self.base_vars();
+        let base = if nb == 6 {
+            let dt = Vec3::new(x[0], x[1], x[2]);
+            let dr = Quat::from_rotation_vector(Vec3::new(x[3], x[4], x[5]));
+            RigidPose {
+                translation: self.base.pose.translation + dt,
+                rotation: (dr * self.base.pose.rotation).normalized(),
+            }
+        } else {
+            self.base.pose
+        };
+        Ok((base, forward_kinematics(self.profile, &x[nb..])?))
+    }
+
+    fn residual(&self, x: &[f64]) -> Result<Matrix, IkError> {
+        let (base, poses) = self.evaluate(x)?;
+        let nb = self.base_vars();
+        let mut rows = Vec::with_capacity(self.tasks.iter().map(Task::rows).sum::<usize>() + 6);
+        if let Some(prior) = self.base.free {
+            let (st, sr) = (
+                prior.translation_weight.sqrt(),
+                prior.rotation_weight.sqrt(),
+            );
+            rows.extend([
+                x[0] * st,
+                x[1] * st,
+                x[2] * st,
+                x[3] * sr,
+                x[4] * sr,
+                x[5] * sr,
+            ]);
+        }
+        for t in self.tasks {
+            self.task_rows(t, &base, &poses, &x[nb..], f64::NAN, &mut rows);
+        }
+        if let Some(c) = self.collision {
+            let s = c.weight.sqrt();
+            rows.extend(c.penetrations(&base, &poses).into_iter().map(|p| p * s));
+        }
+        Ok(Matrix::column(&rows))
+    }
+
+    /// Appends `t`'s residual rows. `scale` overrides the task weight's
+    /// square root when finite (1.0 gives unweighted rows for reporting).
+    fn task_rows(
+        &self,
+        t: &Task,
+        base: &RigidPose,
+        poses: &LinkPoses,
+        q: &[f64],
+        scale: f64,
+        rows: &mut Vec<f64>,
+    ) {
+        let s = |w: f64| if scale.is_finite() { scale } else { w.sqrt() };
+        let world = |link: usize| base.compose(&poses.by_index(link).expect("validated link"));
+        match t {
+            Task::Position {
+                link,
+                target,
+                weight,
+            } => {
+                let e = world(*link).translation - *target;
+                rows.extend(e.to_xyz().map(|v| v * s(*weight)));
+            }
+            Task::Orientation {
+                link,
+                target,
+                weight,
+            } => {
+                let current = world(*link).rotation;
+                let e = (current * target.conjugate())
+                    .normalized()
+                    .to_rotation_vector();
+                rows.extend(e.to_xyz().map(|v| v * s(*weight)));
+            }
+            Task::RelativePosition {
+                link,
+                base: b,
+                target,
+                weight,
+            } => {
+                let e = world(*link).translation - world(*b).translation - *target;
+                rows.extend(e.to_xyz().map(|v| v * s(*weight)));
+            }
+            Task::Posture { nominal, weights } => {
+                // A zero-weight joint is not part of the task, so it does not
+                // count toward the reported (unweighted) error either.
+                for ((v, n), w) in q.iter().zip(nominal).zip(weights) {
+                    rows.push(if *w > 0.0 { (v - n) * s(*w) } else { 0.0 });
+                }
+            }
+        }
+    }
+
+    fn jacobian(&self, x: &[f64], h: f64) -> Result<Matrix, IkError> {
+        let base = self.residual(x)?;
+        let mut jac = Matrix::zeros(base.rows(), x.len());
+        let mut probe = x.to_vec();
+        for c in 0..x.len() {
+            let v = x[c];
+            probe[c] = v + h;
+            let plus = self.residual(&probe)?;
+            probe[c] = v - h;
+            let minus = self.residual(&probe)?;
+            probe[c] = v;
+            for r in 0..base.rows() {
+                jac[(r, c)] = (plus[(r, 0)] - minus[(r, 0)]) / (2.0 * h);
+            }
+        }
+        Ok(jac)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use robot_model::actuator::{
-        ActuatorSpec, PdGains, ThermalLimits, TorqueSpeedEnvelope, Transmission,
-    };
-    use robot_model::joint::{JointKind, JointLimits, JointSpec};
-    use robot_model::link::{LinkSpec, MassProperties};
-    use robot_model::pose::RigidPose;
-    use robot_model::profile::{FirmwareContract, PROFILE_SCHEMA_VERSION};
-    use robot_types::frames::{FrameId, GravityConvention};
-    use robot_types::ids::{ActuatorId, JointId, LinkId, Name};
-    use robot_types::schema::ExtensionTable;
-    use robot_types::time::Duration;
-    use robot_types::units::{
-        Amperes, Celsius, Kilograms, NewtonMetres, Radians, RadiansPerSecond, Range,
-    };
+    use crate::test_support::two_link_arm;
+    use robot_types::units::Radians;
 
-    fn link(id: u32, name: &str) -> LinkSpec {
-        let mut mp = MassProperties::MASSLESS;
-        mp.mass = Kilograms(1.0);
-        LinkSpec {
-            id: LinkId::new(id),
-            name: Name::new(name).unwrap(),
-            mass: mp,
-            collision: Vec::new(),
-        }
+    #[test]
+    fn an_orientation_target_is_reached() {
+        let profile = two_link_arm();
+        // The hand's orientation is the sum of both joint angles about z.
+        let target = Quat::from_rz(Radians(1.2)).unwrap();
+        let tasks = [Task::Orientation {
+            link: 3,
+            target,
+            weight: 1.0,
+        }];
+        let s = solve_tasks(
+            &profile,
+            &[0.0, 0.0],
+            Base::FIXED_AT_ORIGIN,
+            &tasks,
+            None,
+            &IkConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(s.termination, Termination::Converged);
+        assert!((s.joint_values[0] + s.joint_values[1] - 1.2).abs() < 1e-5);
     }
 
-    fn joint(id: u32, parent: u32, child: u32, offset_x: f64) -> JointSpec {
-        JointSpec {
-            id: JointId::new(id),
-            name: Name::new(&format!("j{id}")).unwrap(),
-            kind: JointKind::Revolute,
-            parent: LinkId::new(parent),
-            child: LinkId::new(child),
-            origin: RigidPose::from_translation(Vec3::new(offset_x, 0.0, 0.0)),
-            axis: Vec3::unit_z(),
-            limits: JointLimits::bounded(
-                Range::<Radians>::new(Radians(-3.0), Radians(3.0)).unwrap(),
-                RadiansPerSecond(10.0),
-                NewtonMetres(50.0),
-            ),
-            sign: 1.0,
-            zero_offset: 0.0,
-        }
+    #[test]
+    fn a_posture_prior_picks_among_redundant_solutions() {
+        // Orientation fixes only the sum of the two angles; the prior on the
+        // shoulder pins the split.
+        let profile = two_link_arm();
+        let tasks = [
+            Task::Orientation {
+                link: 3,
+                target: Quat::from_rz(Radians(1.0)).unwrap(),
+                weight: 1.0,
+            },
+            Task::Posture {
+                nominal: vec![0.25, 0.0],
+                weights: vec![1e-2, 0.0],
+            },
+        ];
+        let s = solve_tasks(
+            &profile,
+            &[0.0, 0.0],
+            Base::FIXED_AT_ORIGIN,
+            &tasks,
+            None,
+            &IkConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            (s.joint_values[0] - 0.25).abs() < 1e-4,
+            "{:?}",
+            s.joint_values
+        );
+        assert!(
+            (s.joint_values[1] - 0.75).abs() < 1e-4,
+            "{:?}",
+            s.joint_values
+        );
+        assert!(s.task_errors[1] < 1e-4);
     }
 
-    /// A genuine 2-DOF planar arm: shoulder rotates the whole arm, elbow
-    /// rotates the forearm about its own pivot, and a fixed joint carries
-    /// the hand a further unit length beyond the elbow — without that
-    /// third link, the "lower" link's own position would depend on the
-    /// shoulder angle alone (its origin *is* the elbow pivot), which was
-    /// the actual cause of this test's first failure: the originally
-    /// chosen target was not on the elbow's reachable circle at all.
-    fn two_link_arm() -> RobotProfile {
-        let actuator = |id: u32, joint_id: u32| ActuatorSpec {
-            id: ActuatorId::new(id),
-            name: Name::new(&format!("a{id}")).unwrap(),
-            joint: JointId::new(joint_id),
-            transmission: Transmission::DIRECT,
-            envelope: TorqueSpeedEnvelope {
-                stall_torque: NewtonMetres(1.0),
-                corner_speed: RadiansPerSecond(1.0),
-                no_load_speed: RadiansPerSecond(2.0),
-            },
-            gains: Some(PdGains { kp: 1.0, kd: 0.1 }),
-            command_latency: Duration::from_millis(1),
-            thermal: ThermalLimits {
-                limit: Celsius(80.0),
-                ambient: Celsius(25.0),
-                time_constant: Duration::from_secs(10),
-                current_at_limit: Amperes(5.0),
-            },
-            current_uncertainty: Amperes(0.01),
+    #[test]
+    fn a_relative_target_moves_with_the_base_link() {
+        // Hand relative to the upper link's origin (the shoulder pivot):
+        // fixing it at (1, 1, 0) is the elbow at 90 degrees with the
+        // shoulder at 0 or the mirror solution.
+        let profile = two_link_arm();
+        let tasks = [Task::RelativePosition {
+            link: 3,
+            base: 1,
+            target: Vec3::new(1.0, 1.0, 0.0),
+            weight: 1.0,
+        }];
+        let s = solve_tasks(
+            &profile,
+            &[0.1, 0.5],
+            Base::FIXED_AT_ORIGIN,
+            &tasks,
+            None,
+            &IkConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(s.termination, Termination::Converged);
+        let poses = forward_kinematics(&profile, &s.joint_values).unwrap();
+        let d = poses.by_index(3).unwrap().translation - poses.by_index(1).unwrap().translation;
+        assert!((d - Vec3::new(1.0, 1.0, 0.0)).norm() < 1e-4);
+    }
+
+    #[test]
+    fn a_free_base_translates_to_reach_a_far_target() {
+        let profile = two_link_arm();
+        let tasks = [Task::Position {
+            link: 3,
+            target: Vec3::new(5.0, 0.0, 0.0),
+            weight: 1.0,
+        }];
+        let base = Base {
+            pose: RigidPose::IDENTITY,
+            free: Some(BasePrior {
+                translation_weight: 1e-6,
+                rotation_weight: 1e-6,
+            }),
         };
-        let hand_joint = JointSpec {
-            id: JointId::new(2),
-            name: Name::new("hand-fixed").unwrap(),
-            kind: JointKind::Fixed,
-            parent: LinkId::new(2),
-            child: LinkId::new(3),
-            origin: RigidPose::from_translation(Vec3::new(1.0, 0.0, 0.0)),
-            axis: Vec3::unit_z(),
-            limits: JointLimits::unbounded(RadiansPerSecond(0.0), NewtonMetres(0.0)),
-            sign: 1.0,
-            zero_offset: 0.0,
-        };
-        RobotProfile {
-            schema_version: PROFILE_SCHEMA_VERSION,
-            name: Name::new("fixture-two-link-arm").unwrap(),
-            profile_version: "1.0".to_owned(),
-            joints: vec![joint(0, 0, 1, 0.0), joint(1, 1, 2, 1.0), hand_joint],
-            links: vec![
-                link(0, "base"),
-                link(1, "upper"),
-                link(2, "lower"),
-                link(3, "hand"),
-            ],
-            actuators: vec![actuator(0, 0), actuator(1, 1)],
-            sensors: Vec::new(),
-            root_link: LinkId::new(0),
-            gravity: GravityConvention::minus_z_standard(FrameId::WORLD),
-            firmware: FirmwareContract {
-                version: "1.0".to_owned(),
-                command_expiration: Duration::from_millis(100),
-                watchdog_timeout: Duration::from_millis(200),
-                has_independent_estop: true,
-                allowed_modes: Vec::new(),
+        let s = solve_tasks(
+            &profile,
+            &[0.0, 0.0],
+            base,
+            &tasks,
+            None,
+            &IkConfig {
+                max_iterations: 200,
+                max_step: 1.0,
+                tolerance: 1e-3,
+                ..IkConfig::default()
             },
-            extensions: ExtensionTable::new(),
-        }
+        )
+        .unwrap();
+        assert!(
+            s.task_errors[0] < 1e-3,
+            "{:?} {:?}",
+            s.task_errors,
+            s.termination
+        );
+        assert!(s.base.translation.x > 2.9);
+    }
+
+    #[test]
+    fn a_zero_deadline_stops_immediately_and_says_so() {
+        let profile = two_link_arm();
+        let tasks = [Task::Position {
+            link: 3,
+            target: Vec3::new(1.0, 1.0, 0.0),
+            weight: 1.0,
+        }];
+        let config = IkConfig {
+            deadline: Some(std::time::Duration::ZERO),
+            ..IkConfig::default()
+        };
+        let s = solve_tasks(
+            &profile,
+            &[0.0, 0.0],
+            Base::FIXED_AT_ORIGIN,
+            &tasks,
+            None,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(s.termination, Termination::Deadline);
+        assert_eq!(s.iterations, 0);
+    }
+
+    #[test]
+    fn invalid_tasks_are_rejected() {
+        let profile = two_link_arm();
+        let bad_link = [Task::Position {
+            link: 99,
+            target: Vec3::ZERO,
+            weight: 1.0,
+        }];
+        assert_eq!(
+            solve_tasks(
+                &profile,
+                &[0.0, 0.0],
+                Base::FIXED_AT_ORIGIN,
+                &bad_link,
+                None,
+                &IkConfig::default()
+            )
+            .unwrap_err(),
+            IkError::InvalidTask { task: 0 }
+        );
+        let bad_weight = [Task::Position {
+            link: 3,
+            target: Vec3::ZERO,
+            weight: -1.0,
+        }];
+        assert_eq!(
+            solve_tasks(
+                &profile,
+                &[0.0, 0.0],
+                Base::FIXED_AT_ORIGIN,
+                &bad_weight,
+                None,
+                &IkConfig::default()
+            )
+            .unwrap_err(),
+            IkError::InvalidWeight
+        );
+    }
+
+    #[test]
+    fn an_unreachable_target_stalls_rather_than_running_out() {
+        let profile = two_link_arm();
+        let target = PositionTarget {
+            link_index: 3,
+            target: Vec3::new(10.0, 0.0, 0.0),
+            weight: 1.0,
+        };
+        let s = solve(
+            &profile,
+            &[0.3, 0.3],
+            &[target],
+            &IkConfig {
+                max_iterations: 500,
+                ..IkConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(s.termination, Termination::Stalled);
+        assert!((s.final_error - 8.0).abs() < 1e-3, "{}", s.final_error);
     }
 
     #[test]

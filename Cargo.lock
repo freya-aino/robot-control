@@ -2163,6 +2163,8 @@ dependencies = [
 name = "motion-retarget"
 version = "0.1.0"
 dependencies = [
+ "motion-process",
+ "robot-artifacts",
  "robot-model",
  "robot-types",
 ]
