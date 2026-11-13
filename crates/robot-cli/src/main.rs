@@ -3,7 +3,7 @@
 //! PLAN.md states its own proposed CLI surface is a set of "interface
 //! requirements, not currently implemented tools." This binary wires a
 //! subset of that surface to real crate code — `data inspect`, `sim
-//! qualify`, `eval summarize`, `motion validate` — and reports every
+//! qualify`, `sim multibody`, `eval summarize`, `motion validate` — and reports every
 //! other named command as not yet implemented, with the specific reason,
 //! rather than omitting it silently.
 
@@ -23,9 +23,27 @@ fn run(args: &[String]) -> i32 {
         Some("motion") => run_motion(&args[1..]),
         Some("sim") => run_sim(&args[1..]),
         Some("eval") => run_eval(&args[1..]),
-        Some(group @ ("train" | "skills" | "deps" | "adapt" | "deploy" | "replay")) => {
-            not_implemented(group, args.get(1).map(String::as_str))
-        }
+        Some("train") => commands::pipeline::train(&args[1..]),
+        Some("replay") => match args.get(1) {
+            Some(dir) => commands::pipeline::replay(&PathBuf::from(dir), &args[2..]),
+            None => usage_error("robot replay <run-dir> [--svg <out> [--robot g1-usd|g1] [--every N]]"),
+        },
+        Some("adapt") => match (args.get(1).map(String::as_str), args.get(2)) {
+            (Some("identify"), Some(csv)) => commands::pipeline::adapt_identify(&PathBuf::from(csv), &args[3..]),
+            _ => usage_error("robot adapt identify <csv> [--dead-band RAD_PER_S]"),
+        },
+        Some("deploy") => not_implemented(
+            "deploy",
+            Some("no policy-bundle format exists and no hardware target is chosen (C-02); robot_control and robot_hardware::link::WireAdapter are the pieces it will wire"),
+        ),
+        Some("deps") => not_implemented(
+            "deps",
+            Some("the dependency knowledge base is developer tooling and this binary deliberately does not link robot-devtools; run `cargo run -p robot-devtools --bin devtools -- kb-sweep|kb-search|ledger-diff`"),
+        ),
+        Some("skills") => not_implemented(
+            "skills",
+            Some("no skill-manifest file format exists yet; robot_skills::selection and robot_control::tactical are the library pieces"),
+        ),
         Some(other) => {
             eprintln!("error: unknown command {other:?}");
             print_usage();
@@ -44,7 +62,12 @@ fn run_data(args: &[String]) -> i32 {
             Some(path) => commands::data::inspect(&PathBuf::from(path)),
             None => usage_error("robot data inspect <path>"),
         },
-        Some("import") => not_implemented("data import", None),
+        Some("import") => match args.get(1) {
+            Some(path) => commands::pipeline::data_import(&PathBuf::from(path), &args[2..]),
+            None => usage_error(
+                "robot data import <source> --store <dir> [--license <id>] [--training]",
+            ),
+        },
         Some(other) => unknown_subcommand("data", other),
         None => usage_error("robot data <inspect|import> ..."),
     }
@@ -53,13 +76,16 @@ fn run_data(args: &[String]) -> i32 {
 fn run_motion(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("validate") => match args.get(1) {
+            Some(path) if args.iter().any(|a| a == "--reference") => {
+                commands::pipeline::motion_validate_reference(&PathBuf::from(path), &args[2..])
+            }
             Some(path) => commands::motion::validate(&PathBuf::from(path)),
-            None => usage_error("robot motion validate <path>"),
+            None => usage_error("robot motion validate <bvh> [--reference <csv> --map <file> [--robot g1]]"),
         },
-        Some("retarget") => not_implemented(
-            "motion retarget",
-            Some("no generic source-skeleton-to-robot joint-mapping config format exists yet; motion_retarget::ik::solve is real but needs targets this CLI cannot derive generically"),
-        ),
+        Some("retarget") => match args.get(1) {
+            Some(path) => commands::pipeline::motion_retarget(&PathBuf::from(path), &args[2..]),
+            None => usage_error("robot motion retarget <bvh> --map <file> --out <csv> [--robot g1|g1-usd] [--unit m|cm|mm] [--up y|z]"),
+        },
         Some(other) => unknown_subcommand("motion", other),
         None => usage_error("robot motion <validate|retarget> ..."),
     }
@@ -71,7 +97,7 @@ fn run_sim(args: &[String]) -> i32 {
         Some("multibody") => run_multibody(&args[1..]),
         Some(other) => unknown_subcommand("sim", other),
         None => usage_error(
-            "robot sim <qualify|multibody> [--steps N] [--dt SECONDS] [--floating] [--out DIR]",
+            "robot sim <qualify|multibody> [--steps N] [--dt SECONDS] [--floating] [--zero-torque] [--out DIR] [--scene FILE] [--actuation drives|damping|zero] [--limit-margin RAD] [--integrator euler|implicitfast|rk4]",
         ),
     }
 }
@@ -187,9 +213,10 @@ fn run_multibody(flags: &[String]) -> i32 {
 fn run_eval(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("summarize") => commands::eval::summarize_cli(&args[1..]),
-        Some("--bundle") | Some("run") => not_implemented(
-            "eval run",
-            Some("no bundle/suite format or suite runner exists yet; robot_eval::stats::summarize is real and reachable via `robot eval summarize <values...>`"),
+        Some("run") => commands::pipeline::eval_run(&args[1..]),
+        Some("--bundle") => not_implemented(
+            "eval --bundle",
+            Some("no policy-bundle format exists yet; `robot eval run --profile <toml> --results <csv>` evaluates seed results against an acceptance profile"),
         ),
         Some(other) => unknown_subcommand("eval", other),
         None => usage_error("robot eval summarize <values...>"),
@@ -242,7 +269,7 @@ fn print_usage() {
     eprintln!("  robot data inspect <path>");
     eprintln!("  robot motion validate <path>");
     eprintln!("  robot sim qualify [--steps N] [--dt SECONDS]");
-    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--actuation drives|damping|zero] [--limit-margin RAD]\n           [--integrator euler|implicitfast|rk4]");
+    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--out DIR] [--scene FILE] [--actuation drives|damping|zero]\n           [--limit-margin RAD] [--integrator euler|implicitfast|rk4]");
     eprintln!("  robot eval summarize <values...>");
     eprintln!();
     eprintln!("named in PLAN.md but not implemented yet:");
@@ -266,7 +293,8 @@ mod tests {
 
     #[test]
     fn a_named_but_unbuilt_command_reports_not_implemented_not_unknown() {
-        assert_eq!(run(&["train".to_owned()]), EXIT_NOT_IMPLEMENTED);
+        assert_eq!(run(&["skills".to_owned()]), EXIT_NOT_IMPLEMENTED);
+        assert_eq!(run(&["deploy".to_owned()]), EXIT_NOT_IMPLEMENTED);
         assert_eq!(
             run(&["deps".to_owned(), "inventory".to_owned()]),
             EXIT_NOT_IMPLEMENTED

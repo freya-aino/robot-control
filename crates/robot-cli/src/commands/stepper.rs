@@ -25,9 +25,10 @@
 //! is not a deviation. The same holds for `robot_sim::constraint::solve_equality`,
 //! which is the CPU reference the GPU equality kernel is validated against.
 //!
-//! Earlier runs remain reproducible from git history and from the archived
-//! `outputs/g1-stance-usd-replay/`, which records the command and the commit
-//! that produced it.
+//! Earlier runs remain reproducible from git history: the command and the
+//! commit that produced each one are recorded in
+//! `docs/ledger/automation-log.md` (the `outputs/` replay folders are
+//! gitignored scratch and have since been deleted).
 
 use robot_model::profile::RobotProfile;
 use robot_sim::contact::GroundContact;
@@ -159,8 +160,9 @@ impl Stepper {
 
     /// Collision shapes modelled, and shapes that could not be.
     ///
-    /// The second number is not cosmetic: a mesh collider is counted and not
-    /// collided, which is Appendix D M-27, so a run states how much of the
+    /// The second number is not cosmetic: a shape the engine cannot collide
+    /// is counted here rather than dropped (Appendix D M-27 was this number
+    /// being non-zero for the G1's meshes), so a run states how much of the
     /// model's collision geometry it actually simulated.
     #[must_use]
     pub fn shape_counts(&self) -> (usize, usize) {

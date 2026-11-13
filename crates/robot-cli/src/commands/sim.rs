@@ -1,14 +1,15 @@
 //! `robot sim qualify` and `robot sim multibody` — PLAN.md §4's proposed
 //! `robot sim qualify` command, plus a second one this revision adds for
-//! the multi-body solver in `robot_sim::articulated`.
+//! the multi-body engine in `robot_sim::world`.
 //!
 //! `qualify` is SPECS.md §9.1's "analytic pendulum" energy-conservation
-//! check (Appendix B.4 item 2). `multibody` runs the vendored Unitree G1
-//! fixture's real joint tree through the Articulated-Body Algorithm. Without
-//! `--floating` the pelvis is bolted to the world. With `--floating` it is a
-//! free base on a sphere ground plane (ADR 0010), driven by a clamped PD
-//! stance hold, or by zero torque with `--zero-torque`. Neither is a standing
-//! or walking claim. The floating verdict is only whether the pelvis stays
+//! check (Appendix B.4 item 2). `multibody` runs the vendored Unitree G1's
+//! USD description through the composite-frame dynamics, exact collision
+//! manifolds and Newton constraint solver of `World`. Without `--floating`
+//! the pelvis is bolted to the world. With `--floating` it is a free base on
+//! the scene's ground plane (ADR 0015), held by the model's declared drives
+//! (`--actuation`), or by zero torque with `--zero-torque`. Neither is a
+//! standing or walking claim. The floating verdict is only whether the pelvis stays
 //! above the plane. A full qualification run (actuator step response, foot
 //! slip, push recovery, controlled impact) is not implemented here.
 

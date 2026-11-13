@@ -3,6 +3,7 @@
 pub mod data;
 pub mod eval;
 pub mod motion;
+pub mod pipeline;
 pub mod sim;
 pub mod stepper;
 pub mod usd_replay;
