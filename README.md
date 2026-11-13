@@ -21,7 +21,7 @@ environment and run the full gate with:
 
 ```
 devenv shell   # or: direnv allow, if configured
-devenv test    # fmt-check + clippy -D warnings + cargo test --workspace
+devenv test    # fmt-check + clippy -D warnings + exclusion gate + cargo test --workspace
 ```
 
 ### Running the components
@@ -35,13 +35,14 @@ use `target/release/robot`. With no arguments it prints its usage.
 | `robot data inspect <path>` | Decodes a binary chunk or a TOML artifact and reports its contents | `cargo run -p robot-cli -- data inspect <file>` |
 | `robot motion validate <path>` | Parses a BVH source file and checks its motion record (channels, frame rate, license, missing frames). It does not validate a retargeted robot motion | `cargo run -p robot-cli -- motion validate <file.bvh>` |
 | `robot sim qualify [--steps N] [--dt S]` | Runs the analytic pendulum energy-drift check (defaults: 2000 steps, 0.001 s) | `cargo run -p robot-cli -- sim qualify` |
-| `robot sim multibody [--floating] [--zero-torque] [--dt S] [--steps N] [--out DIR]` | Runs the vendored Unitree G1 joint tree through the articulated-body solver. Without `--floating` the pelvis is fixed. With `--floating` it is a free base on a sphere ground plane under a clamped PD stance hold, or zero torque with `--zero-torque`. `--out DIR` writes per-step SVG pose frames and requires `--floating`. Defaults: `--dt 0.0001`; a floating run covers 2 s of simulated time, a fixed-base run 2000 steps | `cargo run -p robot-cli -- sim multibody --floating --out /tmp/g1-frames` |
+| `robot sim multibody [--floating] [--zero-torque] [--dt S] [--steps N] [--out DIR] [--scene FILE] [--actuation drives\|damping\|zero] [--limit-margin RAD] [--integrator euler\|implicitfast\|rk4]` | Runs the vendored Unitree G1, loaded from its USD description, through the composite-frame dynamics, exact collision manifolds and Newton constraint solver of `robot_sim::world`. Without `--floating` the pelvis is fixed. With `--floating` it is a free base on the scene's ground plane (default `assets/scenes/g1_ground.usda`), held by the model's declared USD drives, or by zero torque with `--zero-torque`. `--out DIR` writes per-step CSV, JSON Lines and SVG pose frames plus two USD replays (`replay.usda`, `replay_playback.usda`) and requires `--floating`. Defaults: `--dt 0.0001`, `--actuation drives`, `--limit-margin 0`, `--integrator euler`; a floating run covers 2 s of simulated time, a fixed-base run 2000 steps | `cargo run -p robot-cli -- sim multibody --floating --out /tmp/g1-frames` |
 | `robot eval summarize <values...>` | Prints summary statistics for a list of numbers | `cargo run -p robot-cli -- eval summarize 1.0 2.0 3.0` |
 
 Exit codes: `0` success, `1` a command ran and found a real problem (a rejected
-motion, a failed qualification), `2` named but not yet implemented, `64` usage
-error. Commands named in PLAN.md but not built (`data import`, `motion retarget`,
-`eval run`, `train`, `skills`, `deps`, `adapt`, `deploy`, `replay`) exit with `2`
+motion, a failed qualification), `2` named but not yet implemented, `3` a
+floating-base `sim multibody` run too short (under 2 s simulated) to judge,
+`64` usage error. Commands named in PLAN.md but not built (`data import`, `motion retarget`,
+`eval --bundle` (also spelled `eval run`), `train`, `skills`, `deps`, `adapt`, `deploy`, `replay`) exit with `2`
 and a reason on stderr.
 
 The other crates are libraries, used by the CLI and by each other, and are
@@ -50,7 +51,7 @@ exercised through their tests. Beyond the CLI, these are available:
 - GPU examples (need `--features cubecl` and a working wgpu/Vulkan adapter; ADR 0012 records runs on Intel Vulkan and Mesa Lavapipe):
   - `cargo run -p robot-sim-gpu --features cubecl --example gpu_latency` prints the max error against the CPU reference, bitwise determinism over repeated launches, and wall-clock latency. It is not a throughput benchmark.
   - `cargo run -p robot-sim-gpu --features cubecl --example gpu_resource_repeatability` prints transfer-inclusive resource accounting for the pendulum RK4 and equality paths.
-- Fidelity report: `robot_sim::fidelity` writes `fidelity.toml` (schema v7) through its library API. Only the tests call it, so no command currently produces the file.
+- Fidelity report: `robot_sim::fidelity` writes `fidelity.toml` (schema v8) through its library API. Only the tests call it, so no command currently produces the file.
 
 Every crate below has a real, tested implementation grounded in a specific
 SPECS.md section (no stub crates remain) and its own `README.md` describing
@@ -66,61 +67,65 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | --- | --- | --- |
 | [`robot-types`](crates/robot-types/README.md) | §§3, 5, 6, 7, 9, 10, 12 | Shared vocabulary: units, time, math, frames, IDs, schema/evidence/mode/tier types, RNG, observation/action specs, motion and episode records, transitions, bundle manifests |
 | [`robot-artifacts`](crates/robot-artifacts/README.md) | §7 | Content-addressed storage, the bounded TOML subset, the binary chunk format, run/artifact manifests and promotion ledger |
-| [`robot-model`](crates/robot-model/README.md) | §6, §7.1 | The kinematic tree, inertias, actuators, sensors, forward kinematics, URDF import |
-| [`motion-io`](crates/motion-io/README.md) | §8.1 | BVH motion-capture import |
-| [`motion-process`](crates/motion-process/README.md) | §8.2 | Motion resampling (filtering/contact/segmentation not yet implemented) |
-| [`motion-retarget`](crates/motion-retarget/README.md) | §8.3 | Damped-least-squares task-space IK |
-| [`motion-validate`](crates/motion-validate/README.md) | §8.3 | Retargeting validation reports and acceptance thresholds |
-| [`robot-nn`](crates/robot-nn/README.md) | gap-filling, §9/§10 | A small MLP with zero-allocation inference, kept isolated from training code |
-| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Pure-array CPU core: pendulum benchmarks, ABA/RNE multi-body solver with a floating base, formula modules for the integrator, passive forces, actuators, equality constraints and plane-sphere contact, an oracle module, and a schema-v7 fidelity harness. The per-step spec index is [`specs/README.md`](crates/robot-sim/specs/README.md) |
-| [`robot-sim-gpu`](crates/robot-sim-gpu) | §9.1, PLAN.md Phase 3 | Feature-gated CubeCL f32 backend (`--features cubecl`, off by default) for a subset of the `robot-sim` functions, with CPU-vs-GPU agreement tests and `tolerances.toml`. Not part of the default build |
-| [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Reward registry and a balance/stabilization task |
+| [`robot-model`](crates/robot-model/README.md) | §6, §7.1, ADR 0015 | The kinematic tree, inertias, actuators, sensors, forward kinematics, URDF and OpenUSD import (mesh colliders reduced to convex hulls), the vendored G1 fixtures |
+| [`motion-io`](crates/motion-io/README.md) | §8.1 | BVH import and export, C3D, AMASS npz, live capture (`robot-capture/1`), originals kept by content ID |
+| [`motion-process`](crates/motion-process/README.md) | §8.2 | Conditioning, filtering, resampling, ground-plane and contact estimation, segmentation, augmentation |
+| [`motion-retarget`](crates/motion-retarget/README.md) | §8.2, §8.3 | Multi-task IK (positions, orientations, chain-relative reach, posture, planted feet, self-collision, free base), temporal refinement, `retarget-map/1` files |
+| [`motion-validate`](crates/motion-validate/README.md) | §8.2, §8.3 | Kinematic error, inverse-dynamics torques with contact distribution, contact consistency, simulated tracking per skill, curation manifests |
+| [`robot-nn`](crates/robot-nn/README.md) | gap-filling, §9/§10 | Allocation-free MLP and GRU inference, the `robot-mlp/1` weights format with unsupported-operator refusal, and the `Policy` seams |
+| [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Pure-array CPU core: pendulum benchmarks; the `world` simulation path (composite-rigid-body mass matrix, unified contact/limit/equality solver with primal Newton default, GJK/EPA collision with convex-hull meshes, semi-implicit Euler, `implicitfast` and RK4, the model's declared actuators, per-run `SimOptions`); the ABA/RNE solver kept as its oracle; an oracle module and a schema-v8 fidelity harness. The per-step spec index is [`specs/README.md`](crates/robot-sim/specs/README.md) |
+| [`robot-sim-gpu`](crates/robot-sim-gpu/README.md) | §9.1, PLAN.md Phase 3 | Feature-gated CubeCL f32 backend (`--features cubecl`, off by default) for a subset of the `robot-sim` functions, with CPU-vs-GPU agreement tests and `tolerances.toml`. Not part of the default build |
+| [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Stand, perturbation, tracking, reach, footwork and boxing-pad tasks over a robot-agnostic humanoid state; privileged-observation audit; calibrated randomization with held-out ranges |
 | [`robot-usd`](crates/robot-usd/README.md) | §7.1, ADR 0015 | Std-only OpenUSD reader (USDC and USDA) with layer composition, and the USD replay writer |
 | [`robot-learn`](crates/robot-learn/README.md) | §§7.6, 9.2, 9.5 | Backprop, Adam, GAE, a diagonal Gaussian policy, rollout buffers, PPO |
-| [`robot-skills`](crates/robot-skills/README.md) | §10.6 | The R1 working set and the R2 in-loop router over an exact-search index; R0 offline corpus selection is not implemented |
-| [`robot-adapt`](crates/robot-adapt/README.md) | §11.3 | System identification (first, mandatory row of the adaptation-method table) |
-| [`robot-perception`](crates/robot-perception/README.md) | §11.2 | Linear/multiplicative-error-state Kalman filtering, contact classification |
-| [`robot-supervisor`](crates/robot-supervisor/README.md) | §12.1, §12.2 | The last-stage fault policy and safety supervisor, structurally isolated from policy/retrieval/personality |
-| [`robot-hardware`](crates/robot-hardware/README.md) | §12 | The hardware-adapter trait, a loopback device and a replay-only device |
-| [`robot-control`](crates/robot-control/README.md) | §5 | The control loop tying timing, supervisor and hardware adapter together |
-| [`robot-eval`](crates/robot-eval/README.md) | §14 | Acceptance profiles (immutable once evaluated) and cross-seed statistics |
-| [`robot-persona`](crates/robot-persona/README.md) | §12.5 | Bounded expressive intent over already-validated skills |
-| [`robot-devtools`](crates/robot-devtools/README.md) | §§2.3.1, 13.1 | The dependency knowledge base's citation/staleness data model (developer/CI-only; no shipping crate depends on it) |
+| [`robot-skills`](crates/robot-skills/README.md) | §10 | Skill descriptors, exact retrieval, R1 working sets, the R2 selector (feasibility, OOD, transitions, dwell, hysteresis, recovery preemption, counters), expert staging, the Markdown catalog |
+| [`robot-adapt`](crates/robot-adapt/README.md) | §11.3 | The adaptation ladder as a gate, system identification, history encoders, simulator correction, bounded residuals, gated fine-tuning, retrieval, morphology, adaptation reports |
+| [`robot-perception`](crates/robot-perception/README.md) | §11.2 | Kalman filters, error-state attitude, floating-base estimation with slip gating, contact hysteresis, opponent tracking with age, NEES consistency against synthetic truth |
+| [`robot-supervisor`](crates/robot-supervisor/README.md) | §12.1, §12.2 | The last stage before the actuators: limits, freshness, comms, contacts, torque-speed and thermal envelope, saturation, contact energy budgets, mode interlocks; the per-robot hazard register |
+| [`robot-hardware`](crates/robot-hardware/README.md) | §4, §6, §12 | Device traits, loopback and replay devices, the `robot-wire/1` protocol adapter (UDP, CRC, sequence accounting, clock mapping) and its reference firmware peer with watchdog |
+| [`robot-control`](crates/robot-control/README.md) | §5, §5.1 | The control loop: policy and tactical tiers with decision age, sensor taps into the supervisor, four-quantity timing reports, the incident channel |
+| [`robot-eval`](crates/robot-eval/README.md) | §14 | Acceptance profiles as content-addressed artifacts, t-based statistics, Welch and TOST, interval-based evaluation, regression gates, the acceptance matrix closed only by ledger artifacts |
+| [`robot-persona`](crates/robot-persona/README.md) | §12.5 | Versioned styles bounded inside validated ranges, an expression arbiter that yields to recovery, session-scoped opponent memory, recognizability and non-degradation evaluation |
+| [`robot-devtools`](crates/robot-devtools/README.md) | §§2.3.1, 13.1 | The exclusion gate, the dependency knowledge base (Cargo.lock inventory, staleness sweeps, fault records) and evidence-ledger diffing that refuses unsupported promotions |
 | [`robot-viewer`](crates/robot-viewer/README.md) | §6, §11.2 | Inspection data layer (skeletons, contacts, tracking error, synchronized playback) — no rendering toolkit is wired in; see its README for why |
-| [`robot-cli`](crates/robot-cli/README.md) | PLAN.md §4 | The `robot` binary: a real, honestly-scoped subset of the proposed CLI surface, with every unimplemented command named explicitly rather than omitted |
+| [`robot-cli`](crates/robot-cli/README.md) | PLAN.md §4 | The `robot` binary: data import, motion retarget and validate, sim, train, eval, adapt identify and replay over the library crates; `skills`, `deps` and `deploy` named with their reasons |
 
 ### What's genuinely limited, right now
 
-- **PPO on the pendulum-stabilization task does not reliably demonstrate
-  measured improvement** within the compute budget tried. The gradient
-  machinery itself is validated independently (an isolated one-step-bandit
-  test passes); the remaining gap is multi-step credit assignment/tuning,
-  not a known implementation bug. Recorded as an honest negative result per
-  `robot-learn`'s README and SPECS.md Section 3's evidence discipline,
-  rather than hidden behind a passing-looking assertion.
+- **PPO stabilizes the pendulum reference task on three seeds** (deterministic
+  returns 90.8 to 97.1 against 34.2 for zero action), after the balance task's
+  reward was found to pay the agent to fall and was given an alive bonus. The
+  earlier negative result and its correction are recorded in `robot-learn`'s
+  README. Nothing humanoid is trained yet.
 - **`robot-sim` is a partial implementation, not a high-fidelity engine.** The CPU
-  formula modules (integrators, passive forces, actuators, equality constraints,
-  plane-sphere contact) are not yet wired into the multibody stepper. The GPU
-  backend covers only the subset listed in `crates/robot-sim-gpu/src/lib.rs`;
-  the general closure-based RK4, batched G1/ABA, and the contact, limit and
-  friction solver are not ported. Contact in the multibody path is modelled for
-  only the ten ankle spheres of the USD model (five per ankle); the foot boxes,
-  knee and shoulder cylinders and mesh shapes are captured but not modelled, and
-  the pelvis and torso have no collision geometry. At `dt=1e-4`, a clamped-PD
-  supported-stance hold keeps the vendored G1 pelvis above the plane for 2 s
-  (minimum 0.787 m); this is not a balance result. With zero torque, the pelvis
-  falls to −0.77 m below the plane. The fidelity harness reports an analytic
-  subset: G1 contact is `not_measured` at the reference tier and
-  `not_applicable` at coarse; neither status qualifies G1 contact. The
+  path runs the example formulation end to end: composite-frame dynamics, all
+  33 of the G1's declared colliders (15 meshes reduced to convex hulls at
+  import), joint-limit and contact rows in one Newton-solved convex problem,
+  and the model's own declared drives, with `euler`, `implicitfast` and `rk4`
+  selectable per run. Not ported: full `implicit`, hill-climbing hull support
+  and multi-point plane-hull manifolds, `Ball` joints, and named fidelity
+  tiers. The GPU backend covers only the subset listed in
+  `crates/robot-sim-gpu/src/lib.rs`; the general closure-based RK4, batched
+  G1 dynamics, and the contact, limit and friction solver are not ported.
+  The pelvis and torso carry no collision geometry in the vendored layer. At
+  the default `dt=1e-4`, the declared-drive stance keeps the pelvis minimum at
+  0.788 m over 2 s; this is not a balance result. With zero torque the robot
+  folds onto its limb hulls and the pelvis settles about 0.12 m above the
+  plane. The G1's declared drive gains are generated defaults, which the run
+  warns about. The fidelity harness (schema v8) is an analytic battery with
+  contact, friction-cone and narrow-phase rows; its per-tier G1 contact
+  status is `not_measured` at the reference tier and `not_applicable` at
+  coarse, so no report qualifies G1 contact. The
   GPU-batched, variable-fidelity target, built on the OpenUSD / Isaac Sim model (ADR 0015), is specified in
-  `crates/robot-sim/SIMULATION_SPECS.md` and informed by research against
+  `crates/robot-sim/specs/` (index at `crates/robot-sim/specs/README.md`) and informed by research against
   published GPU-batched simulators, CubeCL and `wgpu`. CubeCL passed the Appendix B.6
   qualification for the implemented subset only (ADR 0012); it is not a default
   dependency.
 - **No GUI/rendering or constrained-QP-solver dependency is qualified**, so
   `robot-viewer` stops at a data layer and `motion-retarget`'s IK is a
-  damped-least-squares baseline rather than the QP/whole-body solve SPECS.md
-  Section 8.3 also names as a later option.
+  Levenberg-Marquardt baseline (limits by projection, self-collision as a
+  penalty) rather than the QP/whole-body solve SPECS.md Section 8.3 also
+  names as a later option.
 - **C-04 (canonical frames/gravity/quaternion convention) and most of
   Appendix C's other open questions remain genuinely open** — not resolved
   by this implementation, by design; see the ADRs in `docs/decisions/` for

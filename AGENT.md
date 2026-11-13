@@ -43,8 +43,8 @@ cargo test --workspace
 cargo test -p <crate-name>      # a single crate
 ```
 
-`devenv test` runs fmt check, clippy with `-D warnings`, and
-`cargo test --workspace`. A change is not done until this gate passes.
+`devenv test` runs fmt check, clippy with `-D warnings`, the
+`exclusion-gate` binary (ADR 0013), and `cargo test --workspace`. A change is not done until this gate passes.
 
 ## Code conventions
 
@@ -84,8 +84,10 @@ cargo test -p <crate-name>      # a single crate
 - Never weaken, delete, or `#[ignore]` a failing test to get a green gate.
   Fix the cause, or report the failure explicitly.
 - Negative results are recorded honestly. For example, PPO on the pendulum
-  task is documented as not demonstrating measured improvement. Do not hide
-  such results behind passing-looking assertions.
+  task was documented as not demonstrating measured improvement until the
+  cause (a task reward that paid the agent to fall) was found; the record
+  and its correction both stay in `robot-learn`'s README. Do not hide such
+  results behind passing-looking assertions.
 
 ## Evidence discipline
 
@@ -134,7 +136,10 @@ SPECS.md Section 3 governs claims. Treat research and performance claims as
   `docs`, `agent`). The subject is at most 72 characters and has no trailing
   period.
 - Commit body: wrap at 72 columns and explain why the change exists. End it
-  with the trailer `Co-authored-by: Junie <junie@jetbrains.com>`.
+  with a `Co-Authored-By:` trailer naming the agent and model that produced
+  it (for example `Co-authored-by: Junie <junie@jetbrains.com>` or
+  `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`), matching the
+  identity recorded in `docs/ledger/automation-log.md`.
 - One logical change per commit. Stage files by explicit path or hunk, never
   with `git add -A` or `git add .`. Check `git diff --cached --name-only`
   before each commit.

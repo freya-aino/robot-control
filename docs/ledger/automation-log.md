@@ -8,6 +8,13 @@ unreconstructable after the fact." This is use U1 of SPECS.md §2.3.1
 distinct from `robot-devtools`, which is where U1's *runtime* tooling will
 live once written.
 
+Entries are dated records. File paths, spec file names and `outputs/` folders
+are as they were on the entry's date; several have since been renamed or
+removed (for example `04-mujoco-fidelity-loop.md` is now `04-fidelity-loop.md`,
+the `*-usd-replay/` and `g1-stance-newton-replay/` folders were deleted, and
+the `unitree_g1_mujoco` assets and `mjcf.rs` are gone). Entries are not
+rewritten when that happens.
+
 ## Entry 2026-10-26
 
 - **Tool:** Claude Code (Anthropic CLI agent), running inside the project's
@@ -1004,3 +1011,155 @@ and sliding edges on the linear one) and on the physics (a body spun about the
 contact normal loses its spin at condim 4 and does not at condim 3).
 
 Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
+
+## 2026-11-07 — documentation audit: code, specs and docs brought into agreement
+
+- **Tool:** Claude Code (CLI), with five read-only audit subagents.
+- **Model identity/version:** Claude Fable 5.1 (`claude-fable-5-1`).
+- **What was done:** every crate README, the root README, AGENT.md, PLAN.md,
+  SPECS.md Section 9.1 and its revision table, the robot-sim specs index and
+  step files 04, 09, 12 and appendices C and D, the spec checklists 00, 06,
+  07, 09 and 14, ADRs 0008, 0010, 0011, 0012, 0014 and 0015, both ledgers,
+  `docs/example-system-mapping.md`, the asset and fixture READMEs, and the
+  module doc comments of `robot-sim`, `robot-cli`, `robot-model`,
+  `robot-control`, `robot-eval` and `robot-adapt` were compared against the
+  code at commit `1d2e9d9` and corrected where they disagreed.
+- **Main corrections:** fidelity schema v7 → v8 wherever v7 was still named;
+  `robot sim multibody` documented with all its flags (`--scene`,
+  `--actuation`, `--limit-margin`, `--integrator`), its outputs (CSV, JSON
+  Lines, SVG, two USD replays) and exit code 3 (INCONCLUSIVE); the
+  robot-sim README module table gains `collision`, `composite`, `solver`,
+  `newton`, `options` and `world` and no longer says the formula modules are
+  unwired or that contact is sphere-only; M-27 is recorded as resolved in the
+  specs index, steps 08 and 12 and appendix C; the G1 probe is recorded as
+  `pass` (hard limits) in spec 04 and the robot-sim README; ADR 0010 carries
+  a superseded banner for its contact law; SPECS.md 0.8.6-draft rewrites the
+  9.1 contact paragraphs to the implemented formulation and repairs the
+  revision table; stale test counts (robot-cli 17 → 45, robot-learn 60 → 61,
+  robot-model 79 → 115, robot-nn 20 → 22, robot-sim 191 → 301) and crate
+  descriptions (`robot-tasks`, `robot-adapt`, `robot-eval`, `motion-process`,
+  `motion-retarget`, `robot-hardware`) corrected; evidence-ledger state
+  `measured` replaced with the Section 3 vocabulary.
+- **Measured for this entry:** `target/release/robot sim multibody --floating`
+  at the default `dt = 1e-4`: pelvis minimum 0.7882 m at t = 0.061 s, lowest
+  contact −0.0046 m, max settled kinetic energy 0.0114 J, PASS.
+  `--zero-torque`: pelvis minimum 0.1151 m at t = 1.346 s, settling at
+  0.125 m, lowest contact −0.0336 m, FAIL (collapse reference). Both report
+  33 collision shapes modelled, 0 not modelled.
+- **Not changed, flagged for a human decision:** AGENT.md's commit-subject
+  rule (72 characters, mandatory scope) is not followed by recent history;
+  `origin/isaacsim` and the working branch `chore/tidy-docs` exist despite
+  the "work on `main`" rule; the empty, untracked `fixtures/models/` and
+  `fixtures/profiles/` directories; the 2026-11-01 entries above carry no
+  tool/model lines and commit `1d2e9d9` (2026-11-04) has no entry.
+
+## 2026-11-13 — crate completion pass, one crate at a time
+
+- **Tool:** Claude Code (CLI).
+- **Model identity/version:** Claude Opus 5.5 (`claude-opus-5-5`).
+- **Scope:** bring each crate toward its full SPECS.md scope, starting with
+  the least complete. Entries below are appended per crate as each lands.
+- **`motion-process`:** SPECS.md §8.2 items 3–6 added: `kinematics`,
+  `condition`, `filter`, `resample_anti_aliased`, `contact`, `segment`, and
+  §6's augmentation as `augment`; README, Cargo description and root README
+  row updated. 4 → 39 tests.
+  Every threshold is a caller-supplied config field. Segmentation agreement
+  with human annotation has not been evaluated.
+- **`motion-retarget`:** rewritten around `ik::solve_tasks` (position,
+  orientation, relative-position and posture tasks, free base, LM step
+  control, deadline and termination reasons); added `collision`,
+  `temporal`, `retarget` and the `retarget-map/1` `config` format; new
+  dependencies on `motion-process` and `robot-artifacts` (workspace paths,
+  exclusion gate passes). 4 → 28 tests, including retargeting a punch onto
+  the vendored G1 URDF.
+- **`motion-validate`:** added `trajectory`, `kinematic`, `dynamics`
+  (floating-base RNE via `robot-sim` with least-norm contact distribution),
+  `contact`, `tracking` (`robot-sim` `World`), `validate` and `package`
+  (`motion-curation/1` manifest); `report` extended with torque, root-drift,
+  contact and tracking reasons and stable codes. New dependencies on
+  `robot-sim`, `motion-process`, `motion-retarget` and `robot-artifacts`
+  (workspace paths). 3 → 17 tests.
+- **`motion-io`:** added `bvh_export`, `c3d`, `inflate`, `npz`, `amass`,
+  `import` (detection, originals stored before parsing, inspection) and
+  `capture` (`robot-capture/1` protocol, line and UDP adapters, recorder).
+  No fixture files added: C3D, NPZ and DEFLATE tests build their inputs
+  in code. 8 → 35 tests.
+- **`robot-adapt`:** added `ladder` (the §11.3 order as a gate),
+  `history`, `encoder`, `correction`, `residual`, `finetune`, `retrieval`,
+  `morphology`, `report`; `sysid` gains standard errors and
+  `identify_joint`. Training code behind a default `training` feature
+  (optional `robot-learn`) so deployable builds carry no autograd; both
+  feature sets lint clean. Row 10 refused by design (§9.1). 4 → 27 tests.
+- **`robot-persona`:** added `params`, `arbiter`, `memory` (session-scoped,
+  per C-17's interim position) and `evaluation`; `StyleConfig` gains
+  bounded parameters and `validate`. Cross-session opponent memory left
+  to the C-17 decision. 6 → 17 tests.
+- **`robot-eval`:** added `distribution` (Student's t), Welch and TOST,
+  `evaluate` (interval-based outcomes, regression gate with profile-ID
+  check), `matrix` (the fifty §14 rows, closed only by the ledger's new
+  "Acceptance rows" table, which is empty); profiles gain firmware
+  version, run count, threshold direction and TOML/content-ID I/O.
+  6 → 18 tests.
+- **`robot-tasks`:** added `humanoid` (state, extractor from `robot-sim`,
+  observation audit, task trait), `terms`, `tasks` (stand, perturbation,
+  tracking, reach, footwork, boxing pad) and `randomize`; `robot-sim`'s
+  `WorldEnv` gains `push_base`. 11 → 26 tests.
+- **`robot-skills`:** added `selection` (the R2 feasibility filter and
+  router with fixed-size counters), `cache` (activation checks and
+  off-thread staging) and `catalog` (lexical Markdown catalog that only
+  reorders). 8 → 18 tests.
+- **`robot-control`:** added `tactical` (skill router as a rate-limited
+  `LoopOperation`, `SkillBank`, expiring proposals, §5.1 checks),
+  `incident`, `TimingReport`, and `with_sensors` (temperature and contact
+  taps into the supervisor); `LoopOperation` gains `observe_time` and
+  `decision_age` with defaults. `robot-perception`'s `ContactClassifier`
+  derives `Clone`/`Debug`. 36 → 46 tests.
+- **`robot-hardware`:** added `wire` (`robot-wire/1` protocol) and `link`
+  (`WireAdapter` over UDP or in-memory transports, `FirmwarePeer` with
+  command validity and watchdog). No vendor protocol transcribed (C-02
+  open). 12 → 20 tests.
+- **`robot-perception`:** added `base` (IMU plus leg-odometry estimator
+  with slip gating), `opponent` (tracking with coasting and age) and
+  `consistency` (NEES); qualified on synthetic truth with jitter,
+  dropouts and slip. 15 → 22 tests.
+- **`robot-devtools`:** added `inventory` (Cargo.lock inventory,
+  `kb-store/1` store, transitive staleness sweep, fault records, ledger
+  citation check), `ledger` (diff with unsupported-promotion detection)
+  and the `devtools` binary; created `docs/kb/knowledge-base.toml` with no
+  entries (nothing cited to record). 9 → 15 tests.
+- **`robot-cli`:** wired `data import`, `motion retarget`, `motion
+  validate --reference`, `eval run`, `adapt identify`, `train` and
+  `replay` (new `commands::pipeline`, `robot-reference/1` CSV); `skills`,
+  `deps`, `deploy` and `eval --bundle` keep exit 2 with reasons; PLAN.md
+  §4's implemented list updated. Smoke-tested end to end in a scratch
+  directory (not committed).
+- **`robot-supervisor`:** added `envelope` (torque-speed, thermal
+  derating, saturation duration, contact energy budget, mode interlocks;
+  four new fault variants, three new categories, two added to the
+  must-escalate set) and `hazard` (§12.2 register with the
+  no-learned-only-control rule). 21 → 27 tests.
+- **`robot-nn`:** added `format` (`robot-mlp/1` weights, refusing unknown
+  operators at load) and `gru` (recurrent inference with explicit state
+  contract). Recurrent training (BPTT) left unimplemented, stated. 22 → 28
+  tests.
+- **`robot-learn` / `robot-tasks`:** found that `BalanceTask` paid the
+  agent to fall (all-negative per-step reward with zero-value
+  termination), which explains the recorded PPO negative result; added an
+  `alive-v1` term. Measured deterministic returns 90.8 / 96.2 / 97.1
+  (seeds 1–3) against 34.2 for zero action; new test
+  `ppo_stabilizes_the_pendulum_on_two_seeds` (row A-13 evidence). `robot
+  train` defaults updated to the measured configuration. 61 → 62 tests.
+- **`robot-viewer`:** added `skeleton` (profile-driven side and front
+  skeleton SVG with a golden file, SMIL playback without script);
+  `robot replay --svg` writes a playback. No rasterizer was available to
+  view the output; correctness rests on the bone-count and golden tests.
+- **`robot-sim` / `robot-perception`:** added `robot_sim::sensors` (ideal
+  encoders and site IMU) and `robot_perception::noise` (bias walk, white
+  noise, quantization, delay, recorded injection point), taking specs
+  Appendix B S-06's stated default; step 08's status updated. robot-sim
+  301 → 304 tests, robot-perception 22 → 25.
+- **`robot-model`:** added `discovery` (§7.7 offline core: source ranking,
+  conflict listing, web proposals, seeded workspace sampling, test
+  classification, probe refusal, deterministic report that blocks
+  activation). The commissioning probe itself waits on C-29; S-08
+  (inertia realisability test) stays open. 115 → 119 tests.
