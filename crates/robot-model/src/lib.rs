@@ -26,6 +26,7 @@
 #![warn(clippy::all)]
 
 pub mod actuator;
+pub mod discovery;
 pub mod eig;
 pub mod fixtures;
 pub mod hull;

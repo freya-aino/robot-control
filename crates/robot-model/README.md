@@ -1,7 +1,8 @@
 # robot-model
 
 The kinematic tree, inertias, actuator limits, sensor placement and the robot
-profile of SPECS.md Section 7.1. Depends only on `robot-types`.
+profile of SPECS.md Section 7.1. Depends on `robot-types` and `robot-usd`
+(the latter for the OpenUSD import in `usd`).
 
 ## What's here
 
@@ -9,11 +10,14 @@ profile of SPECS.md Section 7.1. Depends only on `robot-types`.
 | --- | --- | --- |
 | `pose` | — | `RigidPose`: a local, un-named translation+rotation, deliberately distinct from `robot_types::frames::Transform` (see below) |
 | `joint` | §7.1 | `JointKind` (revolute/continuous/prismatic/fixed/free), `JointLimits`, `JointSpec` with explicit sign/zero-offset conversion |
-| `link` | §7.1 | `MassProperties`, `InertiaTensor` with a physical-plausibility check, `CollisionGeometry` (sphere/box/cylinder/mesh-by-reference) |
+| `link` | §7.1 | `MassProperties`, `InertiaTensor` with a physical-plausibility check, `CollisionGeometry` (sphere/box/cylinder/convex-hull vertices/mesh-by-reference) |
 | `actuator` | §7.1 | `Transmission`, a two-corner `TorqueSpeedEnvelope`, `PdGains`, a single-pole `ThermalLimits` model |
 | `sensor` | §7.1 | `SensorKind`, `DiagonalCovariance`, `MissingDataBehavior` as an explicit per-sensor declaration |
 | `profile` | §7.1 | `RobotProfile`: identity uniqueness, dangling-reference checks, joint-graph-is-a-tree validation, and the stricter `activate()` gate (extension strictness + independent e-stop) required before a control path |
 | `kinematics` | §6 | `forward_kinematics`: one unambiguous computation over the validated tree |
+| `discovery` | §7.7 | The offline core of attached-agent discovery: ranked `Claim` sources (description, device, measurement, web), `resolve` (highest rank used, every disagreement listed, nothing averaged, web-only values marked as proposals with URL, date, version, hash, model and query), seeded `sample_workspace` within declared limits, classified tests passed only with an artifact, `check_probe` (no dry run or past the margin aborts), and a `DiscoveryReport` that renders deterministically and blocks activation without a human decision record |
+| `eig` | — | `eig3`/`eig3_tol`: symmetric 3×3 Jacobi eigendecomposition (`Eig3`), used by `InertiaTensor::is_physically_plausible` for the principal-moment triangle inequality |
+| `hull` | robot-sim spec 08 item 3 | `hull_vertices`: incremental convex hull of a point cloud, returning the hull's vertex indices; reduces mesh colliders at import, with coplanar and collinear input handled by dimension |
 | `urdf` | §7.1 | A minimal authored XML reader plus the URDF kinematic/mass subset this project supports |
 | `importer` | — | `ModelImporter` trait (associated `Error`) as the plug-in seam for description formats; `UrdfImporter` wraps `urdf::import_from_str` without changing it |
 | `usd` | §7.1, ADR 0015 | Builds a `RobotProfile` from an OpenUSD robot layer read with `robot-usd`: links and masses from `physics:*`, revolute joints with their frames, limits, drives and gains, and the collision shapes. Refuses anything outside that subset by name |
@@ -73,9 +77,10 @@ a real, cited firmware contract replaces this one. Use it for forward
 kinematics, IK retargeting (`motion-retarget`) and inspection
 (`robot-viewer`), not as a claim this profile is safe to drive hardware.
 
-No mesh geometry is vendored — the URDF's `.STL` references are kept as
-opaque strings, same as any other imported URDF, since this project has
-neither a renderer nor a mesh-consuming physics engine yet.
+No mesh geometry is vendored for the URDF path — its `.STL` references are
+kept as opaque strings, same as any other imported URDF. The mesh colliders
+the simulator contacts come from the vendored OpenUSD layer, reduced to
+convex hulls by `usd` (ADR 0015).
 
 `fixtures::unitree_g1_29dof_floating_base()` builds on the same import:
 it adds an explicit, massless `world` link and a `JointKind::Free` joint
@@ -196,7 +201,7 @@ diagonal tensor, so it is valid by construction.
 
 ## Testing
 
-`cargo test -p robot-model` — 79 tests: joint/link/actuator/sensor validation
+`cargo test -p robot-model` — 115 tests: joint/link/actuator/sensor validation
 boundaries (including `Free`'s own degenerate-axis exemption, its rejection
 of position limits, and `transform_at`'s documented panic), profile graph
 checks (dangling references, non-tree in-degrees, a
@@ -225,16 +230,21 @@ What the import reads, and where:
   axis, the limits in degrees, the drive force limit, the drive stiffness and
   damping, and `physxJoint:maxJointVelocity`;
 - collision: `Sphere`, `Cube`, `Cylinder` and `Mesh` prims under each link's
-  `collisions` scope, with their poses from their `xformOp`s. Meshes are kept
-  as references. Visual meshes are counted and not used.
+  `collisions` scope, with their poses from their `xformOp`s. Mesh colliders
+  are reduced to their convex hull at import (`CollisionGeometry::ConvexHull`);
+  a hull with fewer than four vertices has no volume, is kept as a `Mesh`
+  reference and counted in `ImportReport::degenerate_hulls`. Visual meshes
+  are counted and not used.
 
 The import is all or nothing, and each count is in `usd::ImportReport`. The
 G1 layer gives 30 links, 29 revolute joints, 29 actuators, 10 collision
-spheres, 2 boxes, 6 cylinders and 15 collision mesh references.
+spheres, 2 boxes, 6 cylinders and 15 collision meshes, reduced to 27,061 hull
+vertices in total with none degenerate, plus 35 visual meshes that are counted
+and not used.
 
 Measured against the URDF of the same revision: joint limits agree to 1e-4 rad,
 effort and velocity limits agree, and zero-pose link positions relative to the
-pelvis agree to 1.5e-8 m. The MJCF-era disagreements are gone with its import
+pelvis agree to 1.5e-8 m (the test asserts 1e-4). The MJCF-era disagreements are gone with its import
 path (ADR 0014 is withdrawn).
 
 Not in the model: the actuator thermal and latency values are placeholders

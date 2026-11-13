@@ -862,9 +862,9 @@ pub fn import_visual_meshes(root_layer: &Path) -> Result<Vec<VisualMesh>, UsdImp
 pub struct GroundPlane {
     /// Height of the plane above the origin, metres (its translation along Z).
     pub height: f64,
-    /// Penalty normal stiffness, N per metre of penetration (`robot:contactStiffness`).
+    /// Penalty normal stiffness, N per metre of penetration (`sim:contactStiffness`).
     pub stiffness: f64,
-    /// Penalty normal damping, N per metre per second (`robot:contactDamping`).
+    /// Penalty normal damping, N per metre per second (`sim:contactDamping`).
     pub normal_damping: f64,
     /// Coulomb friction coefficient (`physics:dynamicFriction`).
     pub friction: f64,
