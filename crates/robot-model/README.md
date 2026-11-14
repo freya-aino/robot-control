@@ -21,7 +21,7 @@ profile of SPECS.md Section 7.1. Depends on `robot-types` and `robot-usd`
 | `urdf` | §7.1 | A minimal authored XML reader plus the URDF kinematic/mass subset this project supports |
 | `importer` | — | `ModelImporter` trait (associated `Error`) as the plug-in seam for description formats; `UrdfImporter` wraps `urdf::import_from_str` without changing it |
 | `usd` | §7.1, ADR 0015 | Builds a `RobotProfile` from an OpenUSD robot layer read with `robot-usd`: links and masses from `physics:*`, revolute joints with their frames, limits, drives and gains, and the collision shapes. Refuses anything outside that subset by name |
-| `fixtures` | §3 | Vendored real-robot descriptions built into validated `RobotProfile`s: Unitree's G1 humanoid, 29-DOF rev 1.0, from the URDF (`unitree_g1_29dof`), from the URDF with a floating base (`unitree_g1_29dof_floating_base`), and from the official OpenUSD layers, fixed-base and floating-base (`unitree_g1_29dof_usd`, `unitree_g1_29dof_usd_floating_base`) |
+| `fixtures` | §3 | Vendored real-robot descriptions built into validated `RobotProfile`s: Unitree's G1 humanoid, 29-DOF rev 1.0, from the URDF (`unitree_g1_29dof`), from the URDF with a floating base (`unitree_g1_29dof_floating_base`), and from the official OpenUSD layers, fixed-base and floating-base (`unitree_g1_29dof_usd`, `unitree_g1_29dof_usd_floating_base`); Unitree's Go2 quadruped (`unitree_go2_12dof_usd`) and H1 humanoid (`unitree_h1_19dof_usd`) from their official OpenUSD layers at the same pinned commit, each with a `_floating_base` variant |
 
 ## Why `RigidPose` instead of `robot_types::frames::Transform`
 
@@ -213,13 +213,21 @@ activation refusal above, forward kinematics at the zero posture) and its
 floating-base form (the added `world` link and `Free` joint, the 35-DOF
 count, the same activation refusal); and the URDF importer trait wrapper.
 
-## The G1 model source (ADR 0015)
+## The robot model sources (ADR 0015)
 
 The G1 is the official Unitree OpenUSD asset, which Unitree publishes for Isaac
 Sim. `fixtures::unitree_g1_29dof_usd()` imports the vendored root layer
 (`assets/robots/unitree_g1_usd/`, provenance in its `PROVENANCE.md`) and
 `fixtures::unitree_g1_29dof_usd_floating_base()` adds the free base the
 simulator uses. The simulator loads the floating variant.
+
+The Go2 quadruped and H1 humanoid come the same way, from the same pinned
+`unitreerobotics/unitree_model` commit (`assets/robots/unitree_go2_usd/`,
+`assets/robots/unitree_h1_usd/`, provenance alongside each). The Go2's foot
+spheres and head segments attach with `PhysicsFixedJoint` prims, which import
+as `JointKind::Fixed` edges with no actuator; the G1 and H1 layers contain
+only revolute joints. `crates/robot-sim/tests/vendored_robots.rs` checks that
+both profiles build floating-base worlds and step.
 
 What the import reads, and where:
 

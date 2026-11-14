@@ -50,6 +50,56 @@ pub fn unitree_g1_29dof_usd_floating_base() -> Result<RobotProfile, FixtureError
     Ok(crate::usd::with_floating_base(fixed)?)
 }
 
+/// Unitree's Go2 quadruped (12 actuated joints, 3 per leg) as Unitree
+/// describes it in its OpenUSD robot layer, from the same pinned
+/// `unitreerobotics/unitree_model` commit as the G1 layers. See
+/// `assets/robots/unitree_go2_usd/PROVENANCE.md`. Kinematics-only, same as
+/// every fixture here: [`RobotProfile::activate`] refuses it.
+///
+/// # Errors
+///
+/// As [`unitree_g1_29dof_usd`].
+pub fn unitree_go2_12dof_usd() -> Result<RobotProfile, FixtureError> {
+    let (profile, _report) = crate::usd::import_fixed_base(Path::new(UNITREE_GO2_USD_ROOT))?;
+    Ok(profile)
+}
+
+/// [`unitree_go2_12dof_usd`] with a free base. The free joint is first in
+/// the joint list.
+///
+/// # Errors
+///
+/// As [`unitree_go2_12dof_usd`].
+pub fn unitree_go2_12dof_usd_floating_base() -> Result<RobotProfile, FixtureError> {
+    let fixed = unitree_go2_12dof_usd()?;
+    Ok(crate::usd::with_floating_base(fixed)?)
+}
+
+/// Unitree's H1 humanoid (19 actuated joints: 5 per leg, 1 torso, 4 per
+/// arm) as Unitree describes it in its OpenUSD robot layer, from the same
+/// pinned `unitreerobotics/unitree_model` commit as the G1 layers. See
+/// `assets/robots/unitree_h1_usd/PROVENANCE.md`. Kinematics-only:
+/// [`RobotProfile::activate`] refuses it.
+///
+/// # Errors
+///
+/// As [`unitree_g1_29dof_usd`].
+pub fn unitree_h1_19dof_usd() -> Result<RobotProfile, FixtureError> {
+    let (profile, _report) = crate::usd::import_fixed_base(Path::new(UNITREE_H1_USD_ROOT))?;
+    Ok(profile)
+}
+
+/// [`unitree_h1_19dof_usd`] with a free base. The free joint is first in
+/// the joint list.
+///
+/// # Errors
+///
+/// As [`unitree_h1_19dof_usd`].
+pub fn unitree_h1_19dof_usd_floating_base() -> Result<RobotProfile, FixtureError> {
+    let fixed = unitree_h1_19dof_usd()?;
+    Ok(crate::usd::with_floating_base(fixed)?)
+}
+
 /// Unitree G1 humanoid, 29-DOF, revision 1.0, vendored from
 /// `unitreerobotics/unitree_rl_gym`. See
 /// `assets/robots/unitree_g1/PROVENANCE.md` for the pinned commit,
@@ -65,6 +115,20 @@ const UNITREE_G1_29DOF_URDF: &str =
 pub const UNITREE_G1_29DOF_USD_ROOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/robots/unitree_g1_usd/g1_29dof_rev_1_0.usd"
+);
+
+/// The official Unitree Go2 OpenUSD robot layer, read at run time from the
+/// vendored assets (`assets/robots/unitree_go2_usd/PROVENANCE.md`).
+pub const UNITREE_GO2_USD_ROOT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/robots/unitree_go2_usd/go2.usd"
+);
+
+/// The official Unitree H1 OpenUSD robot layer, read at run time from the
+/// vendored assets (`assets/robots/unitree_h1_usd/PROVENANCE.md`).
+pub const UNITREE_H1_USD_ROOT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/robots/unitree_h1_usd/h1.usd"
 );
 
 /// Why a vendored fixture could not be built into a usable profile.
@@ -305,5 +369,76 @@ mod tests {
         let profile = unitree_g1_29dof_floating_base().unwrap();
         let err = profile.activate(&[]).unwrap_err();
         assert!(matches!(err, ProfileError::NoIndependentEstop));
+    }
+}
+
+#[cfg(test)]
+mod usd_fixture_tests {
+    use super::*;
+    use crate::joint::JointKind;
+    use crate::profile::ProfileError;
+
+    #[test]
+    fn the_vendored_go2_profile_validates() {
+        let p = unitree_go2_12dof_usd().expect("fixture builds and validates");
+        assert_eq!(p.dof(), 12, "3 joints per leg, 4 legs");
+        assert_eq!(p.links.len(), 19);
+        assert_eq!(p.joints.len(), 18, "12 revolute + 4 foot and 2 head welds");
+        assert_eq!(
+            p.joints
+                .iter()
+                .filter(|j| j.kind == JointKind::Fixed)
+                .count(),
+            6
+        );
+        let base = p.links.iter().find(|l| l.name.as_str() == "base").unwrap();
+        assert_eq!(p.root_link, base.id);
+        let total: f64 = p.links.iter().map(|l| l.mass.mass.value()).sum();
+        assert!((total - 16.087).abs() < 0.05, "{total}");
+        for name in ["FL_hip_joint", "RR_calf_joint", "FL_foot_joint"] {
+            assert!(p.joint_by_name(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_vendored_h1_profile_validates() {
+        let p = unitree_h1_19dof_usd().expect("fixture builds and validates");
+        assert_eq!(p.dof(), 19, "5 per leg + 1 torso + 4 per arm");
+        assert_eq!(p.links.len(), 20);
+        assert_eq!(p.joints.len(), 19);
+        let pelvis = p
+            .links
+            .iter()
+            .find(|l| l.name.as_str() == "pelvis")
+            .unwrap();
+        assert_eq!(p.root_link, pelvis.id);
+        let total: f64 = p.links.iter().map(|l| l.mass.mass.value()).sum();
+        assert!((total - 51.601).abs() < 0.05, "{total}");
+        for name in ["left_hip_yaw_joint", "torso_joint", "right_elbow_joint"] {
+            assert!(p.joint_by_name(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn go2_and_h1_run_forward_kinematics_and_refuse_activation() {
+        for p in [unitree_go2_12dof_usd(), unitree_h1_19dof_usd()] {
+            let p = p.unwrap();
+            let zero = vec![0.0; p.dof()];
+            crate::kinematics::forward_kinematics(&p, &zero).expect("FK at zero");
+            assert!(matches!(
+                p.activate(&[]).unwrap_err(),
+                ProfileError::NoIndependentEstop
+            ));
+        }
+    }
+
+    #[test]
+    fn the_floating_base_variants_add_a_free_joint_first() {
+        for p in [
+            unitree_go2_12dof_usd_floating_base().unwrap(),
+            unitree_h1_19dof_usd_floating_base().unwrap(),
+        ] {
+            assert_eq!(p.joints[0].kind, JointKind::Free);
+        }
     }
 }

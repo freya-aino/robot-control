@@ -1163,3 +1163,21 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
   classification, probe refusal, deterministic report that blocks
   activation). The commissioning probe itself waits on C-29; S-08
   (inertia realisability test) stays open. 115 → 119 tests.
+
+## Entry 2026-11-15
+
+- **Tool:** Claude Code (Anthropic CLI agent), shell, file-edit and
+  build-tool access, with network access for asset vendoring.
+- **Model identity/version:** `claude-fable-5` (Anthropic).
+- **Request:** "proceede to refine and implement all components in this
+  project who are not yet fully realized. Import some common and well known
+  robot models from their public source (preferably USD). Write a
+  comprehensive guide on how to use this suite."
+- **Artifacts produced in this entry's scope (vendoring part):**
+  `assets/robots/unitree_go2_usd/` and `assets/robots/unitree_h1_usd/`
+  (official Unitree OpenUSD layers, LFS objects fetched from
+  `unitreerobotics/unitree_model` at the same pinned commit as the G1
+  layers, each verified SHA-256 == LFS object id, provenance in each
+  directory's `PROVENANCE.md`); `PhysicsFixedJoint` support in
+  `robot_model::usd`; `unitree_go2_12dof_usd` and `unitree_h1_19dof_usd`
+  fixtures with tests; `crates/robot-sim/tests/vendored_robots.rs`.

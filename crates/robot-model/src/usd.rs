@@ -583,15 +583,18 @@ pub fn import_fixed_base_with_warnings(
     let mut actuators: Vec<ActuatorSpec> = Vec::new();
     if let Some(scope) = robot.child("joints") {
         for joint in &scope.children {
-            if joint.type_name.as_deref() != Some("PhysicsRevoluteJoint") {
-                return Err(UsdImportError::Unsupported {
-                    construct: format!(
-                        "joint type {}",
-                        joint.type_name.as_deref().unwrap_or("(none)")
-                    ),
-                    path: joint.path.clone(),
-                });
-            }
+            let fixed = match joint.type_name.as_deref() {
+                Some("PhysicsRevoluteJoint") => false,
+                // A rigid attachment (the Go2's foot spheres); an edge in the
+                // link graph with no degree of freedom and no drive.
+                Some("PhysicsFixedJoint") => true,
+                other => {
+                    return Err(UsdImportError::Unsupported {
+                        construct: format!("joint type {}", other.unwrap_or("(none)")),
+                        path: joint.path.clone(),
+                    });
+                }
+            };
             let body0 = single_target(joint, "physics:body0")?;
             let body1 = single_target(joint, "physics:body1")?;
             let parent = link_index(&body0).ok_or_else(|| UsdImportError::Missing {
@@ -620,6 +623,22 @@ pub fn import_fixed_base_with_warnings(
                 quat_xyzw(optional_quat(joint, "physics:localRot1")?),
             );
             let origin = frame0.compose(&frame1.inverse());
+
+            if fixed {
+                joints.push(JointSpec {
+                    id: JointId::new(joints.len() as u32),
+                    name: Name::new(&joint.name)?,
+                    kind: JointKind::Fixed,
+                    parent: LinkId::new(parent as u32),
+                    child: LinkId::new(child as u32),
+                    origin,
+                    axis: Vec3::unit_z(),
+                    limits: JointLimits::unbounded(RadiansPerSecond(0.0), NewtonMetres(0.0)),
+                    sign: 1.0,
+                    zero_offset: 0.0,
+                });
+                continue;
+            }
 
             let lower = required_f64(joint, "physics:lowerLimit")?.to_radians();
             let upper = required_f64(joint, "physics:upperLimit")?.to_radians();
