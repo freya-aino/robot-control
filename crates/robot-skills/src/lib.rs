@@ -31,5 +31,6 @@ pub mod cache;
 pub mod catalog;
 pub mod descriptor;
 pub mod index;
+pub mod manifest;
 pub mod selection;
 pub mod tiers;

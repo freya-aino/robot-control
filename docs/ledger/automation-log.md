@@ -1186,3 +1186,9 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
   offsets on time samples, relationship/connection target remapping through
   arcs, and fieldless standalone target specs in `robot_usd::stage`, with
   `crates/robot-usd/tests/composition.rs`.
+- **Artifacts (file-format part, ADR 0016):** the `robot-bundle/1`
+  directory format (`robot_artifacts::bundle`: digest-sealed manifest,
+  content-addressed weight blobs, latent constructs refused by name), the
+  `skill-manifest/1` format (`robot_skills::manifest`), and the CLI
+  commands `robot skills list|search` and `robot eval --bundle` with the
+  activation gate run against the vendored robots' joint limits.

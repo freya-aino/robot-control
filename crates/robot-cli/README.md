@@ -28,6 +28,8 @@ omitting it silently or faking a stub that looks finished.
 | `robot motion retarget <bvh> --map <file> --out <csv> [--robot g1\|g1-usd] [--unit m\|cm\|mm] [--up y\|z]` | Converts axes and units (guessed and stated, or given). Estimates the ground plane and foot contacts for the map's feet with printed default thresholds. Retargets with the `retarget-map/1` file and writes a `robot-reference/1` CSV. Prints task error, planted slip, unfinished frames and velocity excess |
 | `robot motion validate <bvh> --reference <csv> --map <file>` | Runs `motion_validate::validate` on the source and the reference with printed default thresholds, prints the `motion-curation/1` manifest entry, and exits 1 on rejection. Without `--reference` it validates the source record, as before |
 | `robot eval run --profile <toml> --results <csv>` | Evaluates `seed,metric,value` rows against an `acceptance-profile/1` file: pass, fail or inconclusive per metric by t interval, with missing and unlisted seeds |
+| `robot eval --bundle <dir> --robot <g1-usd\|go2-usd\|h1-usd>` | Reads a `robot-bundle/1` directory (ADR 0016): the digest-sealed manifest and every content-addressed weight blob verify, then `check_activatable` runs against the named vendored robot's real joint limits in sim-eval mode. Exit 0 is "verified and activatable", not a quality claim |
+| `robot skills <list\|search> --manifest <toml> [query...]` | Reads a `skill-manifest/1` library (ADR 0016) and lists the typed descriptors, or searches them with the §10.1 lexical catalog (TF-IDF, no model call) |
 | `robot adapt identify <csv> [--dead-band RAD_PER_S]` | Identifies one joint's inertia, viscous and Coulomb friction, and offset from `t_s,position_rad,torque_nm` rows, with standard errors and the condition ratio |
 | `robot train [--iterations N] [--seed S] --out <dir>` | PPO on the pendulum balance reference task (§9.2: reference tasks before humanoids) with the configuration `robot-learn` measured to stabilize it (150 updates of 2000 steps by default), printing mean step reward per iteration and writing a `robot-learn` checkpoint |
 | `robot replay <run-dir> [--svg <out> [--robot g1-usd\|g1] [--every N]]` | Reads a `robot sim multibody --out` frame dump back through `robot-viewer` and checks its timeline; with `--svg`, writes a side-and-front skeleton playback (SMIL, no script) |
@@ -39,9 +41,9 @@ wired, not an evaluation.
 
 ## What's named but not implemented, and why
 
-- `robot eval --bundle <id> --suite <path>`, `robot deploy` and `robot
-  skills index`: no policy-bundle or skill-manifest file format exists
-  yet, and `deploy` also waits on a hardware target (C-02). The library
+- `robot deploy`: waits on a hardware target (C-02); the bundle half of
+  its job now exists (`robot eval --bundle` verifies a `robot-bundle/1`
+  directory). The library
   pieces they would wire are `robot_control`, `robot_hardware::link` and
   `robot_skills::selection`.
 - `robot deps`: deliberately not here (see below). Run

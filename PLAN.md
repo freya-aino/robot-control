@@ -154,7 +154,7 @@ robot deploy --bundle <id> --mode shadow
 robot replay <episode-id>
 ```
 
-These commands are interface requirements, not a description of built tools. Of them, `robot data inspect`, `robot data import`, `robot motion retarget`, `robot motion validate`, `robot sim qualify`, `robot train`, `robot eval` (as `robot eval summarize` and `robot eval run`), `robot adapt identify` and `robot replay` are implemented with the argument lists in `crates/robot-cli/README.md`, and `robot sim multibody` was added outside this list; `robot skills`, `robot deps` and `robot deploy` exit with code 2 and a reason. See `crates/robot-cli/README.md`.
+These commands are interface requirements, not a description of built tools. Of them, `robot data inspect`, `robot data import`, `robot motion retarget`, `robot motion validate`, `robot sim qualify`, `robot train`, `robot eval` (as `robot eval summarize` and `robot eval run`), `robot adapt identify`, `robot replay`, `robot skills` (as `robot skills list|search` over a `skill-manifest/1` file) and `robot eval --bundle` (verification and the activation gate over a `robot-bundle/1` directory, ADR 0016) are implemented with the argument lists in `crates/robot-cli/README.md`, and `robot sim multibody` was added outside this list; `robot deps` and `robot deploy` exit with code 2 and a reason. See `crates/robot-cli/README.md`.
 
 ### Exit gate
 

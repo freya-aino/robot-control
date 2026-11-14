@@ -27,6 +27,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod bundle;
 pub mod chunk;
 pub mod hash;
 pub mod manifest;

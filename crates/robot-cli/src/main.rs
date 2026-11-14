@@ -34,16 +34,13 @@ fn run(args: &[String]) -> i32 {
         },
         Some("deploy") => not_implemented(
             "deploy",
-            Some("no policy-bundle format exists and no hardware target is chosen (C-02); robot_control and robot_hardware::link::WireAdapter are the pieces it will wire"),
+            Some("no hardware target is chosen (C-02); a verified robot-bundle/1 directory (`robot eval --bundle`) and robot_hardware::link::WireAdapter are the pieces it will wire"),
         ),
         Some("deps") => not_implemented(
             "deps",
             Some("the dependency knowledge base is developer tooling and this binary deliberately does not link robot-devtools; run `cargo run -p robot-devtools --bin devtools -- kb-sweep|kb-search|ledger-diff`"),
         ),
-        Some("skills") => not_implemented(
-            "skills",
-            Some("no skill-manifest file format exists yet; robot_skills::selection and robot_control::tactical are the library pieces"),
-        ),
+        Some("skills") => commands::bundle::skills(&args[1..]),
         Some(other) => {
             eprintln!("error: unknown command {other:?}");
             print_usage();
@@ -214,10 +211,7 @@ fn run_eval(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("summarize") => commands::eval::summarize_cli(&args[1..]),
         Some("run") => commands::pipeline::eval_run(&args[1..]),
-        Some("--bundle") => not_implemented(
-            "eval --bundle",
-            Some("no policy-bundle format exists yet; `robot eval run --profile <toml> --results <csv>` evaluates seed results against an acceptance profile"),
-        ),
+        Some("--bundle") => commands::bundle::eval_bundle(&args[1..]),
         Some(other) => unknown_subcommand("eval", other),
         None => usage_error("robot eval summarize <values...>"),
     }
@@ -271,10 +265,12 @@ fn print_usage() {
     eprintln!("  robot sim qualify [--steps N] [--dt SECONDS]");
     eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--out DIR] [--scene FILE] [--actuation drives|damping|zero]\n           [--limit-margin RAD] [--integrator euler|implicitfast|rk4]");
     eprintln!("  robot eval summarize <values...>");
+    eprintln!("  robot eval --bundle <dir> --robot <g1-usd|go2-usd|h1-usd>");
+    eprintln!("  robot skills <list|search> --manifest <skill-manifest.toml> [query...]");
     eprintln!();
     eprintln!("named in PLAN.md but not implemented yet:");
     eprintln!("  robot data import, robot motion retarget, robot eval run,");
-    eprintln!("  robot train, robot skills, robot deps, robot adapt, robot deploy, robot replay");
+    eprintln!("  robot train, robot deps, robot adapt, robot deploy, robot replay");
 }
 
 #[cfg(test)]
@@ -293,7 +289,7 @@ mod tests {
 
     #[test]
     fn a_named_but_unbuilt_command_reports_not_implemented_not_unknown() {
-        assert_eq!(run(&["skills".to_owned()]), EXIT_NOT_IMPLEMENTED);
+        assert_eq!(run(&["skills".to_owned()]), EXIT_USAGE);
         assert_eq!(run(&["deploy".to_owned()]), EXIT_NOT_IMPLEMENTED);
         assert_eq!(
             run(&["deps".to_owned(), "inventory".to_owned()]),

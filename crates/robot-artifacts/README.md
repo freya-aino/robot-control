@@ -11,6 +11,7 @@ on `robot-types`.
 | `hash` | §7.5, §13 | Authored SHA-256 (FIPS 180-4 test vectors), `ContentId` (`sha256:<hex>`), `digest_parts` for order-sensitive manifest hashing |
 | `toml` | §2, §7.5, §13 | A bounded, documented TOML **subset** parser/writer; unsupported constructs (dates, inline tables, literal strings, …) are named, not silently skipped |
 | `chunk` | §7.5 | Versioned, framed, digest-checked binary chunks for high-rate numerical data: SoA/AoS layout, four dtypes, little-endian on the wire, digest validated before a payload byte is interpreted |
+| `bundle` | §7.4, §12.2 | The `robot-bundle/1` directory format (ADR 0016): the full `PolicyBundleManifest` as a digest-sealed TOML manifest plus content-addressed weight blobs, verified size-first before a byte is interpreted; latent constructs and unknown unit symbols refused by name |
 | `store` | §13 | `write_atomic`/`write_immutable` (temp file + fsync + rename), the content-addressed `BlobStore`, `RunDirectory` with an immutable input manifest and ordered checkpoints |
 | `manifest` | §13, §12.2 | `ArtifactManifest` (TOML-encoded, round-trips exactly), `Lineage` with transitive held-out-exclusion testing, `PromotionLedger` with last-known-good rollback |
 

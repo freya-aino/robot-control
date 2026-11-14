@@ -1,5 +1,6 @@
 //! One module per `robot` subcommand group that has a real implementation.
 
+pub mod bundle;
 pub mod data;
 pub mod eval;
 pub mod motion;
