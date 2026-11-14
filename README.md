@@ -67,8 +67,8 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | Crate | SPECS.md section | What it is |
 | --- | --- | --- |
 | [`robot-types`](crates/robot-types/README.md) | §§3, 5, 6, 7, 9, 10, 12 | Shared vocabulary: units, time, math, frames, IDs, schema/evidence/mode/tier types, RNG, observation/action specs, motion and episode records, transitions, bundle manifests |
-| [`robot-artifacts`](crates/robot-artifacts/README.md) | §7 | Content-addressed storage, the bounded TOML subset, the binary chunk format, run/artifact manifests and promotion ledger |
-| [`robot-model`](crates/robot-model/README.md) | §6, §7.1, ADR 0015 | The kinematic tree, inertias, actuators, sensors, forward kinematics, URDF and OpenUSD import (mesh colliders reduced to convex hulls), the vendored G1 fixtures |
+| [`robot-artifacts`](crates/robot-artifacts/README.md) | §7 | Content-addressed storage, the bounded TOML subset, the binary chunk format, run/artifact manifests, the `robot-bundle/1` policy-bundle format (ADR 0016) and promotion ledger |
+| [`robot-model`](crates/robot-model/README.md) | §6, §7.1, ADR 0015 | The kinematic tree, inertias, actuators, sensors, forward kinematics, URDF and OpenUSD import (mesh colliders reduced to convex hulls), the vendored G1, Go2 and H1 fixtures |
 | [`motion-io`](crates/motion-io/README.md) | §8.1 | BVH import and export, C3D, AMASS npz, live capture (`robot-capture/1`), originals kept by content ID |
 | [`motion-process`](crates/motion-process/README.md) | §8.2 | Conditioning, filtering, resampling, ground-plane and contact estimation, segmentation, augmentation |
 | [`motion-retarget`](crates/motion-retarget/README.md) | §8.2, §8.3 | Multi-task IK (positions, orientations, chain-relative reach, posture, planted feet, self-collision, free base), temporal refinement, `retarget-map/1` files |
@@ -77,9 +77,9 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Pure-array CPU core: pendulum benchmarks; the `world` simulation path (composite-rigid-body mass matrix, unified contact/limit/equality solver with primal Newton default, GJK/EPA collision with convex-hull meshes, semi-implicit Euler, `implicitfast` and RK4, the model's declared actuators, per-run `SimOptions`); the ABA/RNE solver kept as its oracle; an oracle module and a schema-v8 fidelity harness. The per-step spec index is [`specs/README.md`](crates/robot-sim/specs/README.md) |
 | [`robot-sim-gpu`](crates/robot-sim-gpu/README.md) | §9.1, PLAN.md Phase 3 | Feature-gated CubeCL f32 backend (`--features cubecl`, off by default) for a subset of the `robot-sim` functions, with CPU-vs-GPU agreement tests and `tolerances.toml`. Not part of the default build |
 | [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Stand, perturbation, tracking, reach, footwork and boxing-pad tasks over a robot-agnostic humanoid state; privileged-observation audit; calibrated randomization with held-out ranges |
-| [`robot-usd`](crates/robot-usd/README.md) | §7.1, ADR 0015 | Std-only OpenUSD reader (USDC and USDA) with layer composition, and the USD replay writer |
+| [`robot-usd`](crates/robot-usd/README.md) | §7.1, ADR 0015 | Std-only OpenUSD reader (USDC and USDA) with LIVRPS composition (sublayers, inherits, variants, references, payloads, specializes, list edits, layer offsets, target remapping), and the USD replay writer |
 | [`robot-learn`](crates/robot-learn/README.md) | §§7.6, 9.2, 9.5 | Backprop, Adam, GAE, a diagonal Gaussian policy, rollout buffers, PPO |
-| [`robot-skills`](crates/robot-skills/README.md) | §10 | Skill descriptors, exact retrieval, R1 working sets, the R2 selector (feasibility, OOD, transitions, dwell, hysteresis, recovery preemption, counters), expert staging, the Markdown catalog |
+| [`robot-skills`](crates/robot-skills/README.md) | §10 | Skill descriptors, exact retrieval, R1 working sets, the R2 selector (feasibility, OOD, transitions, dwell, hysteresis, recovery preemption, counters), expert staging, the Markdown catalog, `skill-manifest/1` files |
 | [`robot-adapt`](crates/robot-adapt/README.md) | §11.3 | The adaptation ladder as a gate, system identification, history encoders, simulator correction, bounded residuals, gated fine-tuning, retrieval, morphology, adaptation reports |
 | [`robot-perception`](crates/robot-perception/README.md) | §11.2 | Kalman filters, error-state attitude, floating-base estimation with slip gating, contact hysteresis, opponent tracking with age, NEES consistency against synthetic truth |
 | [`robot-supervisor`](crates/robot-supervisor/README.md) | §12.1, §12.2 | The last stage before the actuators: limits, freshness, comms, contacts, torque-speed and thermal envelope, saturation, contact energy budgets, mode interlocks; the per-robot hazard register |
@@ -89,7 +89,7 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`robot-persona`](crates/robot-persona/README.md) | §12.5 | Versioned styles bounded inside validated ranges, an expression arbiter that yields to recovery, session-scoped opponent memory, recognizability and non-degradation evaluation |
 | [`robot-devtools`](crates/robot-devtools/README.md) | §§2.3.1, 13.1 | The exclusion gate, the dependency knowledge base (Cargo.lock inventory, staleness sweeps, fault records) and evidence-ledger diffing that refuses unsupported promotions |
 | [`robot-viewer`](crates/robot-viewer/README.md) | §6, §11.2 | Inspection data layer (skeletons, contacts, tracking error, synchronized playback) — no rendering toolkit is wired in; see its README for why |
-| [`robot-cli`](crates/robot-cli/README.md) | PLAN.md §4 | The `robot` binary: data import, motion retarget and validate, sim, train, eval, adapt identify and replay over the library crates; `skills`, `deps` and `deploy` named with their reasons |
+| [`robot-cli`](crates/robot-cli/README.md) | PLAN.md §4 | The `robot` binary: data import, motion retarget and validate, sim, train, eval (including `--bundle` verification and the activation gate), skills, adapt identify and replay over the library crates; `deps` and `deploy` named with their reasons |
 
 ### What's genuinely limited, right now
 
