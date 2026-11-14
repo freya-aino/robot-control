@@ -1181,3 +1181,8 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
   directory's `PROVENANCE.md`); `PhysicsFixedJoint` support in
   `robot_model::usd`; `unitree_go2_12dof_usd` and `unitree_h1_19dof_usd`
   fixtures with tests; `crates/robot-sim/tests/vendored_robots.rs`.
+- **Artifacts (composition part):** full `SdfListOp` edit semantics
+  (`ListOp::apply`), inherits/specializes arcs, sublayer and arc layer
+  offsets on time samples, relationship/connection target remapping through
+  arcs, and fieldless standalone target specs in `robot_usd::stage`, with
+  `crates/robot-usd/tests/composition.rs`.

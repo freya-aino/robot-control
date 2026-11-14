@@ -13,7 +13,7 @@ no FFI, no `unsafe`.
 | `error` | `UsdError` (`Malformed`, `Unsupported`, I/O) and the crate `Result` |
 | `diagnostics` | Non-fatal findings: `shader_warnings` reports MDL material sources that exist only in Omniverse (the four G1 materials, all `OmniPBR.mdl`) |
 | `layer` | `Layer` and `Spec`: the format-independent view of one file, with format detection |
-| `stage` | Composition: sublayers, variant selections, internal and external references, payloads |
+| `stage` | Composition in LIVRPS order: sublayers, inherits, variant selections, internal and external references, payloads, specializes; layer offsets applied to time samples; full `SdfListOp` edits; relationship and connection targets remapped through arcs |
 | `replay` | `write_replay_usda(replay)`: a recorded robot run as a USDA layer with `timeSamples` on link world poses (per frame), UsdPhysics state and `robot:appliedTorque` on joints, and collision and primitive shapes as static children of their links (ADR 0015) |
 | `usda` | `write_usda(stage)` and `parse_layer` / `parse_stage` for the subset the writer emits |
 | `value` | `Value`, `ListOp`, `Arc`, `Specifier`, `Variability` |
@@ -35,11 +35,10 @@ storage order; the G1 principal axes and identity joint frames confirm `(x, y, z
 - Value types outside those the G1 files use (`UnregisteredValue`, `Spline`,
   `Relocates`, `PathExpression`, `AnimationBlock`, `Permission`) error with
   their type id.
-- Composition: inherits, specializes, non-identity layer offsets, deleted or
-  ordered list items, variant sets beyond the selection of each prim, and
-  standalone connection specs. Each makes composition fail with `Unsupported`.
-- Relationship targets are kept as authored; they are not remapped through
-  references or payloads.
+- Composition: variant sets beyond the authored selection of each prim (no
+  fallback-driven selection), and standalone connection or relationship-target
+  specs that author fields of their own. Each makes composition fail with
+  `Unsupported`.
 - USDA: the writer emits a subset (prims, typed attributes, relationships,
   connections, time samples, metadata with a type keyword). Halves are read as
   `float`.
@@ -47,7 +46,11 @@ storage order; the G1 principal axes and identity joint frames confirm `(x, y, z
 ## Verification
 
 Unit tests cover LZ4, the container, the integer codec, the TOC and inline
-values, and the USDA reader. `tests/g1.rs` checks the four vendored layers
+values, and the USDA reader. `tests/composition.rs` exercises the arcs the
+vendored files don't: inherits, specializes, list edits (delete, reorder,
+explicit), sublayer and reference layer offsets on time samples, target
+remapping through a reference, and fieldless standalone target specs.
+`tests/g1.rs` checks the four vendored layers
 against values measured with this crate: all specs decode, 275 composed prims
 by type, the joint and link examples, collision geometry, mesh extents against
 their points, and a USDA round trip.

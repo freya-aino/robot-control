@@ -3,16 +3,23 @@
 //! The root layer's `subLayers` are loaded recursively, strongest first. A
 //! prim is then composed from a list of *sources*: `(layer stack, spec path)`
 //! pairs. The list starts with the prim's own specs and is extended, in USD's
-//! LIVRPS order, by variant selections, then references, then payloads. Each
-//! field takes the value of the strongest source that authors it. Child and
-//! property orders are unions of the sources' orders, strongest first.
+//! LIVRPS order, by inherits, then variant selections, then references, then
+//! payloads, then specializes. Each field takes the value of the strongest
+//! source that authors it, except list-valued fields, which compose every
+//! source's list op weakest first. Child and property orders are unions of
+//! the sources' orders, strongest first.
 //!
-//! Implemented arcs: sublayers (identity layer offsets only), variant selections,
-//! internal and external references, and payloads, each with an optional
-//! prim path (default prim when empty) and identity layer offset. Relationship
-//! targets and connections are kept exactly as authored, not remapped through
-//! arcs. Deleted or ordered list items and standalone connection specs are
-//! reported as [`UsdError::Unsupported`].
+//! Implemented arcs: sublayers, inherits, variant selections, internal and
+//! external references, payloads, and specializes, each arc with an optional
+//! prim path (default prim when empty) and a layer offset applied to time
+//! samples. Relationship targets and connections authored inside a referenced
+//! or payloaded subtree are remapped into the composed namespace; targets
+//! that point outside the arc's subtree are kept as authored. List edits
+//! (explicit, add, prepend, append, delete, reorder) follow
+//! `SdfListOp::ApplyOperations`. Standalone connection and relationship-target
+//! specs are accepted when they author no fields of their own (the target
+//! lists already carry their paths); ones with fields are reported as
+//! [`UsdError::Unsupported`], as is every other construct outside this set.
 
 use crate::error::{Result, UsdError};
 use crate::layer::{read_layer_file, resolve_relative, Layer, Spec, SpecKind};
@@ -44,11 +51,14 @@ pub struct Property {
     pub variability: Option<Variability>,
     /// The `default` value of an attribute, if authored.
     pub default: Option<Value>,
-    /// The `timeSamples` of an attribute, if authored.
+    /// The `timeSamples` of an attribute, if authored, in stage time (layer
+    /// offsets applied).
     pub time_samples: Option<Vec<(f64, Value)>>,
-    /// Connection paths of an attribute (`connectionPaths`).
+    /// Connection paths of an attribute (`connectionPaths`), remapped into
+    /// the composed namespace.
     pub connections: Vec<String>,
-    /// Target paths of a relationship (`targetPaths`).
+    /// Target paths of a relationship (`targetPaths`), remapped into the
+    /// composed namespace.
     pub targets: Vec<String>,
     /// Any other authored fields, in stored order.
     pub metadata: BTreeMap<String, Value>,
@@ -163,11 +173,23 @@ impl Stage {
     }
 }
 
-/// A place a prim's opinions can come from: a spec path in a layer stack.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A layer time offset `(offset, scale)`: stage time = offset + scale * layer
+/// time. Composition `outer ∘ inner` applies the inner mapping first.
+type Offset = (f64, f64);
+
+const IDENTITY: Offset = (0.0, 1.0);
+
+fn compose_offset(outer: Offset, inner: Offset) -> Offset {
+    (outer.0 + outer.1 * inner.0, outer.1 * inner.1)
+}
+
+/// A place a prim's opinions can come from: a spec path in a layer stack,
+/// reached through arcs whose combined layer offset is `offset`.
+#[derive(Debug, Clone, PartialEq)]
 struct Src {
     stack: usize,
     path: String,
+    offset: Offset,
 }
 
 #[derive(Default)]
@@ -176,8 +198,8 @@ struct Composer {
     /// Per layer: spec path to spec index.
     index: Vec<HashMap<String, usize>>,
     by_id: HashMap<String, usize>,
-    /// Each stack: layer indices, strongest first.
-    stacks: Vec<Vec<usize>>,
+    /// Each stack: `(layer index, offset)`, strongest first.
+    stacks: Vec<Vec<(usize, Offset)>>,
     stack_of_layer: HashMap<usize, usize>,
     in_progress: HashSet<usize>,
 }
@@ -211,7 +233,8 @@ impl Composer {
         Ok(self.add(layer))
     }
 
-    /// The layer stack of a layer: the layer, then its sublayers' stacks.
+    /// The layer stack of a layer: the layer, then its sublayers' stacks,
+    /// each member carrying the sublayer offsets composed down to it.
     fn stack_of(&mut self, layer: usize) -> Result<usize> {
         if let Some(&s) = self.stack_of_layer.get(&layer) {
             return Ok(s);
@@ -222,15 +245,17 @@ impl Composer {
                 self.layers[layer].identifier
             )));
         }
-        let mut members = vec![layer];
+        let mut members: Vec<(usize, Offset)> = vec![(layer, IDENTITY)];
         let ident = self.layers[layer].identifier.clone();
-        for sub in sublayer_refs(&self.layers[layer]) {
+        let subs = sublayer_refs(&self.layers[layer]);
+        let offsets = sublayer_offsets(&self.layers[layer], subs.len())?;
+        for (sub, off) in subs.into_iter().zip(offsets) {
             let file = resolve_relative(&ident, &sub).display().to_string();
             let li = self.load(&file)?;
             let st = self.stack_of(li)?;
-            for m in self.stacks[st].clone() {
-                if !members.contains(&m) {
-                    members.push(m);
+            for (m, mo) in self.stacks[st].clone() {
+                if !members.iter().any(|(e, _)| *e == m) {
+                    members.push((m, compose_offset(off, mo)));
                 }
             }
         }
@@ -241,11 +266,16 @@ impl Composer {
         Ok(id)
     }
 
-    /// The specs at a source, strongest layer first, with their layer index.
-    fn specs_at(&self, src: &Src) -> Vec<(usize, usize)> {
+    /// The specs at a source, strongest layer first, with the total offset
+    /// from that layer's time to stage time.
+    fn specs_at(&self, src: &Src) -> Vec<((usize, usize), Offset)> {
         self.stacks[src.stack]
             .iter()
-            .filter_map(|&li| self.index[li].get(&src.path).map(|&k| (li, k)))
+            .filter_map(|&(li, off)| {
+                self.index[li]
+                    .get(&src.path)
+                    .map(|&k| ((li, k), compose_offset(src.offset, off)))
+            })
             .collect()
     }
 
@@ -253,8 +283,24 @@ impl Composer {
         &self.layers[at.0].specs[at.1]
     }
 
-    /// Expands variant selections, references and payloads into an ordered
-    /// source list: local sources, then variants, then references, then payloads.
+    /// The composed items of a list-op field across a source's specs
+    /// (strongest first): every op applied weakest first.
+    fn composed_list(&self, src: &Src, field: &str) -> Vec<Value> {
+        let mut ops: Vec<ListOp> = Vec::new();
+        for (at, _) in self.specs_at(src) {
+            if let Some(Value::ListOp(op)) = self.spec(at).field(field) {
+                ops.push((**op).clone());
+            }
+        }
+        let mut items = Vec::new();
+        for op in ops.iter().rev() {
+            items = op.apply(&items);
+        }
+        items
+    }
+
+    /// Expands inherits, variant selections, references, payloads and
+    /// specializes into an ordered source list, LIVRPS order.
     fn gather(&mut self, sources: &[Src], depth: usize) -> Result<Vec<Src>> {
         if depth > MAX_NESTING {
             let at: Vec<String> = sources
@@ -266,13 +312,29 @@ impl Composer {
                 "composition arcs nested deeper than 64 (cycle?) at {at:?}"
             )));
         }
+        let mut inherits = Vec::new();
         let mut variants = Vec::new();
         let mut refs = Vec::new();
         let mut payloads = Vec::new();
+        let mut specializes = Vec::new();
         for s in sources {
-            for at in self.specs_at(s) {
+            for (field, out) in [
+                ("inherits", &mut inherits),
+                ("specializes", &mut specializes),
+            ] {
+                for item in self.composed_list(s, field) {
+                    let path = item.as_str().map(str::to_owned).ok_or_else(|| {
+                        UsdError::Malformed(format!("{field} on {} holds a non-path", s.path))
+                    })?;
+                    out.push(Src {
+                        stack: s.stack,
+                        path,
+                        offset: s.offset,
+                    });
+                }
+            }
+            for (at, _) in self.specs_at(s) {
                 let spec = self.spec(at).clone();
-                let layer_id = self.layers[at.0].identifier.clone();
                 if let Some(Value::Dictionary(sel)) = spec.field("variantSelection") {
                     let mut names = Vec::new();
                     if let Some(Value::ListOp(op)) = spec.field("variantSetNames") {
@@ -292,25 +354,29 @@ impl Composer {
                             variants.push(Src {
                                 stack: s.stack,
                                 path: format!("{}{{{set}={choice}}}", s.path),
+                                offset: s.offset,
                             });
                         }
                     }
                 }
-                for (field, out) in [("references", &mut refs), ("payload", &mut payloads)] {
-                    if let Some(Value::ListOp(op)) = spec.field(field) {
-                        for item in op.effective_items() {
-                            let arc = match item {
-                                Value::Reference(a) | Value::Payload(a) => *a,
-                                _ => {
-                                    return Err(UsdError::Malformed(format!(
-                                        "{field} on {} holds a non-arc",
-                                        s.path
-                                    )))
-                                }
-                            };
-                            out.push(self.resolve(&layer_id, s.stack, &arc)?);
+            }
+            for (field, out) in [("references", &mut refs), ("payload", &mut payloads)] {
+                // The arcs of each authoring layer resolve against that
+                // layer's own identifier, so resolve per spec, strongest
+                // first, over the per-source composed list.
+                let items = self.composed_list(s, field);
+                for item in items {
+                    let arc = match item {
+                        Value::Reference(a) | Value::Payload(a) => *a,
+                        _ => {
+                            return Err(UsdError::Malformed(format!(
+                                "{field} on {} holds a non-arc",
+                                s.path
+                            )))
                         }
-                    }
+                    };
+                    let authoring = self.authoring_layer_of(s, field, &arc);
+                    out.push(self.resolve(&authoring, s, &arc)?);
                 }
             }
         }
@@ -320,7 +386,7 @@ impl Composer {
                 out.push(s);
             }
         }
-        for group in [variants, refs, payloads] {
+        for group in [inherits, variants, refs, payloads, specializes] {
             if group.is_empty() {
                 continue;
             }
@@ -333,16 +399,34 @@ impl Composer {
         Ok(out)
     }
 
-    /// Turns an arc into a source: the target layer stack and prim path.
-    fn resolve(&mut self, authoring_layer: &str, current_stack: usize, arc: &Arc) -> Result<Src> {
-        if arc.layer_offset != (0.0, 1.0) {
-            return Err(UsdError::Unsupported(format!(
-                "non-identity layer offset on an arc to {}",
-                arc.asset_path
-            )));
+    /// The identifier of the strongest layer in `src`'s stack whose list op
+    /// for `field` mentions this arc; relative asset paths resolve against it.
+    fn authoring_layer_of(&self, src: &Src, field: &str, arc: &Arc) -> String {
+        let holds = |op: &ListOp| {
+            [&op.explicit, &op.added, &op.prepended, &op.appended]
+                .iter()
+                .any(|items| {
+                    items.iter().any(|v| match v {
+                        Value::Reference(a) | Value::Payload(a) => **a == *arc,
+                        _ => false,
+                    })
+                })
+        };
+        for (at, _) in self.specs_at(src) {
+            if let Some(Value::ListOp(op)) = self.spec(at).field(field) {
+                if holds(op) {
+                    return self.layers[at.0].identifier.clone();
+                }
+            }
         }
+        self.layers[self.stacks[src.stack][0].0].identifier.clone()
+    }
+
+    /// Turns an arc into a source: the target layer stack, prim path, and
+    /// the arc's layer offset composed onto the source's.
+    fn resolve(&mut self, authoring_layer: &str, from: &Src, arc: &Arc) -> Result<Src> {
         let stack = if arc.asset_path.is_empty() {
-            current_stack
+            from.stack
         } else {
             let file = resolve_relative(authoring_layer, &arc.asset_path);
             let li = self.load(&file.display().to_string())?;
@@ -353,11 +437,15 @@ impl Composer {
         } else {
             arc.prim_path.clone()
         };
-        Ok(Src { stack, path })
+        Ok(Src {
+            stack,
+            path,
+            offset: compose_offset(from.offset, arc.layer_offset),
+        })
     }
 
     fn default_prim(&self, stack: usize) -> Result<String> {
-        let layer = self.stacks[stack][0];
+        let layer = self.stacks[stack][0].0;
         let name = self.layers[layer]
             .specs
             .iter()
@@ -377,28 +465,19 @@ impl Composer {
     fn compose_root(&mut self, stack: usize) -> Result<Stage> {
         let ids: Vec<String> = self.stacks[stack]
             .iter()
-            .map(|&i| self.layers[i].identifier.clone())
+            .map(|&(i, _)| self.layers[i].identifier.clone())
             .collect();
         let root_src = Src {
             stack,
             path: "/".to_owned(),
+            offset: IDENTITY,
         };
         let mut metadata: Vec<(String, Value)> = Vec::new();
         let mut names: Vec<String> = Vec::new();
-        for at in self.specs_at(&root_src) {
+        for (at, _) in self.specs_at(&root_src) {
             let spec = self.spec(at).clone();
             if spec.kind != SpecKind::PseudoRoot {
                 continue;
-            }
-            if let Some(offsets) = spec.field("subLayerOffsets") {
-                let identity = offsets.as_array().is_none_or(|a| {
-                    a.iter().all(
-                        |o| matches!(o, Value::LayerOffset(off, sc) if *off == 0.0 && *sc == 1.0),
-                    )
-                });
-                if !identity {
-                    return Err(UsdError::Unsupported("non-identity subLayerOffsets".into()));
-                }
             }
             for (n, v) in &spec.fields {
                 if !matches!(n.as_str(), "subLayers" | "subLayerOffsets" | "primChildren")
@@ -411,7 +490,7 @@ impl Composer {
         }
         let sources = self.gather(&[root_src], 0)?;
         for s in &sources {
-            for at in self.specs_at(s) {
+            for (at, _) in self.specs_at(s) {
                 let spec = self.spec(at).clone();
                 union_names(&mut names, spec.field("primChildren"));
             }
@@ -423,6 +502,7 @@ impl Composer {
                 .map(|s| Src {
                     stack: s.stack,
                     path: child_path(&s.path, name),
+                    offset: s.offset,
                 })
                 .collect();
             match self.compose_prim(&child, &child_path("/", name))? {
@@ -449,15 +529,22 @@ impl Composer {
         let mut fields: Vec<(String, Value)> = Vec::new();
         let mut children: Vec<String> = Vec::new();
         let mut properties: Vec<String> = Vec::new();
+        let mut api_ops: Vec<ListOp> = Vec::new();
         let mut any = false;
         for s in &full {
-            for at in self.specs_at(s) {
+            for (at, _) in self.specs_at(s) {
                 let spec = self.spec(at).clone();
                 if !matches!(spec.kind, SpecKind::Prim | SpecKind::Variant) {
                     continue;
                 }
                 any = true;
                 for (n, v) in &spec.fields {
+                    if n == "apiSchemas" {
+                        if let Value::ListOp(op) = v {
+                            api_ops.push((**op).clone());
+                        }
+                        continue;
+                    }
                     if !fields.iter().any(|(m, _)| m == n) {
                         fields.push((n.clone(), v.clone()));
                     }
@@ -477,6 +564,7 @@ impl Composer {
                 .map(|s| Src {
                     stack: s.stack,
                     path: child_path(&s.path, name),
+                    offset: s.offset,
                 })
                 .collect();
             match self.compose_prim(&child, &child_path(path, name))? {
@@ -495,22 +583,25 @@ impl Composer {
             props.push(self.compose_property(&full, path, name)?);
         }
 
+        let mut api_schemas_items = Vec::new();
+        for op in api_ops.iter().rev() {
+            api_schemas_items = op.apply(&api_schemas_items);
+        }
+        let api_schemas = strings_of(&api_schemas_items, path, "apiSchemas")?;
+
         let mut specifier = None;
         let mut type_name = None;
         let mut kind = None;
-        let mut api_schemas = Vec::new();
         let mut metadata = BTreeMap::new();
         for (n, v) in &fields {
             match (n.as_str(), v) {
                 ("specifier", Value::Specifier(s)) => specifier = Some(*s),
                 ("typeName", Value::Token(t)) => type_name = Some(t.clone()),
                 ("kind", Value::Token(t)) => kind = Some(t.clone()),
-                ("apiSchemas", Value::ListOp(op)) => {
-                    api_schemas = effective_strings(op, path, "apiSchemas")?
-                }
                 (
-                    "primChildren" | "properties" | "references" | "payload" | "variantSelection"
-                    | "variantSetNames" | "variantChildren" | "variantSetChildren",
+                    "primChildren" | "properties" | "references" | "payload" | "inherits"
+                    | "specializes" | "variantSelection" | "variantSetNames" | "variantChildren"
+                    | "variantSetChildren",
                     _,
                 ) => {}
                 _ => {
@@ -533,21 +624,35 @@ impl Composer {
 
     fn compose_property(&self, owners: &[Src], owner_path: &str, name: &str) -> Result<Property> {
         let path = format!("{owner_path}.{name}");
-        let mut fields: Vec<(String, Value)> = Vec::new();
+        let mut fields: Vec<(String, Value, Offset)> = Vec::new();
+        let mut connection_ops: Vec<(ListOp, (String, String))> = Vec::new();
+        let mut target_ops: Vec<(ListOp, (String, String))> = Vec::new();
         let mut kind = PropertyKind::Attribute;
         for s in owners {
+            let roots = arc_roots(&s.path, owner_path);
             let prop = Src {
                 stack: s.stack,
                 path: format!("{}.{name}", s.path),
+                offset: s.offset,
             };
-            for at in self.specs_at(&prop) {
+            for (at, off) in self.specs_at(&prop) {
                 let spec = self.spec(at);
                 if spec.kind == SpecKind::Relationship {
                     kind = PropertyKind::Relationship;
                 }
                 for (n, v) in &spec.fields {
-                    if !fields.iter().any(|(m, _)| m == n) {
-                        fields.push((n.clone(), v.clone()));
+                    match (n.as_str(), v) {
+                        ("connectionPaths", Value::ListOp(op)) => {
+                            connection_ops.push(((**op).clone(), roots.clone()));
+                        }
+                        ("targetPaths", Value::ListOp(op)) => {
+                            target_ops.push(((**op).clone(), roots.clone()));
+                        }
+                        _ => {
+                            if !fields.iter().any(|(m, _, _)| m == n) {
+                                fields.push((n.clone(), v.clone(), off));
+                            }
+                        }
                     }
                 }
             }
@@ -560,21 +665,21 @@ impl Composer {
             variability: None,
             default: None,
             time_samples: None,
-            connections: Vec::new(),
-            targets: Vec::new(),
+            connections: compose_paths(&connection_ops, &path, "connectionPaths")?,
+            targets: compose_paths(&target_ops, &path, "targetPaths")?,
             metadata: BTreeMap::new(),
         };
-        for (n, v) in &fields {
+        for (n, v, off) in &fields {
             match (n.as_str(), v) {
                 ("typeName", Value::Token(t)) => out.type_name = Some(t.clone()),
                 ("variability", Value::Variability(x)) => out.variability = Some(*x),
                 ("default", _) => out.default = Some(v.clone()),
-                ("timeSamples", Value::TimeSamples(ts)) => out.time_samples = Some(ts.clone()),
-                ("connectionPaths", Value::ListOp(op)) => {
-                    out.connections = effective_strings(op, &path, "connectionPaths")?
-                }
-                ("targetPaths", Value::ListOp(op)) => {
-                    out.targets = effective_strings(op, &path, "targetPaths")?
+                ("timeSamples", Value::TimeSamples(ts)) => {
+                    out.time_samples = Some(
+                        ts.iter()
+                            .map(|(t, v)| (off.0 + off.1 * t, v.clone()))
+                            .collect(),
+                    );
                 }
                 _ => {
                     out.metadata.insert(n.clone(), v.clone());
@@ -585,36 +690,101 @@ impl Composer {
     }
 }
 
-/// Rejects spec kinds and arcs this composer does not implement, so that no
-/// authored opinion is dropped without a report.
+/// The namespace translation a source implies: the arc's root path in the
+/// source layer and in the composed stage. Both are the paths left after
+/// stripping the longest common trailing component sequence; a source that is
+/// not behind an arc yields an identity pair.
+fn arc_roots(src_path: &str, composed_path: &str) -> (String, String) {
+    let s: Vec<&str> = src_path.split('/').collect();
+    let c: Vec<&str> = composed_path.split('/').collect();
+    let mut k = 0;
+    while k + 1 < s.len() && k + 1 < c.len() && s[s.len() - 1 - k] == c[c.len() - 1 - k] {
+        k += 1;
+    }
+    (s[..s.len() - k].join("/"), c[..c.len() - k].join("/"))
+}
+
+/// Remaps a path authored in a source namespace into the composed namespace.
+/// Paths outside the arc's subtree are kept as authored.
+fn remap_path(authored: &str, (from, to): &(String, String)) -> String {
+    if from == to || from.is_empty() {
+        return authored.to_owned();
+    }
+    let (prim, prop) = match authored.find('.') {
+        Some(i) => (&authored[..i], &authored[i..]),
+        None => (authored, ""),
+    };
+    if prim == from {
+        format!("{to}{prop}")
+    } else if let Some(rest) = prim.strip_prefix(&format!("{from}/")) {
+        format!("{to}/{rest}{prop}")
+    } else {
+        authored.to_owned()
+    }
+}
+
+/// Composes path-list ops gathered strongest first, remapping each op's items
+/// into the composed namespace before applying it.
+fn compose_paths(ops: &[(ListOp, (String, String))], at: &str, field: &str) -> Result<Vec<String>> {
+    let remap_items = |items: &[Value], roots: &(String, String)| -> Result<Vec<Value>> {
+        items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|p| Value::Path(remap_path(p, roots)))
+                    .ok_or_else(|| {
+                        UsdError::Malformed(format!("{field} of {at} holds a non-text item"))
+                    })
+            })
+            .collect()
+    };
+    let mut items: Vec<Value> = Vec::new();
+    for (op, roots) in ops.iter().rev() {
+        let remapped = ListOp {
+            is_explicit: op.is_explicit,
+            explicit: remap_items(&op.explicit, roots)?,
+            added: remap_items(&op.added, roots)?,
+            prepended: remap_items(&op.prepended, roots)?,
+            appended: remap_items(&op.appended, roots)?,
+            deleted: remap_items(&op.deleted, roots)?,
+            ordered: remap_items(&op.ordered, roots)?,
+        };
+        items = remapped.apply(&items);
+    }
+    strings_of(&items, at, field)
+}
+
+fn strings_of(items: &[Value], at: &str, field: &str) -> Result<Vec<String>> {
+    items
+        .iter()
+        .map(|v| {
+            v.as_str().map(str::to_owned).ok_or_else(|| {
+                UsdError::Malformed(format!("{field} of {at} holds a non-text item"))
+            })
+        })
+        .collect()
+}
+
+/// Rejects spec kinds this composer does not implement, so that no authored
+/// opinion is dropped without a report. Standalone connection and
+/// relationship-target specs are accepted when they carry no fields of their
+/// own: their paths are already in the owning property's list.
 fn check_layer(layer: &Layer) -> Result<()> {
     for spec in &layer.specs {
         match spec.kind {
-            SpecKind::Unknown
-            | SpecKind::Connection
-            | SpecKind::Expression
-            | SpecKind::Mapper
-            | SpecKind::MapperArg
-            | SpecKind::RelationshipTarget => {
+            SpecKind::Unknown | SpecKind::Expression | SpecKind::Mapper | SpecKind::MapperArg => {
                 return Err(UsdError::Unsupported(format!(
                     "{:?} spec {} in {}",
                     spec.kind, spec.path, layer.identifier
                 )));
             }
-            _ => {}
-        }
-        for arc in ["inherits", "specializes"] {
-            if let Some(Value::ListOp(op)) = spec.field(arc) {
-                if !op.effective_items().is_empty()
-                    || !op.deleted.is_empty()
-                    || !op.ordered.is_empty()
-                {
-                    return Err(UsdError::Unsupported(format!(
-                        "{arc} arc on {} in {}",
-                        spec.path, layer.identifier
-                    )));
-                }
+            SpecKind::Connection | SpecKind::RelationshipTarget if !spec.fields.is_empty() => {
+                return Err(UsdError::Unsupported(format!(
+                    "{:?} spec {} in {} authors fields of its own",
+                    spec.kind, spec.path, layer.identifier
+                )));
             }
+            _ => {}
         }
     }
     Ok(())
@@ -630,6 +800,36 @@ fn sublayer_refs(layer: &Layer) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The per-sublayer offsets, identity when unauthored. A `subLayerOffsets`
+/// whose length disagrees with `subLayers` is malformed.
+fn sublayer_offsets(layer: &Layer, count: usize) -> Result<Vec<Offset>> {
+    let Some(spec) = layer.specs.iter().find(|s| s.kind == SpecKind::PseudoRoot) else {
+        return Ok(vec![IDENTITY; count]);
+    };
+    match spec.field("subLayerOffsets").and_then(Value::as_array) {
+        None => Ok(vec![IDENTITY; count]),
+        Some(a) => {
+            if a.len() != count {
+                return Err(UsdError::Malformed(format!(
+                    "{}: {} subLayerOffsets for {} subLayers",
+                    layer.identifier,
+                    a.len(),
+                    count
+                )));
+            }
+            a.iter()
+                .map(|o| match o {
+                    Value::LayerOffset(off, sc) => Ok((*off, *sc)),
+                    _ => Err(UsdError::Malformed(format!(
+                        "{}: subLayerOffsets holds a non-offset",
+                        layer.identifier
+                    ))),
+                })
+                .collect()
+        }
+    }
+}
+
 fn union_names(into: &mut Vec<String>, v: Option<&Value>) {
     if let Some(items) = v.and_then(Value::string_items) {
         for it in items {
@@ -638,24 +838,6 @@ fn union_names(into: &mut Vec<String>, v: Option<&Value>) {
             }
         }
     }
-}
-
-/// The effective item list of a list op. Deleted and ordered items are not
-/// implemented and are reported rather than ignored.
-fn effective_strings(op: &ListOp, at: &str, field: &str) -> Result<Vec<String>> {
-    if !op.deleted.is_empty() || !op.ordered.is_empty() {
-        return Err(UsdError::Unsupported(format!(
-            "deleted or ordered items in {field} of {at}"
-        )));
-    }
-    op.effective_items()
-        .iter()
-        .map(|v| {
-            v.as_str().map(str::to_owned).ok_or_else(|| {
-                UsdError::Malformed(format!("{field} of {at} holds a non-text item"))
-            })
-        })
-        .collect()
 }
 
 fn child_path(parent: &str, name: &str) -> String {

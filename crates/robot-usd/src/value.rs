@@ -47,15 +47,63 @@ pub struct ListOp {
 impl ListOp {
     /// The items of a single-layer list, in USD's composition order:
     /// explicit items if present, otherwise prepended, added, appended.
-    /// Deleted and ordered items are reported as unsupported by the caller.
+    /// Deleted and ordered items only matter against a weaker list; use
+    /// [`ListOp::apply`] to honor them.
     pub fn effective_items(&self) -> Vec<Value> {
+        self.apply(&[])
+    }
+
+    /// Applies this op over a weaker layer's composed list, following
+    /// `SdfListOp::ApplyOperations`: an explicit list replaces `weaker`
+    /// outright; otherwise deleted items are removed, added items are
+    /// appended when absent, prepended items are moved to the front in their
+    /// given order, appended items to the back, and ordered items present in
+    /// the result are rearranged into their given relative order without
+    /// moving anything else.
+    pub fn apply(&self, weaker: &[Value]) -> Vec<Value> {
         if self.is_explicit {
             return self.explicit.clone();
         }
-        let mut out = Vec::new();
-        out.extend(self.prepended.iter().cloned());
-        out.extend(self.added.iter().cloned());
-        out.extend(self.appended.iter().cloned());
+        let mut mid: Vec<Value> = weaker
+            .iter()
+            .filter(|v| !self.deleted.contains(v))
+            .cloned()
+            .collect();
+        for it in &self.added {
+            if !mid.contains(it) {
+                mid.push(it.clone());
+            }
+        }
+        let mut front = Vec::new();
+        for it in &self.prepended {
+            mid.retain(|v| v != it);
+            front.push(it.clone());
+        }
+        let mut back = Vec::new();
+        for it in &self.appended {
+            mid.retain(|v| v != it);
+            back.push(it.clone());
+        }
+        let mut out = front;
+        out.append(&mut mid);
+        out.append(&mut back);
+        if !self.ordered.is_empty() {
+            let present: Vec<Value> = self
+                .ordered
+                .iter()
+                .filter(|o| out.contains(o))
+                .cloned()
+                .collect();
+            let slots: Vec<usize> = out
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| present.contains(v))
+                .map(|(i, _)| i)
+                .collect();
+            for (slot, val) in slots.into_iter().zip(present) {
+                out[slot] = val;
+            }
+        }
         out
     }
 }
