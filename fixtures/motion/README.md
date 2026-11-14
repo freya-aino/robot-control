@@ -8,13 +8,15 @@ and Appendix C question C-07 (licensed corpora) is still open.
 
 ## Contents
 
-No motion files are committed yet. The BVH test inputs of
+`guide-reach/` holds the synthetic standing-reach BVH and retarget map that
+`docs/guide.md` walks through. The BVH test inputs of
 `crates/motion-io/src/bvh.rs` are inline strings authored for this project,
 and the `fixture-internal` license they cite is defined here:
 
 | Identifier | Training | Redistribution | Commercial | Retention | Source |
 | --- | --- | --- | --- | --- | --- |
 | `fixture-internal` | permitted | not permitted | not permitted | none | authored inline in this repository's tests; no external capture session |
+| `fixture-internal` (`guide-reach/reach.bvh`) | permitted | not permitted | not permitted | none | authored for `docs/guide.md`'s pipeline walkthrough, with its `map.toml`; synthetic, no capture session |
 
 ## Adding a fixture
 

@@ -1,0 +1,38 @@
+schema = "retarget-map/1"
+scale = 0.8
+
+[[link]]
+human = "RightHand"
+robot = "right_rubber_hand"
+relative_human = "RightShoulder"
+relative_robot = "right_shoulder_pitch_link"
+ratio = "auto"
+
+[[foot]]
+site = 0
+human = "LeftFoot"
+robot = "left_ankle_roll_link"
+weight = 100.0
+ground_height = 0.0
+
+[[foot]]
+site = 1
+human = "RightFoot"
+robot = "right_ankle_roll_link"
+weight = 100.0
+ground_height = 0.0
+
+[solver]
+max_iterations = 40
+tolerance = 1e-4
+deadline_ms = 1000
+
+[base]
+translation_weight = 0.01
+rotation_weight = 0.1
+
+[posture]
+weight = 0.001
+
+[smoothing]
+lambda = 2.0

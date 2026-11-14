@@ -3,6 +3,7 @@
 A proposed Rust humanoid robotics platform for motion processing, simulation,
 policy training, and hardware control, including boxing research.
 
+- [User guide](docs/guide.md): setup, the pipeline end to end, every command, and the honest edges.
 - [Platform specification](SPECS.md): architecture, dependency policy, and acceptance requirements.
 - [Implementation plan](PLAN.md): delivery phases and qualification gates.
 

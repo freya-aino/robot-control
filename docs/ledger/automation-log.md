@@ -1192,3 +1192,9 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
   `skill-manifest/1` format (`robot_skills::manifest`), and the CLI
   commands `robot skills list|search` and `robot eval --bundle` with the
   activation gate run against the vendored robots' joint limits.
+- **Artifacts (guide part):** `docs/guide.md` (setup, workspace map, robot
+  models, simulation, the motion pipeline with a vendored runnable example
+  in `fixtures/motion/guide-reach/`, training/eval/bundles, skills,
+  adaptation, the safety model, disciplines, honest edges), linked from
+  the root README; every command in it was executed against this
+  revision.
