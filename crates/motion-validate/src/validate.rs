@@ -139,6 +139,14 @@ pub fn validate(
         &contacts,
         &config.contact,
     );
+    let cop = crate::cop::check(
+        profile,
+        &traj,
+        &dynamics,
+        &contacts,
+        config.contact.ground_height,
+        config.contact.force_tolerance,
+    );
     let contact_inconsistent_frames = contact
         .iter()
         .enumerate()
@@ -172,6 +180,7 @@ pub fn validate(
         summary,
         contact,
         contact_inconsistent_frames,
+        cop,
         requires_tracking_evaluation: tracking.is_none(),
         tracking,
     })
@@ -358,6 +367,8 @@ mod tests {
                 "{c:?}"
             );
         }
+        // The standing reach keeps its centre of pressure inside the feet,
+        // so `min_cop_margin: 0.0` is a genuine check here, not a bypass.
         let thresholds = AcceptanceThresholds {
             max_normalized_endpoint_error: 0.02,
             max_planted_foot_slip: 0.01,
@@ -367,6 +378,8 @@ mod tests {
             allow_contact_inconsistency: true,
             max_tracking_rms: 0.05,
             require_tracking: false,
+            min_cop_margin: 0.0,
+            allow_unchecked_cop: false,
         };
         assert_eq!(report.evaluate(&thresholds), Verdict::Accepted);
         let strict = AcceptanceThresholds {

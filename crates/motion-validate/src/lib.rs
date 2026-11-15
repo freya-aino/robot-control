@@ -11,6 +11,7 @@
 #![warn(clippy::all)]
 
 pub mod contact;
+pub mod cop;
 pub mod dynamics;
 pub mod kinematic;
 pub mod package;

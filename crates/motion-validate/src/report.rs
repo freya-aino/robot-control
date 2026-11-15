@@ -17,6 +17,7 @@ use robot_model::joint::JointSpec;
 use robot_types::units::Radians;
 
 use crate::contact::ContactFrame;
+use crate::cop::CopFrame;
 use crate::dynamics::TorqueExcess;
 use crate::tracking::TrackingResult;
 
@@ -77,6 +78,10 @@ pub struct ValidationReport {
     pub contact: Vec<ContactFrame>,
     /// Frames with any contact inconsistency.
     pub contact_inconsistent_frames: Vec<usize>,
+    /// Centre-of-pressure support per frame (`crate::cop`): the combined
+    /// CoP against the support polygon derived from the planted feet's
+    /// declared collision geometry.
+    pub cop: Vec<CopFrame>,
     /// Simulated tracking, when it was run.
     pub tracking: Option<TrackingResult>,
     /// Whether the report still lacks a tracking evaluation.
@@ -102,6 +107,14 @@ pub struct AcceptanceThresholds {
     pub max_tracking_rms: f64,
     /// Refuse a report with no tracking evaluation.
     pub require_tracking: bool,
+    /// Smallest accepted centre-of-pressure margin, metres (negative values
+    /// tolerate a CoP that far outside the support polygon; zero demands it
+    /// stay inside). Unloaded frames are never judged by this.
+    pub min_cop_margin: f64,
+    /// Accept frames whose loaded feet declare no projectable collision
+    /// geometry. `false` rejects them as `cop_unchecked`, so a missing
+    /// support polygon can never silently pass.
+    pub allow_unchecked_cop: bool,
 }
 
 /// Accept or reject.
@@ -176,6 +189,22 @@ pub enum RejectionReason {
     },
     /// Tracking was required and not run.
     TrackingMissing,
+    /// The combined centre of pressure left the support polygon by more
+    /// than the threshold tolerates.
+    CopOutside {
+        /// Frame.
+        frame: usize,
+        /// The margin, metres (negative is outside).
+        value: f64,
+        /// Threshold.
+        threshold: f64,
+    },
+    /// A loaded foot declared no projectable collision geometry, so the
+    /// support polygon is unknown.
+    CopUnchecked {
+        /// Frame.
+        frame: usize,
+    },
 }
 
 impl RejectionReason {
@@ -192,6 +221,8 @@ impl RejectionReason {
             Self::TrackingFailed { .. } => "tracking_failed",
             Self::Fell { .. } => "fell",
             Self::TrackingMissing => "tracking_missing",
+            Self::CopOutside { .. } => "cop_outside",
+            Self::CopUnchecked { .. } => "cop_unchecked",
         }
     }
 
@@ -205,7 +236,9 @@ impl RejectionReason {
             | Self::LimitViolation { frame }
             | Self::TorqueViolation { frame, .. }
             | Self::ContactInconsistent { frame }
-            | Self::Fell { frame } => Some(*frame),
+            | Self::Fell { frame }
+            | Self::CopOutside { frame, .. }
+            | Self::CopUnchecked { frame } => Some(*frame),
             Self::TrackingFailed { .. } | Self::TrackingMissing => None,
         }
     }
@@ -253,6 +286,19 @@ impl fmt::Display for RejectionReason {
             ),
             Self::Fell { frame } => write!(f, "frame {frame}: fell while tracking"),
             Self::TrackingMissing => f.write_str("tracking evaluation required but not run"),
+            Self::CopOutside {
+                frame,
+                value,
+                threshold,
+            } => write!(
+                f,
+                "frame {frame}: centre-of-pressure margin {value} m is below threshold {threshold} m"
+            ),
+            Self::CopUnchecked { frame } => write!(
+                f,
+                "frame {frame}: a loaded foot has no projectable collision geometry, so the \
+                 support polygon is unknown"
+            ),
         }
     }
 }
@@ -308,6 +354,25 @@ impl ValidationReport {
         if !thresholds.allow_contact_inconsistency {
             for &frame in &self.contact_inconsistent_frames {
                 reasons.push(RejectionReason::ContactInconsistent { frame });
+            }
+        }
+        for (i, frame) in self.cop.iter().enumerate() {
+            match frame {
+                CopFrame::Unloaded => {}
+                CopFrame::NotCheckable { .. } => {
+                    if !thresholds.allow_unchecked_cop {
+                        reasons.push(RejectionReason::CopUnchecked { frame: i });
+                    }
+                }
+                CopFrame::Checked { margin, .. } => {
+                    if *margin < thresholds.min_cop_margin {
+                        reasons.push(RejectionReason::CopOutside {
+                            frame: i,
+                            value: *margin,
+                            threshold: thresholds.min_cop_margin,
+                        });
+                    }
+                }
             }
         }
         match &self.tracking {
@@ -376,6 +441,7 @@ mod tests {
             summary: DynamicsSummary::default(),
             contact: Vec::new(),
             contact_inconsistent_frames: Vec::new(),
+            cop: Vec::new(),
             tracking: None,
             requires_tracking_evaluation: true,
         }
@@ -391,6 +457,8 @@ mod tests {
             allow_contact_inconsistency: false,
             max_tracking_rms: 0.05,
             require_tracking: false,
+            min_cop_margin: 0.0,
+            allow_unchecked_cop: false,
         }
     }
 
@@ -455,6 +523,35 @@ mod tests {
         assert!(
             matches!(&reasons[0], RejectionReason::TrackingFailed { label, .. } if label == "hook")
         );
+    }
+
+    #[test]
+    fn the_cop_margin_and_the_unchecked_case_reject_by_their_own_codes() {
+        let mut r = report(&[0.0, 0.0, 0.0]);
+        r.cop = vec![
+            CopFrame::Unloaded,
+            CopFrame::Checked {
+                cop: (0.0, 0.0),
+                margin: -0.02,
+            },
+            CopFrame::NotCheckable {
+                sites: vec![robot_types::ids::ContactSiteId::new(0)],
+            },
+        ];
+        let Verdict::Rejected(reasons) = r.evaluate(&thresholds()) else {
+            panic!("expected rejection");
+        };
+        let codes: Vec<_> = reasons.iter().map(RejectionReason::code).collect();
+        assert_eq!(codes, vec!["cop_outside", "cop_unchecked"]);
+        assert_eq!(reasons[0].frame(), Some(1));
+        assert_eq!(reasons[1].frame(), Some(2));
+        // Tolerating both makes the same report acceptable.
+        let lax = AcceptanceThresholds {
+            min_cop_margin: -0.05,
+            allow_unchecked_cop: true,
+            ..thresholds()
+        };
+        assert_eq!(r.evaluate(&lax), Verdict::Accepted);
     }
 
     #[test]

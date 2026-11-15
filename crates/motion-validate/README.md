@@ -15,6 +15,7 @@ the tracking world), `motion-process` (human forward kinematics),
 | `kinematic` | Per-frame normalized endpoint error (against the map's own targets), root drift, planted-foot slip |
 | `dynamics` | Floating-base RNE inverse dynamics through `robot-sim`, the base wrench distributed least-norm over the planted feet, joint torques after distribution, unsupported base force with no contact; position, velocity and torque-speed envelope checks |
 | `contact` | Contact consistency: labelled-but-lifted and unlabelled-penetrating feet, unsupported base force, pulling contacts, contacts outside the friction cone |
+| `cop` | Centre-of-pressure support: the combined CoP (distribution-independent, fixed by the base wrench) against the support polygon projected from the planted feet's declared collision geometry; per-frame `Checked` with a signed margin, `Unloaded`, or `NotCheckable` naming feet without projectable geometry |
 | `tracking` | Simulated tracking in `robot-sim`'s `World`: declared drives, or an inertia-scaled PD with optional inverse-dynamics feedforward; fixed or floating base on a ground plane; per-frame error, fall detection, per-task-label results |
 | `report` | `ValidationReport` (kinematic, dynamics, summaries, contact, tracking as separate fields), `AcceptanceThresholds`, `Verdict`, `RejectionReason` with stable codes |
 | `validate` | `validate`: the whole of §8.2 item 8 in one call |
@@ -61,14 +62,26 @@ and message, so a threshold change can revisit them.
 - The torque-speed check uses each actuator's envelope through its
   transmission. A joint with no actuator gets its torque reported but no
   envelope check.
-- Centre-of-pressure limits are not checked: the profile does not describe
-  a foot's support polygon.
+- Centre-of-pressure limits are checked against a support polygon derived
+  from the feet's **declared collision geometry** (box corners, hull
+  vertices, sphere centres, cylinder axis endpoints — the curved shapes
+  conservative rather than inflated by radius), so the profile needed no
+  new field. The per-foot wrench split is a least-norm estimate, so the
+  check judges the **combined** CoP, which the base wrench fixes whatever
+  the split. A loaded foot with no projectable geometry makes the frame
+  `NotCheckable` by name and rejects unless `allow_unchecked_cop` is set —
+  a missing polygon never silently passes.
 - Acceleration and jerk are reported as summaries. No limit is declared for
   them, so the caller decides what is too much.
 
 ## Testing
 
-`cargo test -p motion-validate`: 17 tests. They cover:
+`cargo test -p motion-validate`: 24 tests. They cover:
+- a point mass over a box sole with the hand-computed CoP margin (+0.04 m
+  centred, −0.05 m with the sole shifted past the body), the standing G1's
+  CoP inside its sole spheres, a 20 m/s² sideways acceleration pushing it
+  more than 0.5 m outside, the `NotCheckable` and `Unloaded` paths, and the
+  `cop_outside`/`cop_unchecked` rejection codes;
 - the G1's standing weight carried exactly by its feet;
 - hover flagged and free fall not;
 - the torque envelope;

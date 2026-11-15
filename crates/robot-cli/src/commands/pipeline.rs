@@ -407,8 +407,13 @@ pub fn motion_validate_reference(source: &Path, args: &[String]) -> i32 {
         allow_contact_inconsistency: false,
         max_tracking_rms: 0.1,
         require_tracking: false,
+        // CoP inside the support polygon whenever it is checkable; a foot
+        // whose declared geometry cannot be projected reports rather than
+        // rejects, since this command runs on arbitrary imported robots.
+        min_cop_margin: 0.0,
+        allow_unchecked_cop: true,
     };
-    eprintln!("note: thresholds (unvalidated defaults): endpoint 0.05 of 1.3 m body size, slip 0.03 m, drift 0.25 m");
+    eprintln!("note: thresholds (unvalidated defaults): endpoint 0.05 of 1.3 m body size, slip 0.03 m, drift 0.25 m, CoP margin 0 m where checkable");
     let report = match validate(&human, &reference, &profile, &vc) {
         Ok(r) => r,
         Err(e) => return fail(e),
