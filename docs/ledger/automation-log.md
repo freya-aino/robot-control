@@ -1198,3 +1198,51 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
   adaptation, the safety model, disciplines, honest edges), linked from
   the root README; every command in it was executed against this
   revision.
+
+## Entry: 2026-11-15 (second session: whole-stack code inspection and fixes)
+
+- **Model identity/version:** `claude-fable-5` (Anthropic).
+- **Request:** "walk through the project and do a code inspection of the
+  whole stack, give a code_review_15_11_26.md file afterwards" followed by
+  "procede" (fix the findings in the review's suggested order).
+- **Artifacts produced:** `code_review_15_11_26.md` (24 crates inspected;
+  7 high / 15 medium / ~24 low findings, each with file:line evidence; all
+  highs independently re-verified before reporting). Fixes, each with
+  regression tests, in six commits:
+  - Activation gate (H1, H2, M11): `check_activatable` refuses envelope
+    width mismatches and non-finite limits instead of zip-truncating and
+    NaN-passing; the USD importer derives per-robot profile identity
+    (every import was stamped `unitree-g1-29dof-usd`, so the §12.2
+    profile match could not tell the vendored robots apart); `robot eval
+    --bundle` names its rate check as self-consistency.
+  - Safety paths (H3, H4, M7, M9, M10): falling with a non-resident
+    recovery skill is Protective, not Keep; the supervisor folds fault
+    severity before log capacity (a full log could downgrade an
+    interlock-open tick to clamp-and-continue); NaN temperatures fault
+    and derate to zero; a mode's interlocks are treated as open without a
+    monitor to attest them; R2 selection survives NaN features.
+  - Hostile files (H5–H7, M12–M14): BVH depth bound, npz zero-width
+    refusal and EOCD guard, C3D checked dimension products, capture lag
+    saturation, USDC checked counts with bounded pre-allocation.
+  - robot-usd composition (M1–M3): variant selections compose
+    strongest-wins across sources and through arc recursion; arc
+    namespace roots are recorded at resolution (`Src::root`) instead of
+    inferred from path suffixes; prim recursion bounded (MAX_PRIM_DEPTH).
+  - Bundle seal (M4–M6): unknown keys refused everywhere the digest seal
+    does not reach; `load_weights` verifies the bytes it returns; field
+    widths bounded (MAX_FIELD_WIDTH).
+  - Evidence honesty (M8, M15): per-metric missing/non-finite seeds make
+    the verdict Inconclusive and are named; duplicate seeds are excluded
+    and block acceptance; `resample` no longer lerps Missing placeholders
+    into "Interpolated" data.
+  - Maintenance lows: CLI usage text and envelope joint filter, Name
+    refuses `.`/`..`, duplicate tier assignments refused, bundle schema
+    compatibility check, `forward_with_trace` errors on width, GAE real
+    asserts, gaussian-policy gradient doc sign, skill-manifest writer
+    validates what the reader refuses, expert-cache swap budgeting,
+    attitude filter rejects bad dt, `depends_on` refuses non-strings,
+    GPU equality kernel damping branch matches the CPU reference.
+- **Negative results / still open:** the lows listed in the review's "Fix
+  status" note (EPA convergence surfacing, C3D label dedup, chain_ratio
+  errors, TOML array-table header bound, among others) are recorded there
+  and deliberately not fixed in this pass.
