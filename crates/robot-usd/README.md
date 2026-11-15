@@ -29,6 +29,15 @@ writes `(w, x, y, z)`, which the replay writer converts. The reader's
 `Value::Quatf` documentation that says `(real, i, j, k)` is wrong about the
 storage order; the G1 principal axes and identity joint frames confirm `(x, y, z, w)`.
 
+Half-precision values (`half`, `half2..4`, `quath`, arrays) are decoded from
+their binary16 bit patterns — subnormals, signed zeros, infinities and NaN —
+and widened to the `float` family, which is exact: binary32 represents every
+finite binary16 value without rounding. `Value` therefore has no half
+variants, and the only information not preserved is the authored type name,
+so a USDA round trip re-emits halves as `float`. The decode is pinned by
+exact-equality tests on the edge patterns and a strict-monotonicity sweep
+over all 31744 positive finite patterns.
+
 ## Not implemented (reported by name, never skipped)
 
 - Crate formats older than 0.4.0 and newer than 0.8.x.
@@ -40,8 +49,9 @@ storage order; the G1 principal axes and identity joint frames confirm `(x, y, z
   specs that author fields of their own. Each makes composition fail with
   `Unsupported`.
 - USDA: the writer emits a subset (prims, typed attributes, relationships,
-  connections, time samples, metadata with a type keyword). Halves are read as
-  `float`.
+  connections, time samples, metadata with a type keyword). The authored
+  `half` type *name* is not round-tripped (see Conventions: the values
+  themselves are decoded exactly and widened).
 
 ## Verification
 

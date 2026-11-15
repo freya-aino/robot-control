@@ -1,7 +1,17 @@
 //! The value model shared by the crate reader, the text format and the stage.
 //!
-//! Half-precision values are widened to `f32` when decoded, so `Value` has no
-//! half variants. Matrices and quaternions are stored in OpenUSD's memory
+//! Half-precision values (`half`, `half2..4`, `quath` and their arrays) are
+//! widened to the `f32` family when decoded, so `Value` has no half
+//! variants. This is a deliberate representation choice, not a decode gap:
+//! the crate reader decodes every binary16 bit pattern exactly
+//! (`crate_file::half_to_f32` — subnormals, signed zeros and infinities
+//! included; binary32 represents all of them without rounding), and keeping
+//! one numeric family means a consumer such as `robot-model`'s importer
+//! matches `Float`/`Vec3f`/`Quatf` without caring which precision a layer
+//! author chose. The one thing not preserved is the authored *type name*,
+//! so the USDA writer re-emits widened halves as `float`.
+//!
+//! Matrices and quaternions are stored in OpenUSD's memory
 //! order: matrices row-major, quaternions as `(real, i, j, k)`.
 
 /// `SdfSpecifier`.

@@ -214,7 +214,17 @@ impl<'a> Cur<'a> {
     }
 }
 
-/// IEEE 754 binary16 to binary32.
+/// IEEE 754 binary16 to binary32, decoded from the bit pattern: sign,
+/// biased exponent and mantissa, with subnormals, both infinities and the
+/// signed zeros handled explicitly.
+///
+/// The widening is **exact**: binary32 has more exponent range and more
+/// mantissa bits than binary16, so every finite binary16 value (subnormals
+/// included) is representable in binary32 without rounding, and the
+/// arithmetic below only ever scales a small integer by a power of two.
+/// This is what lets `Value` carry halves as its `float` family without
+/// loss; the one thing not preserved is a NaN's sign and payload, which
+/// collapse to `f32::NAN` (USD assigns them no meaning).
 pub(crate) fn half_to_f32(h: u16) -> f32 {
     let sign = if h & 0x8000 != 0 { -1.0f32 } else { 1.0 };
     let exp = ((h >> 10) & 0x1f) as i32;
@@ -1157,11 +1167,48 @@ mod tests {
 
     #[test]
     fn half_conversion_known_values() {
+        // Every assertion below is exact equality: the widening is lossless,
+        // so a tolerance would only hide a decode error.
         assert_eq!(half_to_f32(0x3c00), 1.0);
         assert_eq!(half_to_f32(0xc000), -2.0);
+        assert_eq!(half_to_f32(0x3800), 0.5);
         assert_eq!(half_to_f32(0x0000), 0.0);
         assert_eq!(half_to_f32(0x7c00), f32::INFINITY);
+        assert_eq!(half_to_f32(0xfc00), f32::NEG_INFINITY);
+        // Largest finite half.
+        assert_eq!(half_to_f32(0x7bff), 65504.0);
+        // Smallest and largest subnormals: `frac * 2^-24` exactly.
+        assert_eq!(half_to_f32(0x0001), 2.0f32.powi(-24));
+        assert_eq!(half_to_f32(0x03ff), 1023.0 * 2.0f32.powi(-24));
+        // The negative zero keeps its sign bit.
+        assert_eq!(half_to_f32(0x8000), 0.0);
+        assert!(half_to_f32(0x8000).is_sign_negative());
+        // NaNs of either sign and any payload collapse to NaN.
+        assert!(half_to_f32(0x7e00).is_nan());
+        assert!(half_to_f32(0xfe00).is_nan());
+        assert!(half_to_f32(0x7c01).is_nan());
         assert!((half_to_f32(0x3555) - 0.33325195).abs() < 1e-7);
+    }
+
+    #[test]
+    fn half_conversion_is_strictly_monotone_over_every_positive_pattern() {
+        // For positive IEEE values, bit-pattern order is numeric order, so a
+        // correct decode must be strictly increasing from +0 up to +inf.
+        // Together with the exact anchors above this pins the whole mapping:
+        // a mis-scaled subnormal branch, a wrong exponent bias or a dropped
+        // mantissa bit all break strictness at some pattern. Sweeping all
+        // 31744 positive finite patterns costs microseconds.
+        for h in 0u16..0x7c00 {
+            let (a, b) = (half_to_f32(h), half_to_f32(h + 1));
+            assert!(
+                a < b,
+                "decode not strictly increasing at {h:#06x}: {a} then {b}"
+            );
+        }
+        // And the mirror property for the sign bit.
+        for h in [0x0001u16, 0x03ff, 0x3555, 0x3c00, 0x7bff] {
+            assert_eq!(half_to_f32(h), -half_to_f32(h | 0x8000));
+        }
     }
 
     #[test]
