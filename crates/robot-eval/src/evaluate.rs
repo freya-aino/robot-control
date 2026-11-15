@@ -52,6 +52,10 @@ pub struct MetricOutcome {
     pub stats: Option<SeedStatistics>,
     /// The verdict.
     pub outcome: Outcome,
+    /// Listed seeds that reported no finite value for *this* metric. A
+    /// non-empty list makes the verdict `Inconclusive`: a metric must not
+    /// pass on a quiet subset of its declared seeds.
+    pub missing_seeds: Vec<u64>,
 }
 
 /// A run's evaluation against one profile version.
@@ -69,21 +73,37 @@ pub struct EvaluationRecord {
     pub missing_seeds: Vec<u64>,
     /// Results for seeds the profile does not list (excluded).
     pub unlisted_seeds: Vec<u64>,
+    /// Seeds that reported more than once; later reports are excluded, so
+    /// a repeated seed cannot shrink the confidence interval.
+    pub duplicate_seeds: Vec<u64>,
 }
 
 impl EvaluationRecord {
     /// Every metric passed and every listed seed reported.
     #[must_use]
     pub fn accepted(&self) -> bool {
-        self.missing_seeds.is_empty() && self.outcomes.iter().all(|o| o.outcome == Outcome::Pass)
+        self.missing_seeds.is_empty()
+            && self.duplicate_seeds.is_empty()
+            && self.outcomes.iter().all(|o| o.outcome == Outcome::Pass)
     }
 }
 
 /// Evaluates `results` against `profile` and marks it evaluated.
 pub fn evaluate(profile: &mut AcceptanceProfile, results: &[SeedResult]) -> EvaluationRecord {
+    let mut duplicate_seeds: Vec<u64> = Vec::new();
+    let mut seen: Vec<u64> = Vec::new();
     let listed: Vec<&SeedResult> = results
         .iter()
         .filter(|r| profile.seed_list.contains(&r.seed))
+        .filter(|r| {
+            if seen.contains(&r.seed) {
+                duplicate_seeds.push(r.seed);
+                false
+            } else {
+                seen.push(r.seed);
+                true
+            }
+        })
         .collect();
     let missing_seeds = profile
         .seed_list
@@ -100,17 +120,28 @@ pub fn evaluate(profile: &mut AcceptanceProfile, results: &[SeedResult]) -> Eval
         .thresholds
         .iter()
         .map(|t| {
+            let mut metric_missing: Vec<u64> = Vec::new();
             let values: Vec<f64> = listed
                 .iter()
                 .filter_map(|r| {
-                    r.metrics
+                    let v = r
+                        .metrics
                         .iter()
                         .find(|(m, _)| *m == t.metric)
-                        .map(|(_, v)| *v)
+                        .map(|(_, v)| *v);
+                    match v {
+                        Some(v) if v.is_finite() => Some(v),
+                        // Absent or non-finite: recorded, never silently
+                        // dropped from the metric's evidence base.
+                        _ => {
+                            metric_missing.push(r.seed);
+                            None
+                        }
+                    }
                 })
-                .filter(|v| v.is_finite())
                 .collect();
             let stats = summarize(&values).ok();
+            let complete = metric_missing.is_empty();
             let outcome = stats.map_or(Outcome::Inconclusive, |s| {
                 let (lo, hi) = (
                     s.mean - s.t_confidence_95_halfwidth,
@@ -124,10 +155,16 @@ pub fn evaluate(profile: &mut AcceptanceProfile, results: &[SeedResult]) -> Eval
                     _ => Outcome::Inconclusive,
                 }
             });
+            let outcome = if complete {
+                outcome
+            } else {
+                Outcome::Inconclusive
+            };
             MetricOutcome {
                 threshold: t.clone(),
                 stats,
                 outcome,
+                missing_seeds: metric_missing,
             }
         })
         .collect();
@@ -139,6 +176,7 @@ pub fn evaluate(profile: &mut AcceptanceProfile, results: &[SeedResult]) -> Eval
         outcomes,
         missing_seeds,
         unlisted_seeds,
+        duplicate_seeds,
     }
 }
 
@@ -292,6 +330,36 @@ mod tests {
         let rec = evaluate(&mut profile(0.05), &results(&noisy));
         assert_eq!(rec.outcomes[0].outcome, Outcome::Inconclusive);
         assert!(!rec.accepted());
+    }
+
+    #[test]
+    fn a_metric_cannot_pass_from_a_quiet_subset_of_its_seeds() {
+        // All five seeds report, but seed 3 reports another metric only and
+        // seed 5 reports NaN: the metric's evidence base is incomplete and
+        // the verdict must be Inconclusive, with the gap named.
+        let mut r = results(&[0.01, 0.01, 0.01, 0.01, f64::NAN]);
+        r[2].metrics = vec![("other".into(), 1.0)];
+        let rec = evaluate(&mut profile(0.05), &r);
+        assert_eq!(rec.outcomes[0].outcome, Outcome::Inconclusive);
+        assert_eq!(rec.outcomes[0].missing_seeds, vec![3, 5]);
+        assert!(!rec.accepted());
+    }
+
+    #[test]
+    fn a_repeated_seed_is_excluded_and_blocks_acceptance() {
+        // A duplicated seed must not shrink the confidence interval.
+        let mut r = results(&[0.01, 0.012, 0.011, 0.013, 0.012]);
+        r.push(SeedResult {
+            seed: 1,
+            metrics: vec![("fall_rate".into(), 0.01)],
+        });
+        let rec = evaluate(&mut profile(0.05), &r);
+        assert_eq!(rec.duplicate_seeds, vec![1]);
+        assert_eq!(rec.outcomes[0].outcome, Outcome::Pass);
+        assert!(
+            !rec.accepted(),
+            "a double-counted seed is not acceptance evidence"
+        );
     }
 
     #[test]

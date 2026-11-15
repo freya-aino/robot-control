@@ -64,10 +64,13 @@ impl From<MotionError> for ResampleError {
 /// Resamples `record` to a fixed `target_rate`, by linear interpolation
 /// between bracketing source frames.
 ///
-/// A frame whose interpolation touched any [`Validity::Missing`] source
-/// sample is itself marked [`Validity::Interpolated`] for that channel —
-/// never silently promoted to [`Validity::Valid`] — per SPECS.md Section
-/// 8.2 item 3's requirement to mark gaps rather than paper over them.
+/// A sample bracketed by any [`Validity::Missing`] source sample stays
+/// `Missing` with its placeholder untouched — a placeholder is not a
+/// measurement, and interpolating it would fabricate data (an occluded
+/// marker surfacing at the world origin). Every genuinely synthesized
+/// sample is marked [`Validity::Interpolated`], never silently promoted to
+/// [`Validity::Valid`], per SPECS.md Section 8.2 item 3's requirement to
+/// mark gaps rather than paper over them.
 pub fn resample<K: MotionKind>(
     record: &MotionRecord<K>,
     target_rate: Hertz,
@@ -214,6 +217,17 @@ fn interpolate_frame(
     let mut values = Vec::with_capacity(a.values.len());
     let mut validity = Vec::with_capacity(a.validity.len());
     for i in 0..a.values.len() {
+        // A `Missing` sample holds a placeholder, not a measurement; a
+        // placeholder lerped into the output and relabeled `Interpolated`
+        // would re-enter the pipeline as fabricated data (an occluded C3D
+        // marker would surface at the world origin). The gap stays a gap.
+        if a.validity.get(i) == Some(&Validity::Missing)
+            || b.validity.get(i) == Some(&Validity::Missing)
+        {
+            values.push(a.values[i].clone());
+            validity.push(Validity::Missing);
+            continue;
+        }
         let value = match (&a.values[i], &b.values[i]) {
             (
                 JointValue::Rotation {
@@ -403,5 +417,28 @@ mod tests {
         assert_eq!(resampled.session_id, source.session_id);
         assert_eq!(resampled.provenance.len(), 1);
         assert_eq!(resampled.provenance[0].operation, "resample");
+    }
+
+    #[test]
+    fn a_missing_sample_stays_missing_instead_of_becoming_data() {
+        // An occluded marker's placeholder must not be lerped into the
+        // output and relabeled Interpolated: the gap stays a gap.
+        let mut source = record_at(30.0);
+        source.frames[1].validity[0] = Validity::Missing;
+        let resampled = resample(&source, Hertz(60.0)).unwrap();
+        let touched: Vec<&Validity> = resampled
+            .frames
+            .iter()
+            .map(|f| &f.validity[0])
+            .filter(|v| **v == Validity::Missing)
+            .collect();
+        assert!(
+            !touched.is_empty(),
+            "every output bracketed by the missing source sample stays Missing"
+        );
+        assert!(resampled
+            .frames
+            .iter()
+            .all(|f| f.validity[0] != Validity::Valid));
     }
 }
