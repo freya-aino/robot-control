@@ -24,3 +24,4 @@ pub mod knowledge_base;
 pub mod ledger;
 pub mod publish;
 pub mod services_gate;
+pub mod sources_gate;

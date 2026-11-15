@@ -19,6 +19,7 @@ use robot_devtools::exclusion_gate::{
     devtools_dependents, excluded_names_in_lock, foreign_packages_in_tree, Violation,
 };
 use robot_devtools::services_gate::{check_services, ServiceEntry};
+use robot_devtools::sources_gate;
 
 fn main() -> ExitCode {
     let root = match std::env::args().nth(1) {
@@ -89,27 +90,47 @@ fn main() -> ExitCode {
         }
     };
 
+    // One registry, two record kinds (ADR 0021): entries whose record
+    // declares data-source/1 go to the sources gate, everything else -
+    // including a missing or unparsable record - stays with the services
+    // gate, whose refusals cover those cases.
+    let (source_entries, service_entries): (Vec<ServiceEntry>, Vec<ServiceEntry>) =
+        services.into_iter().partition(|e| {
+            e.record
+                .as_deref()
+                .is_some_and(sources_gate::is_data_source)
+        });
+
     let mut violations: Vec<Violation> = excluded_names_in_lock(&lock);
     violations.extend(foreign_packages_in_tree(&tree, &root));
     violations.extend(devtools_dependents(&manifests));
-    let service_violations = check_services(&services);
+    let service_violations = check_services(&service_entries);
+    let source_violations: Vec<sources_gate::Violation> = source_entries
+        .iter()
+        .filter_map(|e| e.record.as_deref().map(|text| (e, text)))
+        .flat_map(|(e, text)| sources_gate::check_record(&e.name, text))
+        .collect();
 
-    if violations.is_empty() && service_violations.is_empty() {
+    if violations.is_empty() && service_violations.is_empty() && source_violations.is_empty() {
         let packages = tree.lines().filter(|l| !l.trim().is_empty()).count();
         let lock_entries = lock
             .lines()
             .filter(|l| l.trim_start().starts_with("name = "))
             .count();
         println!(
-            "exclusion gate: ok ({} default-closure entries, all workspace paths; {} lockfile packages, none an excluded runtime; {} manifests, none reach robot-devtools; {} service record(s), all valid robot-service/1)",
+            "exclusion gate: ok ({} default-closure entries, all workspace paths; {} lockfile packages, none an excluded runtime; {} manifests, none reach robot-devtools; {} service record(s), all valid robot-service/1; {} data source record(s), all valid data-source/1)",
             packages,
             lock_entries,
             manifests.len(),
-            services.len()
+            service_entries.len(),
+            source_entries.len()
         );
         ExitCode::SUCCESS
     } else {
         for violation in &violations {
+            eprintln!("exclusion gate: {violation}");
+        }
+        for violation in &source_violations {
             eprintln!("exclusion gate: {violation}");
         }
         for violation in &service_violations {
@@ -117,7 +138,7 @@ fn main() -> ExitCode {
         }
         eprintln!(
             "exclusion gate: {} violation(s)",
-            violations.len() + service_violations.len()
+            violations.len() + service_violations.len() + source_violations.len()
         );
         ExitCode::from(1)
     }

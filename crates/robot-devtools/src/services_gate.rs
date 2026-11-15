@@ -599,9 +599,11 @@ mod tests {
 
     #[test]
     fn the_committed_registry_records_pass_this_gate() {
-        // The two records committed under services/ are themselves
-        // fixtures of this gate; a change to either that the gate would
-        // refuse should fail here, not first in CI.
+        // The records committed under services/ are themselves fixtures of
+        // the two gates; a change to any of them that a gate would refuse
+        // should fail here, not first in CI. Routing mirrors the binary:
+        // a record whose format line declares data-source/1 goes to the
+        // sources gate, everything else stays here.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../services");
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(&root).expect("services/ exists") {
@@ -617,6 +619,18 @@ mod tests {
             });
         }
         assert!(!entries.is_empty(), "the registry has committed records");
-        assert_eq!(check_services(&entries), vec![]);
+        let (sources, services): (Vec<ServiceEntry>, Vec<ServiceEntry>) =
+            entries.into_iter().partition(|e| {
+                e.record
+                    .as_deref()
+                    .is_some_and(crate::sources_gate::is_data_source)
+            });
+        assert!(!services.is_empty(), "the registry has service records");
+        assert!(!sources.is_empty(), "the registry has data-source records");
+        assert_eq!(check_services(&services), vec![]);
+        for entry in &sources {
+            let text = entry.record.as_deref().expect("routed records have text");
+            assert_eq!(crate::sources_gate::check_record(&entry.name, text), vec![]);
+        }
     }
 }

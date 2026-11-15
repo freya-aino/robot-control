@@ -1,4 +1,4 @@
-# services/ — containerized foreign services
+# services/ — containerized foreign services and external data sources
 
 The registry of SPECS.md Section 2.4 and
 [ADR 0017](../docs/decisions/0017-containerized-foreign-services.md):
@@ -43,6 +43,31 @@ Written in the bounded TOML subset of `robot-artifacts`, flat keys only:
 | `license_disposition` | How licensed models/assets arrive; never vendored (§2.4 item 6) |
 | `image_reference` | The image name/tag; may name an upstream candidate before qualification |
 | `image_digest` | Empty below `code_inspected`; a `sha256:` digest once pinned |
+
+## The `data-source/1` record (ADR 0021)
+
+A public dataset is files someone downloads under a license, not a
+service that runs, so it registers in this same directory with its own
+record kind, validated by the sources gate (`robot-devtools`'
+`sources_gate`, run from the same binary). Flat keys:
+
+| Key | Meaning |
+| --- | --- |
+| `format` | Exactly `"data-source/1"` |
+| `name` | The directory name: lowercase, digits, hyphens |
+| `capability` | What the dataset supplies |
+| `class` | Exactly `"dataset"`; v1 admits no other class |
+| `scope` | Exactly `"motion-only"`: the ADR 0021 initial intake scope (motion and pose content, never sensor channels) is enforced here, and widening it is a new decision |
+| `evidence_state` | One of the five SPECS.md §3 states |
+| `access` | How the files are reached, including who holds any registration |
+| `output_format` | The file formats supplied |
+| `ingest_command` | The Rust ingestion path that validates them |
+| `license_disposition` | The audited terms (C-07), or the statement that the audit is still owed; never vendored |
+| `content_digest` | Empty below `code_inspected`; the `sha256:` identity of audited, fetched content once pinned |
+
+Registration never implies permission to ingest: each corpus needs its
+own C-07 license audit recorded in the evidence ledger first, and the
+`--training` import flag is asserted only on the strength of that audit.
 
 ## Lifecycle
 
