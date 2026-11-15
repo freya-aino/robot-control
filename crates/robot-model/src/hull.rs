@@ -164,6 +164,14 @@ fn assign(points: &[[f64; 3]], faces: &mut [Face], candidates: &[usize], eps: f6
     }
 }
 
+/// What the incremental construction produced: either the live faces of a
+/// genuinely three-dimensional hull, or the extreme points of a cloud with
+/// less than full dimension (a point, a segment or a planar polygon).
+enum Reduced {
+    Degenerate(Vec<usize>),
+    Solid(Vec<Face>),
+}
+
 /// The indices of `points` that lie on the convex hull.
 ///
 /// The result is a subset of the input, in ascending index order, and is never
@@ -175,7 +183,59 @@ pub fn hull_vertices(points: &[[f64; 3]]) -> Vec<usize> {
     if points.len() <= 4 {
         return (0..points.len()).collect();
     }
+    match reduce(points) {
+        Reduced::Degenerate(out) => out,
+        Reduced::Solid(faces) => {
+            // The hull's vertices are those still referenced by a live face.
+            let mut used = vec![false; points.len()];
+            for f in faces.iter().filter(|f| f.live) {
+                for v in f.vertex {
+                    used[v] = true;
+                }
+            }
+            let out: Vec<usize> = (0..points.len()).filter(|i| used[*i]).collect();
+            if out.is_empty() {
+                (0..points.len().min(4)).collect()
+            } else {
+                out
+            }
+        }
+    }
+}
 
+/// The outward-oriented triangular faces of the convex hull, as index triples
+/// into `points` wound counter-clockwise seen from outside, or `None` for a
+/// cloud with no three-dimensional hull (fewer than four points, or collinear
+/// or coplanar input).
+///
+/// [`hull_vertices`] deliberately returns vertices only, because a support
+/// query never asks for a face. This entry point exists for the consumer that
+/// *does* need the surface: the plane-hull contact manifold and the
+/// hill-climbing support walk of `specs/07-collision-pipeline.md` both need
+/// the hull's polygon and adjacency structure, and the construction here
+/// already builds every face before discarding it.
+#[must_use]
+pub fn hull_faces(points: &[[f64; 3]]) -> Option<Vec<[usize; 3]>> {
+    if points.len() < 4 {
+        return None;
+    }
+    match reduce(points) {
+        Reduced::Degenerate(_) => None,
+        Reduced::Solid(faces) => {
+            let out: Vec<[usize; 3]> = faces.iter().filter(|f| f.live).map(|f| f.vertex).collect();
+            if out.len() < 4 {
+                None
+            } else {
+                Some(out)
+            }
+        }
+    }
+}
+
+/// The incremental (quickhull-style) construction shared by [`hull_vertices`]
+/// and [`hull_faces`]: seed a tetrahedron, insert the farthest outside point,
+/// delete the faces it sees, stitch the horizon.
+fn reduce(points: &[[f64; 3]]) -> Reduced {
     // Scale the tolerance to the cloud, so a millimetre-scale part and a
     // metre-scale one behave the same way.
     let mut lo = [f64::INFINITY; 3];
@@ -188,7 +248,7 @@ pub fn hull_vertices(points: &[[f64; 3]]) -> Vec<usize> {
     }
     let extent = (0..3).fold(0.0f64, |m, k| m.max(hi[k] - lo[k]));
     if !extent.is_finite() || extent <= 0.0 {
-        return vec![0];
+        return Reduced::Degenerate(vec![0]);
     }
     let eps = extent * RELATIVE_EPS;
 
@@ -212,14 +272,14 @@ pub fn hull_vertices(points: &[[f64; 3]]) -> Vec<usize> {
         }
     }
     if a == b {
-        return vec![a];
+        return Reduced::Degenerate(vec![a]);
     }
     let (c, line_d) = farthest_from_line(points, a, b);
     if line_d <= eps {
         // Collinear: only the two ends can ever be selected.
         let mut out = [a, b];
         out.sort_unstable();
-        return out.to_vec();
+        return Reduced::Degenerate(out.to_vec());
     }
     let plane_n = cross(sub(points[b], points[a]), sub(points[c], points[a]));
     let plane_len = norm(plane_n);
@@ -241,7 +301,7 @@ pub fn hull_vertices(points: &[[f64; 3]]) -> Vec<usize> {
     if best <= eps {
         // Coplanar. The hull is a polygon; return its vertices by a
         // two-dimensional pass in the plane's own basis.
-        return planar_hull(points, plane_unit, eps);
+        return Reduced::Degenerate(planar_hull(points, plane_unit, eps));
     }
 
     // Seed tetrahedron, every face oriented outward.
@@ -257,7 +317,7 @@ pub fn hull_vertices(points: &[[f64; 3]]) -> Vec<usize> {
         }
     }
     if faces.len() < 4 {
-        return planar_hull(points, plane_unit, eps);
+        return Reduced::Degenerate(planar_hull(points, plane_unit, eps));
     }
 
     // Incremental insertion with conflict lists. Each round takes the point
@@ -332,19 +392,7 @@ pub fn hull_vertices(points: &[[f64; 3]]) -> Vec<usize> {
         faces.retain(|f| f.live);
     }
 
-    // The hull's vertices are those still referenced by a live face.
-    let mut used = vec![false; points.len()];
-    for f in faces.iter().filter(|f| f.live) {
-        for v in f.vertex {
-            used[v] = true;
-        }
-    }
-    let out: Vec<usize> = (0..points.len()).filter(|i| used[*i]).collect();
-    if out.is_empty() {
-        (0..points.len().min(4)).collect()
-    } else {
-        out
-    }
+    Reduced::Solid(faces)
 }
 
 /// Hull of a cloud that lies in one plane: a two-dimensional gift-wrap in the
@@ -564,6 +612,77 @@ mod tests {
             [0.0, 0.0, 1.0],
         ];
         assert_eq!(hull_vertices(&tet).len(), 4);
+    }
+
+    #[test]
+    fn hull_faces_of_a_cube_triangulate_its_surface_with_outward_winding() {
+        let mut points = Vec::new();
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                for z in [-1.0, 1.0] {
+                    points.push([x, y, z]);
+                }
+            }
+        }
+        points.push([0.0, 0.0, 0.0]); // interior, must appear in no face
+        let faces = hull_faces(&points).expect("a cube has a solid hull");
+        // Euler: V - E + F = 2 for a triangulated closed surface, so a cube's
+        // 8 vertices give 12 triangles and 18 edges.
+        assert_eq!(faces.len(), 12, "a triangulated cube has twelve faces");
+        let mut edges = Vec::new();
+        for f in &faces {
+            assert!(f.iter().all(|v| *v < 8), "an interior point was used");
+            for k in 0..3 {
+                let (s, t) = (f[k], f[(k + 1) % 3]);
+                edges.push((s.min(t), s.max(t)));
+                // Outward winding: the face normal points away from the centre.
+                let n = cross(
+                    sub(points[f[1]], points[f[0]]),
+                    sub(points[f[2]], points[f[0]]),
+                );
+                assert!(dot(n, points[f[0]]) > 0.0, "face {f:?} winds inward");
+            }
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        assert_eq!(edges.len(), 18, "a triangulated cube has eighteen edges");
+        // Every directed edge must appear in exactly two faces (a closed,
+        // consistently wound surface).
+        let mut directed = Vec::new();
+        for f in &faces {
+            for k in 0..3 {
+                directed.push((f[k], f[(k + 1) % 3]));
+            }
+        }
+        for &(s, t) in &directed {
+            assert!(
+                directed.iter().filter(|e| **e == (t, s)).count() == 1,
+                "edge ({s},{t}) is not matched by exactly one reverse edge"
+            );
+        }
+    }
+
+    #[test]
+    fn hull_faces_refuses_clouds_without_a_solid_hull() {
+        assert!(hull_faces(&[]).is_none());
+        assert!(hull_faces(&[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).is_none());
+        // Coplanar: a square has a polygon, not a solid.
+        let square = [
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [0.5, 0.5, 1.0],
+        ];
+        assert!(hull_faces(&square).is_none());
+        // A tetrahedron is the smallest solid.
+        let tet = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        assert_eq!(hull_faces(&tet).map(|f| f.len()), Some(4));
     }
 
     #[test]

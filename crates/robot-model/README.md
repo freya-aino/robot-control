@@ -14,10 +14,10 @@ profile of SPECS.md Section 7.1. Depends on `robot-types` and `robot-usd`
 | `actuator` | §7.1 | `Transmission`, a two-corner `TorqueSpeedEnvelope`, `PdGains`, a single-pole `ThermalLimits` model |
 | `sensor` | §7.1 | `SensorKind`, `DiagonalCovariance`, `MissingDataBehavior` as an explicit per-sensor declaration |
 | `profile` | §7.1 | `RobotProfile`: identity uniqueness, dangling-reference checks, joint-graph-is-a-tree validation, and the stricter `activate()` gate (extension strictness + independent e-stop) required before a control path |
-| `kinematics` | §6 | `forward_kinematics`: one unambiguous computation over the validated tree |
+| `kinematics` | §6 | `forward_kinematics`: one unambiguous computation over the validated tree; `forward_kinematics_floating` for a floating-base profile, taking the free joint's pose explicitly |
 | `discovery` | §7.7 | The offline core of attached-agent discovery: ranked `Claim` sources (description, device, measurement, web), `resolve` (highest rank used, every disagreement listed, nothing averaged, web-only values marked as proposals with URL, date, version, hash, model and query), seeded `sample_workspace` within declared limits, classified tests passed only with an artifact, `check_probe` (no dry run or past the margin aborts), and a `DiscoveryReport` that renders deterministically and blocks activation without a human decision record |
 | `eig` | — | `eig3`/`eig3_tol`: symmetric 3×3 Jacobi eigendecomposition (`Eig3`), used by `InertiaTensor::is_physically_plausible` for the principal-moment triangle inequality |
-| `hull` | robot-sim spec 08 item 3 | `hull_vertices`: incremental convex hull of a point cloud, returning the hull's vertex indices; reduces mesh colliders at import, with coplanar and collinear input handled by dimension |
+| `hull` | robot-sim spec 08 item 3 | `hull_vertices`: incremental convex hull of a point cloud, returning the hull's vertex indices; reduces mesh colliders at import, with coplanar and collinear input handled by dimension. `hull_faces`: the same construction's outward-wound triangles, for the consumer that needs the surface (robot-sim's hull topology for hill-climbing support and the plane-hull contact manifold); `None` for a cloud with no solid hull |
 | `urdf` | §7.1 | A minimal authored XML reader plus the URDF kinematic/mass subset this project supports |
 | `importer` | — | `ModelImporter` trait (associated `Error`) as the plug-in seam for description formats; `UrdfImporter` wraps `urdf::import_from_str` without changing it |
 | `usd` | §7.1, ADR 0015 | Builds a `RobotProfile` from an OpenUSD robot layer read with `robot-usd`: links and masses from `physics:*`, revolute joints with their frames, limits, drives and gains, and the collision shapes. Refuses anything outside that subset by name |
@@ -107,14 +107,17 @@ now only applies to the three single-axis kinds
 (`JointKind::has_single_axis`), and `JointSpec::transform_at` —
 which takes one `f64` — panics loudly on a `Free` joint rather than
 guessing, with a message pointing at `robot_sim::articulated`'s own,
-richer position representation. `robot_model::kinematics::
-forward_kinematics` is built on `transform_at` and therefore inherits
-that same loud panic rather than silently producing a wrong pose if
-ever called on a floating-base profile — it has not been generalized to
-support `Free` in this revision, and does not need to be: the dynamics
-solver that actually needs a floating base
-(`robot_sim::articulated::ArticulatedBody`) reads `Free`'s position
-directly, never through `transform_at`.
+richer position representation. `forward_kinematics` no longer inherits
+that panic: on a floating-base profile it returns
+`KinematicsError::FreeJointNeedsBasePose` by name, and
+`forward_kinematics_floating` takes the base pose explicitly — the free
+joint composes the supplied pose exactly as a scalar joint composes its
+motion, the scalar joints keep their one value each, and on a profile
+without a free joint the same call is the fixed tree rigidly carried by
+the base pose (which is what `robot-tasks`' extractor and the viewer
+each previously composed by hand). The dynamics solver that integrates
+a floating base (`robot_sim::articulated::ArticulatedBody`) still reads
+`Free`'s position directly, never through `transform_at`.
 
 `RobotProfile::dof()` also had a real, if currently invisible, bug this
 surfaced: it counted actuated *joints*, not their *degrees of freedom*,
@@ -258,5 +261,6 @@ path (ADR 0014 is withdrawn).
 Not in the model: the actuator thermal and latency values are placeholders
 from `urdf::placeholder_actuator`, and the firmware contract declares no
 independent e-stop, so the profile cannot be activated on a hardware path.
-Forward kinematics on a `Free` joint is not defined; kinematic checks use the
-fixed-base copy.
+Forward kinematics on a floating profile goes through
+`forward_kinematics_floating` with an explicit base pose; the plain entry
+point refuses a `Free` joint by name.

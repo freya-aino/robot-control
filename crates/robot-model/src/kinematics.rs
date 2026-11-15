@@ -28,6 +28,26 @@ pub enum KinematicsError {
         /// The joint.
         joint: JointId,
     },
+    /// The profile has a [`JointKind::Free`] joint, whose seven-number pose
+    /// no scalar joint value can carry. [`forward_kinematics`] refuses it by
+    /// name; [`forward_kinematics_floating`] takes the base pose explicitly.
+    ///
+    /// This replaces the earlier behaviour, where the traversal reached
+    /// [`crate::joint::JointSpec::transform_at`]'s documented panic — a
+    /// refusal by name over a loud crash, per this project's convention.
+    FreeJointNeedsBasePose {
+        /// The free joint.
+        joint: JointId,
+    },
+    /// More than one [`JointKind::Free`] joint. One floating base is the
+    /// only validated topology; a second free joint has no defined pose
+    /// source and is refused rather than guessed.
+    MultipleFreeJoints {
+        /// The second free joint encountered.
+        joint: JointId,
+    },
+    /// The supplied base pose was not finite.
+    BasePoseNotFinite,
 }
 
 impl fmt::Display for KinematicsError {
@@ -37,6 +57,17 @@ impl fmt::Display for KinematicsError {
                 write!(f, "expected {expected} joint values, found {found}")
             }
             Self::NotFinite { joint } => write!(f, "joint {joint} value is not finite"),
+            Self::FreeJointNeedsBasePose { joint } => write!(
+                f,
+                "joint {joint} is a Free joint; its pose must be supplied through \
+                 forward_kinematics_floating"
+            ),
+            Self::MultipleFreeJoints { joint } => write!(
+                f,
+                "joint {joint} is a second Free joint; one floating base is the only \
+                 supported topology"
+            ),
+            Self::BasePoseNotFinite => f.write_str("the base pose is not finite"),
         }
     }
 }
@@ -89,14 +120,67 @@ pub fn forward_kinematics(
     profile: &RobotProfile,
     joint_values: &[f64],
 ) -> Result<LinkPoses, KinematicsError> {
-    let actuated: Vec<JointId> = profile.actuated_joints().map(|j| j.id).collect();
-    if joint_values.len() != actuated.len() {
+    fk(profile, None, joint_values)
+}
+
+/// [`forward_kinematics`] for a floating-base profile: the one
+/// [`JointKind::Free`] joint takes `base` as its pose (composed after the
+/// joint's own origin, exactly as a scalar joint composes its motion), and
+/// `joint_values` carries the **single-axis** actuated joints only, in
+/// [`RobotProfile::actuated_joints`] order with the free joint skipped.
+///
+/// On a profile without a free joint this is [`forward_kinematics`] with the
+/// whole tree rigidly transformed by `base` — the same answer a caller gets
+/// composing `base` onto every fixed-base pose, computed in one place
+/// instead of at every call site (which is what `robot-tasks`'
+/// `StateExtractor` and the viewer previously each did by hand).
+///
+/// # Errors
+///
+/// [`KinematicsError`], including [`KinematicsError::MultipleFreeJoints`]
+/// for a second free joint and [`KinematicsError::BasePoseNotFinite`] for a
+/// non-finite pose.
+pub fn forward_kinematics_floating(
+    profile: &RobotProfile,
+    base: &RigidPose,
+    joint_values: &[f64],
+) -> Result<LinkPoses, KinematicsError> {
+    if !base.translation.is_finite()
+        || ![
+            base.rotation.w,
+            base.rotation.x,
+            base.rotation.y,
+            base.rotation.z,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(KinematicsError::BasePoseNotFinite);
+    }
+    fk(profile, Some(base), joint_values)
+}
+
+/// The shared traversal. `free_pose` is consumed by the first `Free` joint;
+/// `None` refuses one by name.
+fn fk(
+    profile: &RobotProfile,
+    free_pose: Option<&RigidPose>,
+    joint_values: &[f64],
+) -> Result<LinkPoses, KinematicsError> {
+    // The scalar-valued joints are the ones `joint_values` addresses; a
+    // `Free` joint's pose is not a scalar and is handled separately.
+    let scalar: Vec<JointId> = profile
+        .actuated_joints()
+        .filter(|j| j.kind != JointKind::Free)
+        .map(|j| j.id)
+        .collect();
+    if joint_values.len() != scalar.len() {
         return Err(KinematicsError::WidthMismatch {
-            expected: actuated.len(),
+            expected: scalar.len(),
             found: joint_values.len(),
         });
     }
-    if let Some((joint, _)) = actuated
+    if let Some((joint, _)) = scalar
         .iter()
         .zip(joint_values)
         .find(|(_, v)| !v.is_finite())
@@ -108,23 +192,39 @@ pub fn forward_kinematics(
     let index_of = |id: LinkId| profile.links.iter().position(|l| l.id == id);
     let root_index = index_of(profile.root_link).expect("validated profile has the root link");
     poses[root_index] = RigidPose::IDENTITY;
+    // A profile without a free joint but with a supplied base pose is the
+    // whole tree rigidly transformed: seat the root there.
+    let mut free_remaining = free_pose;
+    if profile.joints.iter().all(|j| j.kind != JointKind::Free) {
+        if let Some(base) = free_remaining.take() {
+            poses[root_index] = *base;
+        }
+    }
 
     let mut stack = vec![profile.root_link];
     while let Some(current) = stack.pop() {
         let current_index = index_of(current).expect("validated profile");
         let root_from_current = poses[current_index];
         for joint in profile.child_joints_of(current) {
-            let value = match joint.kind {
-                JointKind::Fixed => 0.0,
+            let current_from_child = match joint.kind {
+                JointKind::Fixed => joint.transform_at(0.0),
+                JointKind::Free => match free_remaining.take() {
+                    Some(base) => joint.origin.compose(base),
+                    None if free_pose.is_some() => {
+                        return Err(KinematicsError::MultipleFreeJoints { joint: joint.id });
+                    }
+                    None => {
+                        return Err(KinematicsError::FreeJointNeedsBasePose { joint: joint.id });
+                    }
+                },
                 _ => {
-                    let pos = actuated
+                    let pos = scalar
                         .iter()
                         .position(|id| *id == joint.id)
-                        .expect("every actuated joint appears in the actuated list");
-                    joint_values[pos]
+                        .expect("every scalar actuated joint appears in the list");
+                    joint.transform_at(joint_values[pos])
                 }
             };
-            let current_from_child = joint.transform_at(value);
             let root_from_child = root_from_current.compose(&current_from_child);
             let child_index = index_of(joint.child).expect("validated profile");
             poses[child_index] = root_from_child;
@@ -307,5 +407,84 @@ mod tests {
         let poses = forward_kinematics(&profile, &[0.0, 0.0]).unwrap();
         assert_eq!(poses.as_slice().len(), profile.links.len());
         assert!(poses.by_index(99).is_none());
+    }
+
+    #[test]
+    fn a_free_joint_is_refused_by_name_rather_than_panicking() {
+        // The earlier behaviour was `transform_at`'s panic; a floating
+        // profile must instead be told to supply its base pose.
+        let floating = crate::usd::with_floating_base(two_link_arm()).unwrap();
+        let err = forward_kinematics(&floating, &[0.0, 0.0]).unwrap_err();
+        assert!(
+            matches!(err, KinematicsError::FreeJointNeedsBasePose { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn floating_kinematics_is_the_fixed_tree_carried_by_the_base_pose() {
+        let fixed = two_link_arm();
+        let floating = crate::usd::with_floating_base(fixed.clone()).unwrap();
+        let q = [0.4, -0.7];
+        let base = RigidPose {
+            translation: robot_types::frames::Vec3::new(0.3, -1.2, 0.8),
+            rotation: robot_types::frames::Quat::from_rz(robot_types::units::Radians(0.6)).unwrap(),
+        };
+        let fixed_poses = forward_kinematics(&fixed, &q).unwrap();
+        let floating_poses = forward_kinematics_floating(&floating, &base, &q).unwrap();
+        // Every original link's floating pose is the base composed with its
+        // fixed-base pose. Links are matched by id, since the floating wrap
+        // appends a world link.
+        for (i, link) in fixed.links.iter().enumerate() {
+            let j = floating
+                .links
+                .iter()
+                .position(|l| l.id == link.id)
+                .expect("the wrap keeps every link");
+            let want = base.compose(&fixed_poses.by_index(i).unwrap());
+            let got = floating_poses.by_index(j).unwrap();
+            assert!(
+                (got.translation - want.translation).norm() < 1e-12,
+                "link {i}: {got:?} vs {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_base_pose_on_a_fixed_profile_transforms_the_whole_tree() {
+        let fixed = two_link_arm();
+        let base = RigidPose::from_translation(robot_types::frames::Vec3::new(1.0, 2.0, 3.0));
+        let plain = forward_kinematics(&fixed, &[0.1, 0.2]).unwrap();
+        let moved = forward_kinematics_floating(&fixed, &base, &[0.1, 0.2]).unwrap();
+        for i in 0..fixed.links.len() {
+            let want = base.compose(&plain.by_index(i).unwrap());
+            let got = moved.by_index(i).unwrap();
+            assert!((got.translation - want.translation).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn a_nonfinite_base_pose_is_refused() {
+        let floating = crate::usd::with_floating_base(two_link_arm()).unwrap();
+        let bad = RigidPose::from_translation(robot_types::frames::Vec3::new(f64::NAN, 0.0, 0.0));
+        assert_eq!(
+            forward_kinematics_floating(&floating, &bad, &[0.0, 0.0]).unwrap_err(),
+            KinematicsError::BasePoseNotFinite
+        );
+    }
+
+    #[test]
+    fn the_floating_width_counts_scalar_joints_only() {
+        // The free joint takes no scalar entry, so the two-link arm's
+        // floating wrap still wants exactly two values.
+        let floating = crate::usd::with_floating_base(two_link_arm()).unwrap();
+        let err = forward_kinematics_floating(&floating, &RigidPose::IDENTITY, &[0.0]).unwrap_err();
+        assert_eq!(
+            err,
+            KinematicsError::WidthMismatch {
+                expected: 2,
+                found: 1
+            }
+        );
     }
 }
