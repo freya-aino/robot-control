@@ -128,8 +128,15 @@ pub fn decode_ints(data: &[u8], count: usize, width: usize) -> Result<Vec<i64>> 
     let small = width / 4;
     let medium = width / 2;
     let common_len = width;
-    let codes_len = (count * 2).div_ceil(8);
-    let need = common_len + codes_len;
+    // `count` comes straight from the file; checked arithmetic keeps a
+    // declared 2^63 from aborting (the workspace enables overflow checks)
+    // or, had it wrapped, from shrinking `need` past the length check.
+    let overflow = || crate::error::UsdError::Malformed("integer count overflows".into());
+    let codes_len = count
+        .checked_mul(2)
+        .map(|bits| bits.div_ceil(8))
+        .ok_or_else(overflow)?;
+    let need = common_len.checked_add(codes_len).ok_or_else(overflow)?;
     if data.len() < need {
         return malformed("integer block shorter than its header");
     }
@@ -273,5 +280,13 @@ mod tests {
     #[test]
     fn ints_reject_truncated_header() {
         assert!(decode_ints(&[1, 2], 4, 4).is_err());
+    }
+
+    #[test]
+    fn a_file_declared_count_near_usize_max_is_refused_not_an_abort() {
+        // `count * 2` would overflow (and abort, with the workspace's
+        // overflow checks) before the length check could refuse it.
+        assert!(decode_ints(&[0; 16], usize::MAX, 8).is_err());
+        assert!(decode_ints(&[0; 16], usize::MAX / 2 + 1, 4).is_err());
     }
 }

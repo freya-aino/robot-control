@@ -117,6 +117,10 @@ pub enum BvhError {
 pub const MAX_FRAMES: usize = 1_000_000;
 /// The most motion channels a BVH hierarchy may declare.
 pub const MAX_CHANNELS: usize = 4096;
+/// The deepest `JOINT` nesting the hierarchy parser follows. The parser
+/// recurses once per level, so without a bound a crafted file would
+/// overflow the stack; no vertebrate skeleton approaches this depth.
+pub const MAX_DEPTH: usize = 256;
 
 impl fmt::Display for BvhError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -236,7 +240,7 @@ pub fn parse(
         })?
         .trim()
         .to_owned();
-    let root = parse_joint_body(&mut p, root_name)?;
+    let root = parse_joint_body(&mut p, root_name, 0)?;
 
     let (motion_header, line) = p.next_nonblank().ok_or(BvhError::Syntax {
         expected: "MOTION",
@@ -457,7 +461,18 @@ fn flatten<'a>(
     }
 }
 
-fn parse_joint_body(p: &mut LineParser<'_>, name: String) -> Result<BvhNode, BvhError> {
+fn parse_joint_body(
+    p: &mut LineParser<'_>,
+    name: String,
+    depth: usize,
+) -> Result<BvhNode, BvhError> {
+    if depth > MAX_DEPTH {
+        return Err(BvhError::Limit {
+            what: "joint nesting depth",
+            limit: MAX_DEPTH,
+            found: depth,
+        });
+    }
     let (open, line) = p.next_nonblank().ok_or(BvhError::Syntax {
         expected: "'{'",
         line: 0,
@@ -499,7 +514,7 @@ fn parse_joint_body(p: &mut LineParser<'_>, name: String) -> Result<BvhNode, Bvh
         if let Some(joint_name) = peek.strip_prefix("JOINT ") {
             let joint_name = joint_name.trim().to_owned();
             p.next_nonblank();
-            children.push(parse_joint_body(p, joint_name)?);
+            children.push(parse_joint_body(p, joint_name, depth + 1)?);
         } else if peek.starts_with("End Site") {
             p.next_nonblank();
             let (open, line) = p.next_nonblank().ok_or(BvhError::Syntax {
@@ -739,6 +754,27 @@ Frame Time: 0.033333
         assert!(matches!(
             parse(&bad, "sha256:abc", license()),
             Err(BvhError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn absurd_joint_nesting_is_refused_not_a_stack_overflow() {
+        // The parser recurses once per JOINT level; a depth limit keeps a
+        // crafted file from overflowing the stack (and aborting).
+        let mut src = String::from("HIERARCHY\nROOT J0\n{\nOFFSET 0 0 0\n");
+        for i in 1..=(MAX_DEPTH + 2) {
+            src.push_str(&format!("JOINT J{i}\n{{\nOFFSET 0 0 0\n"));
+        }
+        for _ in 0..=(MAX_DEPTH + 2) {
+            src.push_str("}\n");
+        }
+        src.push_str("MOTION\nFrames: 0\nFrame Time: 0.1\n");
+        assert!(matches!(
+            parse(&src, "sha256:abc", license()),
+            Err(BvhError::Limit {
+                what: "joint nesting depth",
+                ..
+            })
         ));
     }
 }

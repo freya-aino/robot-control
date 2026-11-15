@@ -86,10 +86,15 @@ fn le32(d: &[u8], at: usize) -> Result<u32, NpzError> {
 
 /// Reads every member of a ZIP archive as `(name, bytes)`.
 pub fn read_zip(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, NpzError> {
+    // An EOCD record is 22 bytes; shorter input cannot hold one, and the
+    // checked `get` keeps a 0–3 byte input from panicking the scan.
+    if data.len() < 22 {
+        return Err(NpzError::BadSignature("end of central directory"));
+    }
     let min = data.len().saturating_sub(22 + 65_535);
-    let eocd = (min..=data.len().saturating_sub(22))
+    let eocd = (min..=data.len() - 22)
         .rev()
-        .find(|&i| data[i..i + 4] == [0x50, 0x4b, 0x05, 0x06])
+        .find(|&i| data.get(i..i + 4) == Some(&[0x50, 0x4b, 0x05, 0x06]))
         .ok_or(NpzError::BadSignature("end of central directory"))?;
     let count = le16(data, eocd + 10)?;
     let mut p = le32(data, eocd + 16)? as usize;
@@ -259,6 +264,11 @@ pub fn parse_npy(bytes: &[u8]) -> Result<NpyArray, NpzError> {
             .as_str()
             .parse()
             .map_err(|_| NpzError::Header(format!("descr {descr}")))?;
+        // A zero-width element (`<U0`, `<f0`) would make every chunking
+        // step below panic ("chunk size must be non-zero").
+        if width == 0 {
+            return Err(NpzError::Unsupported(format!("dtype {descr}")));
+        }
         (order, kind, width)
     };
     let big = order == '>';
@@ -428,5 +438,26 @@ pub(crate) mod tests {
             parse_npy(&npy("<c16", "(1,)", &[0; 16])),
             Err(NpzError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn a_zero_width_dtype_is_refused_not_a_panic() {
+        // `<U0` and `<f0` would make the element size 0 and panic the
+        // body chunking ("chunk size must be non-zero").
+        assert!(matches!(
+            parse_npy(&npy("<U0", "(1,)", &[])),
+            Err(NpzError::Unsupported(_))
+        ));
+        assert!(matches!(
+            parse_npy(&npy("<f0", "(1,)", &[])),
+            Err(NpzError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_tiny_zip_input_errors_instead_of_panicking() {
+        for len in 0..4 {
+            assert!(read_zip(&vec![0x50; len]).is_err());
+        }
     }
 }

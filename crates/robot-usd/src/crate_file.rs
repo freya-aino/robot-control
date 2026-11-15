@@ -355,6 +355,11 @@ impl CrateFile {
         let uncompressed = c.u64()? as usize;
         let compressed = c.u64()? as usize;
         let raw = fast_decompress(c.bytes(compressed)?, uncompressed)?;
+        // More tokens than bytes cannot exist; the cap keeps a file-declared
+        // count from pre-allocating unbounded memory before the loop errors.
+        if n > raw.len() + 1 {
+            return malformed(format!("crate claims {n} tokens in {} bytes", raw.len()));
+        }
         let mut out = Vec::with_capacity(n);
         let mut parts = raw.split(|&b| b == 0);
         for _ in 0..n {
@@ -375,8 +380,11 @@ impl CrateFile {
         let n = c.u64()? as usize;
         let tokens = read_compressed_u32s(&mut c, n)?;
         let reps_size = c.u64()? as usize;
-        let reps = fast_decompress(c.bytes(reps_size)?, n * 8)?;
-        if reps.len() < n * 8 {
+        let reps_len = n
+            .checked_mul(8)
+            .ok_or_else(|| UsdError::Malformed("field count overflows".into()))?;
+        let reps = fast_decompress(c.bytes(reps_size)?, reps_len)?;
+        if reps.len() < reps_len {
             return malformed("field value representations are truncated");
         }
         Ok(tokens
@@ -1096,7 +1104,11 @@ fn read_compressed_ints(c: &mut Cur<'_>, n: usize, width: usize) -> Result<Vec<i
     if n == 0 {
         return Ok(Vec::new());
     }
-    let max_out = width + (n * 2).div_ceil(8) + n * width;
+    let overflow = || UsdError::Malformed("compressed integer count overflows".into());
+    let max_out = width
+        .checked_add(n.checked_mul(2).ok_or_else(overflow)?.div_ceil(8))
+        .and_then(|v| v.checked_add(n.checked_mul(width)?))
+        .ok_or_else(overflow)?;
     let decoded = fast_decompress(bytes, max_out)?;
     decode_ints(&decoded, n, width)
 }

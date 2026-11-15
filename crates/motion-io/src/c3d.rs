@@ -237,12 +237,19 @@ fn parse_parameters(data: &[u8], start: usize, proc_: Processor) -> Result<Param
                 .iter()
                 .map(|&d| usize::from(d))
                 .collect();
+            // Checked: the workspace aborts on overflow, and each dimension
+            // byte can be up to 255, so nine of them already overflow usize
+            // multiplication on crafted input.
             let count: usize = dims
                 .iter()
-                .product::<usize>()
+                .try_fold(1usize, |a, &d| a.checked_mul(d))
+                .ok_or(C3dError::Limit("parameter dimensions overflow"))?
                 .max(if ndims == 0 { 1 } else { 0 });
             let width = usize::from(ty.unsigned_abs());
-            let raw = slice(data, body + 2 + ndims, count * width, "parameter data")?;
+            let bytes = count
+                .checked_mul(width)
+                .ok_or(C3dError::Limit("parameter size overflows"))?;
+            let raw = slice(data, body + 2 + ndims, bytes, "parameter data")?;
             let value = match ty {
                 -1 => ParamData::Chars(raw.to_vec(), dims),
                 1 => ParamData::Bytes(raw.to_vec(), dims),
@@ -731,6 +738,26 @@ pub(crate) mod tests {
         assert!(matches!(
             parse(&bytes, "x", SourceLicense::unaudited("f")),
             Err(C3dError::NotC3d(_))
+        ));
+    }
+
+    #[test]
+    fn parameter_dimensions_that_overflow_are_refused_not_an_abort() {
+        // A parameter declaring ten dimensions of 255 overflows the usize
+        // product; the workspace aborts on overflow, so it must be checked.
+        let mut data = vec![0u8; 64];
+        data[4] = 1; // name length
+        data[5] = 1; // parameter in group 1
+        data[6] = b'A';
+        // next-entry offset 0 at 7..9: last entry.
+        data[9] = 1; // type: bytes, width 1
+        data[10] = 10; // ten dimensions...
+        for d in &mut data[11..21] {
+            *d = 255; // ...of 255 each: 255^10 > usize::MAX
+        }
+        assert!(matches!(
+            parse_parameters(&data, 0, Processor::Intel),
+            Err(C3dError::Limit(_))
         ));
     }
 }

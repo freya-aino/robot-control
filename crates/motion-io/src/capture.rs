@@ -311,7 +311,9 @@ impl Recorder {
             self.dropped += s.seq - last - 1;
         }
         self.last_seq = Some(s.seq);
-        let lag = s.arrival.nanos() - s.source_time.nanos();
+        // `source_time` is whatever i64 the datagram carried; a plain
+        // subtraction overflows (and aborts) on `i64::MIN`.
+        let lag = s.arrival.nanos().saturating_sub(s.source_time.nanos());
         self.offset = Some(self.offset.map_or(lag, |o| o.min(lag)));
         let mut values = Vec::with_capacity(self.names.len());
         let mut validity = Vec::with_capacity(self.names.len());
@@ -453,6 +455,17 @@ F 5 41000000 1 rwr -0.1 0.2 0.35 0.9
         assert!(parse_line("F 1 0 1 m 0 0 nan 1", t).is_err());
         assert!(parse_line("F 1 0 0 extra", t).is_err());
         assert!(parse_line("F 1 0 0", t).is_ok());
+    }
+
+    #[test]
+    fn an_extreme_source_time_does_not_abort_the_recorder() {
+        // The lag subtraction overflows i64 for a datagram carrying
+        // i64::MIN; it must saturate, not abort the capture session.
+        let t = Timestamp::arrival(0, ClockId::HostMonotonic, Duration::ZERO);
+        let s = parse_line("F 1 -9223372036854775808 0", t).unwrap();
+        let mut rec = Recorder::new(Vec::new(), 0.5);
+        rec.push(&s);
+        assert!(rec.clock_offset().is_some());
     }
 
     #[test]
