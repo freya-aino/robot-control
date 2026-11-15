@@ -235,6 +235,11 @@ pub struct World {
     unmodelled: usize,
     /// Hull vertices, one entry per hull shape, in that shape's own frame.
     hulls: Vec<Vec<[f64; 3]>>,
+    /// Surface topology per hull, built once here at model compile time
+    /// (`specs/07`): the vertex adjacency graph behind the hill-climbing
+    /// support walk and the face polygons behind the plane-hull manifold.
+    /// `None` for a hull with no three-dimensional surface.
+    hull_topos: Vec<Option<collision::HullTopology>>,
 }
 
 /// Position and velocity in the composite model's internal ordering.
@@ -271,6 +276,14 @@ pub struct StepReport {
     /// is a projection of the one solve's own forces, so it cannot disagree
     /// with what actually moved the robot.
     pub limit_torque: Vec<f64>,
+    /// Contact points discarded because [`crate::options::SimOptions::contact_slots`]
+    /// was exhausted this step.
+    ///
+    /// `specs/09` section 12.1 frames the slot budget as trading "contacts
+    /// silently dropped under load" against memory; this counter is what keeps
+    /// the dropping from being *silent*. Zero whenever the budget is `None` or
+    /// large enough.
+    pub dropped_contacts: usize,
 }
 
 impl World {
@@ -283,6 +296,7 @@ impl World {
         let order = profile.topological_link_order();
         let mut shapes = Vec::new();
         let mut hulls: Vec<Vec<[f64; 3]>> = Vec::new();
+        let mut hull_topos: Vec<Option<collision::HullTopology>> = Vec::new();
         let mut limits = vec![None; model.bodies.len()];
         let mut effort = vec![0.0; model.bodies.len()];
         let mut actuated_index: Vec<Option<usize>> = vec![None; model.bodies.len()];
@@ -317,7 +331,12 @@ impl World {
                     // and must not reach a convex-convex routine
                     // (`specs/07` item 2), so it stays uncounted.
                     CollisionGeometry::ConvexHull { points, .. } => {
-                        hulls.push(points.iter().map(|p| [p.x, p.y, p.z]).collect());
+                        let verts: Vec<[f64; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
+                        hull_topos.push(
+                            robot_model::hull::hull_faces(&verts)
+                                .map(|faces| collision::HullTopology::build(&verts, &faces)),
+                        );
+                        hulls.push(verts);
                         Some(ShapeGeom::Hull(hulls.len() - 1))
                     }
                     CollisionGeometry::Sphere { radius } => {
@@ -409,6 +428,7 @@ impl World {
 
         Self {
             hulls,
+            hull_topos,
             drives,
             actuated_index,
             actuated_count,
@@ -581,6 +601,7 @@ impl World {
                 ShapeGeom::Closed(p) => p,
                 ShapeGeom::Hull(i) => Primitive::Hull {
                     points: &self.hulls[i],
+                    topo: self.hull_topos[i].as_ref(),
                 },
             },
             rotation,
@@ -589,6 +610,11 @@ impl World {
     }
 
     /// Builds every constraint row at the current state.
+    ///
+    /// The second return is the number of contact points discarded because the
+    /// [`crate::options::SimOptions::contact_slots`] budget was exhausted
+    /// (`specs/09` section 12.1): the budget is enforced here, where contacts
+    /// are born, and the count is reported rather than the drop being silent.
     fn build_rows(
         &self,
         q: &[f64],
@@ -596,9 +622,12 @@ impl World {
         cvel: &[[f64; 6]],
         cdof_dot: &[[f64; 6]],
         qd: &[f64],
-    ) -> Result<Vec<Row>, CompositeError> {
+    ) -> Result<(Vec<Row>, usize), CompositeError> {
         let o = &self.options;
         let mut rows = Vec::new();
+        let slot_budget = o.contact_slots.unwrap_or(usize::MAX);
+        let mut slots_used = 0usize;
+        let mut dropped = 0usize;
 
         // Ground contacts.
         if let Some(g) = self.ground {
@@ -609,6 +638,11 @@ impl World {
                     if depth <= -o.margin {
                         continue;
                     }
+                    if slots_used >= slot_budget {
+                        dropped += 1;
+                        continue;
+                    }
+                    slots_used += 1;
                     // The contact point is on the shape's surface.
                     let surface = [point[0], point[1], point[2] - radius];
                     solver::contact_rows(
@@ -659,6 +693,11 @@ impl World {
                     if c.depth <= -o.margin {
                         continue;
                     }
+                    if slots_used >= slot_budget {
+                        dropped += 1;
+                        continue;
+                    }
+                    slots_used += 1;
                     solver::contact_rows(
                         &self.model,
                         pos,
@@ -713,7 +752,7 @@ impl World {
                 });
             }
         }
-        Ok(rows)
+        Ok((rows, dropped))
     }
 
     /// `mjd_smooth_vel` with `flg_bias = 0`: the velocity derivative of the
@@ -754,7 +793,7 @@ impl World {
         qd: &[f64],
         tau: &[f64],
         warm: Option<&[f64]>,
-    ) -> Result<(Vec<f64>, solver::Solution, Vec<Row>), CompositeError> {
+    ) -> Result<(Vec<f64>, solver::Solution, Vec<Row>, usize), CompositeError> {
         let pos = composite::position(&self.model, q)?;
         let (cvel, cdof_dot) = composite::com_vel(&self.model, &pos, qd)?;
         // Under `implicitfast` the unconstrained acceleration is solved against
@@ -766,7 +805,7 @@ impl World {
         } else {
             composite::forward_dynamics(&self.model, &pos, qd, tau)?
         };
-        let rows = self.build_rows(q, &pos, &cvel, &cdof_dot, qd)?;
+        let (rows, dropped_contacts) = self.build_rows(q, &pos, &cvel, &cdof_dot, qd)?;
         // Both solvers answer the same convex problem and have the same
         // signature, so the choice is a dispatch and nothing else depends on
         // it. `SolverAlgorithm`'s documentation carries the measurement that
@@ -785,7 +824,7 @@ impl World {
             self.options.solver_config(),
             warm,
         )?;
-        Ok((solution.qacc.clone(), solution, rows))
+        Ok((solution.qacc.clone(), solution, rows, dropped_contacts))
     }
 
     /// Forward dynamics with the smooth-force velocity derivative folded in:
@@ -854,7 +893,8 @@ impl World {
             Some(self.warm.clone())
         };
 
-        let (qacc, solution, rows) = self.accel_at(&state.q, &state.qd, tau, warm.as_deref())?;
+        let (qacc, solution, rows, dropped_contacts) =
+            self.accel_at(&state.q, &state.qd, tau, warm.as_deref())?;
 
         match self.options.integrator {
             // Both take the same semi-implicit update; they differ only in how
@@ -889,7 +929,7 @@ impl World {
                     let mut qi = q0.clone();
                     composite::integrate_pos(&self.model, &mut qi, &d_qvel, dt)?;
                     let qdi: Vec<f64> = qd0.iter().zip(&d_qacc).map(|(v, a)| v + dt * a).collect();
-                    let (fi, _, _) = self.accel_at(&qi, &qdi, tau, None)?;
+                    let (fi, _, _, _) = self.accel_at(&qi, &qdi, tau, None)?;
                     let mut corrected = qdi;
                     composite::rk_correct_free_velocity(&self.model, &mut corrected, &d_qvel, dt);
                     stage_vel.push(corrected);
@@ -951,6 +991,7 @@ impl World {
             normal_force,
             clamped_rows: solution.clamped_rows.len(),
             limit_torque,
+            dropped_contacts,
         })
     }
 
@@ -1608,6 +1649,47 @@ mod tests {
             deepest > -0.06,
             "a collision shape reached {deepest} m below the plane"
         );
+    }
+
+    #[test]
+    fn the_contact_slot_budget_is_enforced_and_the_dropped_count_is_reported() {
+        // `specs/09` section 12.1: the slot budget trades contacts dropped
+        // under load against memory, and the drop must be counted, not silent.
+        // A standing G1 rests on more points than two slots, so a two-slot
+        // budget must both cap the contact count and report what it discarded.
+        let options = SimOptions {
+            timestep: Duration::from_micros(500),
+            contact_slots: Some(2),
+            ..SimOptions::default()
+        };
+        let world = World::from_profile(&g1(), options).with_ground(Ground {
+            height: 0.0,
+            friction: 0.8,
+        });
+        let (_, mut state) = standing_world();
+        let mut world = world;
+        let tau = vec![0.0; world.nv()];
+        let mut dropped_total = 0usize;
+        for _ in 0..400 {
+            let report = world.step(&mut state, &tau).unwrap();
+            assert!(
+                report.contacts <= 2,
+                "budget of 2 slots produced {} contacts",
+                report.contacts
+            );
+            dropped_total += report.dropped_contacts;
+        }
+        assert!(
+            dropped_total > 0,
+            "a collapsing G1 on two slots never reported a dropped contact"
+        );
+
+        // Unbounded (the default) never drops anything.
+        let (mut free_world, mut free_state) = standing_world();
+        for _ in 0..50 {
+            let report = free_world.step(&mut free_state, &tau).unwrap();
+            assert_eq!(report.dropped_contacts, 0);
+        }
     }
 
     #[test]

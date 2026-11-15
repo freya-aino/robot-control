@@ -200,6 +200,68 @@ pub fn default_steps(dt_seconds: f64) -> Result<u32, String> {
     Ok((steps as u32).max(1))
 }
 
+/// Runs the archival analytic fidelity battery (`robot_sim::fidelity`,
+/// schema v8) at every declared measurement tier and, with `out`, writes the
+/// `fidelity.toml` report there through the library's own writer.
+///
+/// This is the command the root README used to note did not exist ("only
+/// the tests call it, so no command currently produces the file"). Exit 0
+/// means every check passed at every tier (`production_pass`); exit 1 is a
+/// failed check or a setup error. The G1 zero-torque probe row and the
+/// per-tier contact-applicability rows are printed but, as the schema
+/// defines, do not change the verdict.
+pub fn fidelity(out: Option<&Path>) -> i32 {
+    let tiers = robot_sim::fidelity::declared_tiers();
+    let report = match robot_sim::fidelity::run_battery(&tiers) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return EXIT_FAILURE;
+        }
+    };
+    for tier in &report.tiers {
+        let (passed, failed): (Vec<_>, Vec<_>) = report
+            .checks
+            .iter()
+            .filter(|c| c.tier == tier.name)
+            .partition(|c| c.check.pass);
+        println!(
+            "  tier {}: {} checks pass, {} fail",
+            tier.name,
+            passed.len(),
+            failed.len()
+        );
+        for f in failed {
+            println!(
+                "    FAIL {}: measured {} against tolerance {}",
+                f.check.name, f.check.measured, f.check.tolerance
+            );
+        }
+    }
+    for c in &report.contact {
+        println!("  contact {} at tier {}: {:?}", c.system, c.tier, c.status);
+    }
+    for p in &report.probe {
+        println!("  probe {}: {:?}", p.scenario, p.status);
+    }
+    if let Some(dir) = out {
+        match robot_sim::fidelity::write_report(dir, &report) {
+            Ok(path) => println!("  report: {}", path.display()),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return EXIT_FAILURE;
+            }
+        }
+    }
+    if report.production_pass() {
+        println!("  result: PASS (analytic battery; no G1 contact claim)");
+        0
+    } else {
+        println!("  result: FAIL");
+        EXIT_FAILURE
+    }
+}
+
 /// Runs the vendored Unitree G1 through `robot_sim::articulated`'s
 /// Articulated-Body Algorithm for `steps` steps of `dt_seconds` each, printing
 /// a progress trace. Returns the process exit code.

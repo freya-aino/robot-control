@@ -92,9 +92,16 @@ fn run_sim(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("qualify") => run_qualify(&args[1..]),
         Some("multibody") => run_multibody(&args[1..]),
+        Some("fidelity") => {
+            let out = match parse_flag::<PathBuf>(&args[1..], "--out") {
+                Ok(out) => out,
+                Err(message) => return invalid_flag(&message),
+            };
+            commands::sim::fidelity(out.as_deref())
+        }
         Some(other) => unknown_subcommand("sim", other),
         None => usage_error(
-            "robot sim <qualify|multibody> [--steps N] [--dt SECONDS] [--floating] [--zero-torque] [--out DIR] [--scene FILE] [--actuation drives|damping|zero] [--limit-margin RAD] [--integrator euler|implicitfast|rk4]",
+            "robot sim <qualify|multibody|fidelity> [--steps N] [--dt SECONDS] [--floating] [--zero-torque] [--out DIR] [--scene FILE] [--actuation drives|damping|zero] [--limit-margin RAD] [--integrator euler|implicitfast|rk4] [--tier rollout|reference|acceptance]",
         ),
     }
 }
@@ -121,8 +128,29 @@ fn run_qualify(flags: &[String]) -> i32 {
 fn run_multibody(flags: &[String]) -> i32 {
     let floating = flags.iter().any(|a| a == "--floating");
     let zero_torque = flags.iter().any(|a| a == "--zero-torque");
+    // `specs/09` section 12.2: a named tier is a bundle of knobs a run starts
+    // from, and any explicit knob overrides it. `--tier rollout --dt 5e-4` is
+    // therefore the rollout tier at a finer timestep, exactly as the section's
+    // closing requirement asks.
+    let tier = match flags
+        .iter()
+        .position(|a| a == "--tier")
+        .map(|i| flags.get(i + 1))
+    {
+        None => None,
+        Some(Some(v)) => match robot_sim::options::Tier::from_name(v) {
+            Some(t) => Some(t),
+            None => return invalid_flag("--tier expects rollout, reference or acceptance"),
+        },
+        Some(None) => return invalid_flag("--tier needs a value"),
+    };
+    let tier_options = tier.map(robot_sim::options::Tier::options);
     let dt_seconds = match parse_flag::<f64>(flags, "--dt") {
-        Ok(dt) => dt.unwrap_or(MULTIBODY_DEFAULT_DT),
+        Ok(dt) => dt.unwrap_or_else(|| {
+            tier_options
+                .as_ref()
+                .map_or(MULTIBODY_DEFAULT_DT, |o| o.timestep.as_secs_f64())
+        }),
         Err(message) => return invalid_flag(&message),
     };
     let steps = match parse_flag::<u32>(flags, "--steps") {
@@ -173,7 +201,11 @@ fn run_multibody(flags: &[String]) -> i32 {
         .position(|a| a == "--integrator")
         .map(|i| flags.get(i + 1))
     {
-        None => robot_sim::options::Integrator::SemiImplicitEuler,
+        None => tier_options
+            .as_ref()
+            .map_or(robot_sim::options::Integrator::SemiImplicitEuler, |o| {
+                o.integrator
+            }),
         Some(Some(v)) if v == "euler" => robot_sim::options::Integrator::SemiImplicitEuler,
         Some(Some(v)) if v == "implicitfast" => robot_sim::options::Integrator::ImplicitFast,
         Some(Some(v)) if v == "rk4" => robot_sim::options::Integrator::Rk4,
@@ -263,7 +295,7 @@ fn print_usage() {
     eprintln!("  robot data inspect <path>");
     eprintln!("  robot motion validate <path>");
     eprintln!("  robot sim qualify [--steps N] [--dt SECONDS]");
-    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--out DIR] [--scene FILE] [--actuation drives|damping|zero]\n           [--limit-margin RAD] [--integrator euler|implicitfast|rk4]");
+    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--out DIR] [--scene FILE] [--actuation drives|damping|zero]\n           [--limit-margin RAD] [--integrator euler|implicitfast|rk4]\n           [--tier rollout|reference|acceptance]");
     eprintln!("  robot eval summarize <values...>");
     eprintln!("  robot eval --bundle <dir> --robot <g1-usd|go2-usd|h1-usd>");
     eprintln!("  robot skills <list|search> --manifest <skill-manifest.toml> [query...]");
@@ -312,6 +344,17 @@ mod tests {
         let mut full = vec!["sim".to_owned()];
         full.extend(args.iter().map(|s| (*s).to_owned()));
         run(&full)
+    }
+
+    #[test]
+    fn sim_fidelity_runs_the_declared_battery_and_passes() {
+        assert_eq!(sim(&["fidelity"]), 0);
+    }
+
+    #[test]
+    fn multibody_rejects_an_unknown_tier_and_a_missing_tier_value() {
+        assert_eq!(sim(&["multibody", "--tier", "coarse"]), EXIT_USAGE);
+        assert_eq!(sim(&["multibody", "--tier"]), EXIT_USAGE);
     }
 
     #[test]

@@ -81,6 +81,82 @@ pub enum SolverAlgorithm {
     ProjectedGaussSeidel,
 }
 
+/// A named fidelity tier: a pure bundle of the section 12.1 knobs, nothing
+/// more (section 12.2's closing requirement — no tier may introduce behavior
+/// unreachable through the individual knobs, so a caller can start from a
+/// tier and override one knob and still reason about what changed).
+///
+/// The names and settings resolve Appendix B **S-03**, grounded in the
+/// 2026-11-15 G1 stance sweep (`robot sim multibody --floating`, 2 s, every
+/// integrator at `dt` 1e-4 to 1e-3; the numbers are in
+/// `specs/09-fidelity-tiers.md`): semi-implicit Euler passes the stance
+/// battery up to 5e-4 and fails its settled-energy check at 1e-3; RK4
+/// diverges outright at 1e-3 (singular mass matrix at 0.58 s); and
+/// `implicitfast` passes at every tested timestep including 1e-3, which is
+/// the textbook implicit-damping payoff measured rather than assumed.
+///
+/// Following Brax's named-pipeline precedent (section 12.2) rather than the
+/// example's unnamed knob pile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    /// Early-training rollout volume: the cheapest configuration that still
+    /// passes the full supported-stance battery. `implicitfast` at 1 ms —
+    /// ten times fewer steps than [`Self::Reference`] for the same 2 s of
+    /// simulated time, and the only integrator that holds the battery there.
+    Rollout,
+    /// The validated CPU reference settings every existing claim in this
+    /// crate is measured at: semi-implicit Euler at 100 µs, Newton, the
+    /// documented defaults of [`SimOptions::default`]. This tier *is* that
+    /// default, by construction.
+    Reference,
+    /// Final acceptance-style evaluation: RK4 at 100 µs, for the
+    /// long-horizon energy behaviour RK4 is kept for (measured over 100
+    /// times below the semi-implicit step's drift on a tumbling free body).
+    Acceptance,
+}
+
+impl Tier {
+    /// The tier's knob bundle. A caller overrides individual fields from
+    /// here; the bundle itself is a plain `match`, per the purity contract.
+    #[must_use]
+    pub fn options(self) -> SimOptions {
+        match self {
+            Self::Rollout => SimOptions {
+                timestep: Duration::from_millis(1),
+                integrator: Integrator::ImplicitFast,
+                ..SimOptions::default()
+            },
+            Self::Reference => SimOptions::default(),
+            Self::Acceptance => SimOptions {
+                integrator: Integrator::Rk4,
+                ..SimOptions::default()
+            },
+        }
+    }
+
+    /// The tier's stable name, as runs record it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rollout => "rollout",
+            Self::Reference => "reference",
+            Self::Acceptance => "acceptance",
+        }
+    }
+
+    /// Parses a tier by its stable name; anything else is `None`, refused
+    /// rather than defaulted, like every other knob.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "rollout" => Some(Self::Rollout),
+            "reference" => Some(Self::Reference),
+            "acceptance" => Some(Self::Acceptance),
+            _ => None,
+        }
+    }
+}
+
 /// Convex-collision-detection budget: the knobs the narrow phase trades
 /// accuracy against cost with.
 ///
@@ -154,9 +230,12 @@ pub struct SimOptions {
     /// until a torsional or rolling coefficient is supplied — the
     /// dimensionality is available rather than forced.
     pub condim: usize,
-    /// Contact-slot budget. `None` means unbounded, which is what the CPU
-    /// backend does; the GPU backend needs a fixed budget and an overflow
-    /// flag (`specs/11-gpu-batched-backend.md`).
+    /// Contact-slot budget: the number of contact points a step may carry.
+    /// `None` means unbounded. The CPU path enforces the budget in
+    /// `World::build_rows`, counting a discarded point in
+    /// `StepReport::dropped_contacts` rather than dropping it silently; the
+    /// GPU backend needs the same fixed budget plus an overflow flag
+    /// (`specs/11-gpu-batched-backend.md`).
     pub contact_slots: Option<usize>,
     /// Collision margin: contacts are detected within this distance.
     pub margin: f64,
@@ -202,7 +281,8 @@ impl Default for SimOptions {
     ///   (section 12.1).
     /// - `condim` 3: friction on, which is the useful default for a walking
     ///   robot.
-    /// - `contact_slots` `None`: unbounded on the CPU.
+    /// - `contact_slots` `None`: unbounded, so nothing is ever dropped unless
+    ///   a run asks for a budget.
     /// - `margin`, `gap` and `limit_margin` 0: no early detection, which is
     ///   the conservative default, what the pipeline did before they existed,
     ///   and what the example's own `geom_margin` and `jnt_margin` default to.
@@ -436,5 +516,36 @@ mod tests {
         assert_eq!(c.iterations, 7);
         assert!((c.tolerance - 1e-3).abs() < 1e-18);
         assert!(!c.warm_start);
+    }
+
+    #[test]
+    fn every_tier_is_a_valid_bundle_and_reference_is_the_default() {
+        for tier in [Tier::Rollout, Tier::Reference, Tier::Acceptance] {
+            let o = tier.options();
+            assert!(o.is_valid(), "{tier:?} bundles an invalid option");
+            assert_eq!(Tier::from_name(tier.name()), Some(tier));
+        }
+        // Section 12.2: the reference tier is exactly the validated default,
+        // so every existing measurement is a measurement of that tier.
+        assert_eq!(Tier::Reference.options(), SimOptions::default());
+        assert_eq!(
+            Tier::Rollout.options().integrator,
+            Integrator::ImplicitFast,
+            "the rollout tier carries the only integrator that passes the stance battery at 1 ms"
+        );
+        assert_eq!(Tier::from_name("coarse"), None, "unknown names are refused");
+    }
+
+    #[test]
+    fn a_tier_override_changes_one_knob_and_keeps_the_rest() {
+        // The section's closing requirement: start from a tier, override one
+        // knob, and the rest of the bundle is untouched.
+        let o = SimOptions {
+            timestep: Duration::from_micros(500),
+            ..Tier::Rollout.options()
+        };
+        assert_eq!(o.integrator, Integrator::ImplicitFast);
+        assert_eq!(o.timestep, Duration::from_micros(500));
+        assert!(o.is_valid());
     }
 }

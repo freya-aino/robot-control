@@ -69,6 +69,313 @@ fn mat_t_vec(m: &Mat3, v: V3) -> V3 {
     ]
 }
 
+/// Vertex count at and above which the support query hill-climbs instead of
+/// scanning: `mjMESH_HILLCLIMB_MIN` (`04` section 1.5).
+pub const HILLCLIMB_MIN: usize = 10;
+
+/// One face polygon of a convex hull: coplanar hull triangles merged into the
+/// polygon they tile, with an outward unit normal, in the hull's own frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HullPolygon {
+    /// Outward unit normal in the shape frame.
+    pub normal: V3,
+    /// Vertex indices in order around the face boundary.
+    pub vertices: Vec<usize>,
+}
+
+/// The surface structure of a convex hull, built once at model compile time
+/// from the hull's triangles (`robot_model::hull::hull_faces` produces them;
+/// this type deliberately takes plain index triples so this module keeps its
+/// `std`-and-arrays purity contract).
+///
+/// It carries exactly what the two reference routines need (`04` section 1.5):
+/// the vertex adjacency graph and 27-direction extreme-vertex seeds for
+/// `mjc_hillclimbSupport`, and the face polygons with a vertex-to-polygon map
+/// for `mjc_PlaneConvex`'s up-to-four-point incident-face manifold.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HullTopology {
+    /// Neighbours of vertex `v` are `adjacency[adjacency_start[v]..adjacency_start[v + 1]]`.
+    adjacency_start: Vec<usize>,
+    adjacency: Vec<usize>,
+    /// Face polygons, coplanar triangles merged.
+    polygons: Vec<HullPolygon>,
+    /// Polygons containing vertex `v` are `polymap[polymap_start[v]..polymap_start[v + 1]]`.
+    polymap_start: Vec<usize>,
+    polymap: Vec<usize>,
+    /// `extrema[cx*9 + cy*3 + cz]` is a vertex extreme along the direction
+    /// class `c - 1` per component, the seed grid of `mjc_hillclimbSupport`
+    /// (`mesh_extrema`, `04` section 1.5).
+    extrema: [usize; 27],
+}
+
+/// Triangles whose normals agree to this dot product are one face.
+const COPLANAR_DOT: f64 = 1.0 - 1e-8;
+
+impl HullTopology {
+    /// Builds the topology from the hull's vertices and its outward-wound
+    /// triangles. Triangle indices must address `points`.
+    #[must_use]
+    pub fn build(points: &[V3], faces: &[[usize; 3]]) -> Self {
+        let n = points.len();
+
+        // Vertex adjacency from the triangle edges, deduplicated. Diagonals of
+        // merged faces stay in the graph, which only helps the walk: any
+        // supergraph of the hull's edges still makes a neighbour-maximal
+        // vertex globally maximal.
+        let mut edges: Vec<(usize, usize)> = Vec::with_capacity(faces.len() * 6);
+        for f in faces {
+            for k in 0..3 {
+                let (s, t) = (f[k], f[(k + 1) % 3]);
+                edges.push((s, t));
+                edges.push((t, s));
+            }
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        let mut adjacency_start = vec![0usize; n + 1];
+        for &(s, _) in &edges {
+            adjacency_start[s + 1] += 1;
+        }
+        for v in 0..n {
+            adjacency_start[v + 1] += adjacency_start[v];
+        }
+        let adjacency: Vec<usize> = edges.iter().map(|&(_, t)| t).collect();
+
+        // Face polygons: group triangles connected across shared edges whose
+        // normals agree, then walk each group's boundary cycle.
+        let normals: Vec<V3> = faces
+            .iter()
+            .map(|f| {
+                normalized_or(
+                    cross(
+                        sub(points[f[1]], points[f[0]]),
+                        sub(points[f[2]], points[f[0]]),
+                    ),
+                    [0.0, 0.0, 1.0],
+                )
+            })
+            .collect();
+        // Triangle adjacency across directed edges: the triangle owning the
+        // reverse of each directed edge.
+        let mut edge_owner: Vec<((usize, usize), usize)> = Vec::with_capacity(faces.len() * 3);
+        for (fi, f) in faces.iter().enumerate() {
+            for k in 0..3 {
+                edge_owner.push(((f[k], f[(k + 1) % 3]), fi));
+            }
+        }
+        edge_owner.sort_unstable();
+        let owner_of = |edge: (usize, usize)| -> Option<usize> {
+            edge_owner
+                .binary_search_by(|probe| probe.0.cmp(&edge))
+                .ok()
+                .map(|i| edge_owner[i].1)
+        };
+        let mut group = vec![usize::MAX; faces.len()];
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for start in 0..faces.len() {
+            if group[start] != usize::MAX {
+                continue;
+            }
+            let id = groups.len();
+            let mut members = vec![start];
+            group[start] = id;
+            let mut cursor = 0;
+            while cursor < members.len() {
+                let fi = members[cursor];
+                cursor += 1;
+                let f = faces[fi];
+                for k in 0..3 {
+                    let rev = (f[(k + 1) % 3], f[k]);
+                    if let Some(nb) = owner_of(rev) {
+                        if group[nb] == usize::MAX && dot(normals[fi], normals[nb]) >= COPLANAR_DOT
+                        {
+                            group[nb] = id;
+                            members.push(nb);
+                        }
+                    }
+                }
+            }
+            groups.push(members);
+        }
+        let mut polygons: Vec<HullPolygon> = Vec::new();
+        for members in &groups {
+            match boundary_cycle(faces, members) {
+                Some(cycle) => {
+                    // Area-weighted normal of the member triangles.
+                    let mut normal_sum = [0.0; 3];
+                    for &fi in members {
+                        let f = faces[fi];
+                        let c = cross(
+                            sub(points[f[1]], points[f[0]]),
+                            sub(points[f[2]], points[f[0]]),
+                        );
+                        normal_sum = add(normal_sum, c);
+                    }
+                    polygons.push(HullPolygon {
+                        normal: normalized_or(normal_sum, [0.0, 0.0, 1.0]),
+                        vertices: cycle,
+                    });
+                }
+                None => {
+                    // The merged boundary did not close into one cycle, which a
+                    // numerically clean hull never produces; keep the member
+                    // triangles as their own polygons rather than guessing.
+                    for &fi in members {
+                        polygons.push(HullPolygon {
+                            normal: normals[fi],
+                            vertices: faces[fi].to_vec(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Vertex-to-polygon map, CSR like the adjacency.
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for (pi, p) in polygons.iter().enumerate() {
+            for &v in &p.vertices {
+                pairs.push((v, pi));
+            }
+        }
+        pairs.sort_unstable();
+        pairs.dedup();
+        let mut polymap_start = vec![0usize; n + 1];
+        for &(v, _) in &pairs {
+            polymap_start[v + 1] += 1;
+        }
+        for v in 0..n {
+            polymap_start[v + 1] += polymap_start[v];
+        }
+        let polymap: Vec<usize> = pairs.iter().map(|&(_, p)| p).collect();
+
+        // The 27 extreme-vertex seeds, one per sign class of the query
+        // direction. The all-zero class (never selected by a unit direction)
+        // seeds at vertex 0.
+        let mut extrema = [0usize; 27];
+        for cx in 0..3usize {
+            for cy in 0..3usize {
+                for cz in 0..3usize {
+                    let d = [cx as f64 - 1.0, cy as f64 - 1.0, cz as f64 - 1.0];
+                    if d == [0.0, 0.0, 0.0] {
+                        continue;
+                    }
+                    let mut best = 0;
+                    let mut best_h = f64::NEG_INFINITY;
+                    for (i, p) in points.iter().enumerate() {
+                        let h = dot(*p, d);
+                        if h > best_h {
+                            best_h = h;
+                            best = i;
+                        }
+                    }
+                    extrema[cx * 9 + cy * 3 + cz] = best;
+                }
+            }
+        }
+
+        Self {
+            adjacency_start,
+            adjacency,
+            polygons,
+            polymap_start,
+            polymap,
+            extrema,
+        }
+    }
+
+    /// Neighbours of a vertex in the hull's edge graph.
+    fn neighbours(&self, v: usize) -> &[usize] {
+        &self.adjacency[self.adjacency_start[v]..self.adjacency_start[v + 1]]
+    }
+
+    /// Polygons whose boundary contains a vertex.
+    fn polygons_of(&self, v: usize) -> &[usize] {
+        &self.polymap[self.polymap_start[v]..self.polymap_start[v + 1]]
+    }
+
+    /// The face polygons, for a caller inspecting the structure.
+    #[must_use]
+    pub fn polygons(&self) -> &[HullPolygon] {
+        &self.polygons
+    }
+
+    /// `mjc_hillclimbSupport` (`04` section 1.5): the index of the vertex
+    /// maximising `v . d`, by walking the adjacency graph from the seed grid.
+    /// `d` is in the hull's own frame and need not be normalised.
+    #[must_use]
+    pub fn hillclimb(&self, points: &[V3], d: V3) -> usize {
+        let ld = normalized_or(d, [0.0, 0.0, 1.0]);
+        let class = |x: f64| -> usize { (usize::from(x > 0.4) + 1) - usize::from(x < -0.4) };
+        let seed = self.extrema[class(ld[0]) * 9 + class(ld[1]) * 3 + class(ld[2])];
+        let mut best = seed.min(points.len().saturating_sub(1));
+        let mut best_h = dot(points[best], d);
+        loop {
+            let mut moved = false;
+            for &nb in self.neighbours(best) {
+                let h = dot(points[nb], d);
+                if h > best_h {
+                    best_h = h;
+                    best = nb;
+                    moved = true;
+                }
+            }
+            if !moved {
+                return best;
+            }
+        }
+    }
+}
+
+/// The single boundary cycle of a set of consistently wound triangles, or
+/// `None` when the boundary is not one closed cycle.
+fn boundary_cycle(faces: &[[usize; 3]], members: &[usize]) -> Option<Vec<usize>> {
+    // Directed edges whose reverse is not in the set are the boundary.
+    let mut directed: Vec<(usize, usize)> = Vec::with_capacity(members.len() * 3);
+    for &fi in members {
+        let f = faces[fi];
+        for k in 0..3 {
+            directed.push((f[k], f[(k + 1) % 3]));
+        }
+    }
+    directed.sort_unstable();
+    let mut boundary: Vec<(usize, usize)> = Vec::new();
+    for &(s, t) in &directed {
+        if directed.binary_search(&(t, s)).is_err() {
+            boundary.push((s, t));
+        }
+    }
+    if boundary.is_empty() {
+        return None;
+    }
+    // Walk the cycle by successor. Each boundary vertex must have exactly one
+    // outgoing boundary edge for the walk to be well defined.
+    let start = boundary[0].0;
+    let mut cycle = vec![start];
+    let mut current = start;
+    for _ in 0..boundary.len() {
+        let mut next = None;
+        for &(s, t) in &boundary {
+            if s == current {
+                if next.is_some() {
+                    return None; // branching boundary
+                }
+                next = Some(t);
+            }
+        }
+        let next = next?;
+        if next == start {
+            return if cycle.len() == boundary.len() {
+                Some(cycle)
+            } else {
+                None // more than one cycle
+            };
+        }
+        cycle.push(next);
+        current = next;
+    }
+    None
+}
+
 /// A convex primitive in its own frame. Capsules and cylinders are along Z.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Primitive<'a> {
@@ -105,16 +412,44 @@ pub enum Primitive<'a> {
     /// `specs/08-model-compilation-and-sensors.md` item 3 puts the reduction:
     /// at compile time, never at simulation time.
     ///
-    /// The support function is `argmax_i (v_i . d)`, which is what
-    /// `mjc_meshSupport` computes exhaustively below ten vertices
-    /// (`04` section 1.5). Above ten the example hill-climbs a vertex
-    /// adjacency graph instead; this implementation is exhaustive at every
-    /// size, which is the same answer for more work and is noted as a cost in
-    /// `specs/07-collision-pipeline.md`.
+    /// The support function is `argmax_i (v_i . d)`. With a [`HullTopology`]
+    /// attached and at least [`HILLCLIMB_MIN`] vertices it walks the hull's
+    /// vertex adjacency graph from a precomputed extreme seed
+    /// (`mjc_hillclimbSupport`, `04` section 1.5); below that, or without
+    /// topology, it scans exhaustively (`mjc_meshSupport`), with strict `>` so
+    /// the first index wins a tie. On a convex polytope a vertex that no
+    /// neighbour beats is the global maximum of a linear function, so the walk
+    /// returns the same answer as the scan.
     Hull {
         /// Hull vertices in the shape frame.
         points: &'a [V3],
+        /// The hull's surface structure, borrowed like the vertices. `None`
+        /// (a degenerate hull, or a caller that never built one) keeps the
+        /// exhaustive scan and the single-point plane contact.
+        topo: Option<&'a HullTopology>,
     },
+}
+
+/// The index of the hull vertex maximising `v . d`, hill-climbing when the
+/// topology is present and the hull is at least [`HILLCLIMB_MIN`] vertices
+/// (`mjc_hillclimbSupport`), scanning exhaustively otherwise
+/// (`mjc_meshSupport`, strict `>` so the first index wins a tie).
+fn hull_support_index(points: &[V3], topo: Option<&HullTopology>, d: V3) -> usize {
+    if let Some(t) = topo {
+        if points.len() >= HILLCLIMB_MIN {
+            return t.hillclimb(points, d);
+        }
+    }
+    let mut best = 0;
+    let mut best_h = f64::NEG_INFINITY;
+    for (i, v) in points.iter().enumerate() {
+        let h = dot(*v, d);
+        if h > best_h {
+            best_h = h;
+            best = i;
+        }
+    }
+    best
 }
 
 /// A primitive placed in the world.
@@ -131,19 +466,8 @@ pub struct Placed<'a> {
 impl Placed<'_> {
     /// The point of the shape farthest in a direction given in the shape frame.
     fn local_support(&self, d: V3) -> V3 {
-        if let Primitive::Hull { points } = self.shape {
-            // `mjc_meshSupport`: exhaustive over vertices, strict `>` so the
-            // first index wins a tie, matching the example's tie-breaking.
-            let mut best = [0.0; 3];
-            let mut best_d = f64::NEG_INFINITY;
-            for v in points {
-                let h = v[0] * d[0] + v[1] * d[1] + v[2] * d[2];
-                if h > best_d {
-                    best_d = h;
-                    best = *v;
-                }
-            }
-            return best;
+        if let Primitive::Hull { points, topo } = self.shape {
+            return points[hull_support_index(points, topo, d)];
         }
         match self.shape {
             // Handled by the early return above; a hull has no closed-form
@@ -230,7 +554,7 @@ impl Placed<'_> {
         match self.shape {
             // Exact: a hull's extent is the box of its own world vertices, and
             // every vertex is extreme in some direction so none can be skipped.
-            Primitive::Hull { points } => {
+            Primitive::Hull { points, .. } => {
                 let mut lo = [f64::INFINITY; 3];
                 let mut hi = [f64::NEG_INFINITY; 3];
                 for v in points {
@@ -300,7 +624,7 @@ impl Placed<'_> {
     /// A bounding sphere `(centre, radius)` in the world.
     #[must_use]
     pub fn bounding_sphere(&self) -> (V3, f64) {
-        if let Primitive::Hull { points } = self.shape {
+        if let Primitive::Hull { points, .. } = self.shape {
             // Centred on the shape origin, as every other primitive's bounding
             // sphere is, with the radius of the farthest vertex. A tighter
             // sphere exists but would move the centre, and the broad phase
@@ -1368,29 +1692,48 @@ pub fn plane_contact_points(placed: &Placed, _rim_samples: usize) -> Vec<(V3, f6
     // The plane's normal is `+z`, which is what the ground model uses.
     const N: V3 = [0.0, 0.0, 1.0];
     match placed.shape {
-        // `mjc_PlaneConvex` (04 section 1.5), first clause: the support point
-        // along `-n` is the deepest vertex, and that is the contact.
-        //
-        // The example adds up to three more from the polygon incident to that
-        // vertex, which needs the mesh's polygon topology (`mesh_polymap` and
-        // per-polygon vertex lists). A hull reduced to vertices alone does not
-        // carry it, so this returns the one contact the example's own
-        // `return 1` branch returns for a shape with no polygon data. The
-        // consequence is honest and worth knowing: a hull resting flat on the
-        // plane gets a single contact point and so cannot resist tipping about
-        // it. The G1's feet are boxes and spheres with exact manifolds, so this
-        // affects a torso or a forearm touching the ground, not a stance.
-        Primitive::Hull { points } => {
-            let mut deepest = placed.translation;
-            let mut lowest = f64::INFINITY;
-            for v in points {
-                let w = placed.to_world(*v);
-                if w[2] < lowest {
-                    lowest = w[2];
-                    deepest = w;
+        // `mjc_PlaneConvex` (04 section 1.5): the support point along `-n` is
+        // the deepest vertex and the first contact. With a topology attached,
+        // up to three more vertices come from the polygon incident to that
+        // vertex that is most anti-aligned with the plane normal, spread by
+        // `hull4`'s quadrilateral-area rule — which is what lets a hull
+        // resting flat on the plane resist tipping. A vertex above the shape
+        // origin along the normal is skipped, as the example skips vertices
+        // above the mesh centre. Without a topology (a degenerate hull) only
+        // the single deepest vertex is returned, the example's own no-polygon
+        // branch.
+        Primitive::Hull { points, topo } => {
+            let d_local = mat_t_vec(&placed.rotation, [0.0, 0.0, -1.0]);
+            let vi = hull_support_index(points, topo, d_local);
+            let mut out = vec![(placed.to_world(points[vi]), 0.0)];
+            if let Some(t) = topo {
+                // The polygon adjacent to the support vertex whose outward
+                // normal is most anti-aligned with the plane normal in the
+                // hull's frame: `argmin dot(polynormal, local_normal)`,
+                // initial best 1, strict `<`, first wins.
+                let local_normal = mat_t_vec(&placed.rotation, N);
+                let mut best: Option<usize> = None;
+                let mut best_dot = 1.0;
+                for &pi in t.polygons_of(vi) {
+                    let h = dot(t.polygons()[pi].normal, local_normal);
+                    if h < best_dot {
+                        best_dot = h;
+                        best = Some(pi);
+                    }
+                }
+                if let Some(pi) = best {
+                    let poly = &t.polygons()[pi].vertices;
+                    let anchor = poly.iter().position(|v| *v == vi).unwrap_or(0);
+                    for &idx in hull4(poly, points, anchor).iter().skip(1) {
+                        let pnt = placed.to_world(points[idx]);
+                        if pnt[2] > placed.translation[2] {
+                            continue;
+                        }
+                        out.push((pnt, 0.0));
+                    }
                 }
             }
-            vec![(deepest, 0.0)]
+            out
         }
         Primitive::Sphere { radius } => vec![(placed.translation, radius)],
         Primitive::Capsule {
@@ -1476,6 +1819,42 @@ pub fn plane_contact_points(placed: &Placed, _rim_samples: usize) -> Vec<(V3, f6
             out
         }
     }
+}
+
+/// `hull4f` (`04` section 1.5): up to four vertices of a face polygon that
+/// span it well, the anchor first.
+///
+/// `poly` is the polygon's boundary (vertex indices into `points`, in order),
+/// `anchor` a position within `poly`. A polygon of at most four vertices is
+/// returned whole, rotated so the anchor leads. A larger one is reduced by the
+/// example's greedy maximisation of the quadrilateral area
+/// `0.5 * |(v_a - v_c) × (v_b - v_d)|`: advance `d` while the area strictly
+/// increases, after each advance pushing `c` then `b` forward while they
+/// increase it, stopping when advancing `d` no longer helps.
+fn hull4(poly: &[usize], points: &[V3], anchor: usize) -> Vec<usize> {
+    let n = poly.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let a = anchor % n;
+    if n <= 4 {
+        return (0..n).map(|k| poly[(a + k) % n]).collect();
+    }
+    let v = |k: usize| points[poly[k % n]];
+    let area = |b: usize, c: usize, d: usize| 0.5 * norm(cross(sub(v(a), v(c)), sub(v(b), v(d))));
+    let (mut b, mut c, mut d) = (a + 1, a + 2, a + 3);
+    // Each pointer only moves forward and stays behind the next one, so the
+    // loop is bounded by the polygon's length.
+    while (d + 1) % n != a && area(b, c, d + 1) > area(b, c, d) {
+        d += 1;
+        while c + 1 != d && area(b, c + 1, d) > area(b, c, d) {
+            c += 1;
+        }
+        while b + 1 != c && area(b + 1, c, d) > area(b, c, d) {
+            b += 1;
+        }
+    }
+    vec![poly[a], poly[b % n], poly[c % n], poly[d % n]]
 }
 
 fn box_parts(p: &Placed) -> Option<(V3, V3, [V3; 3])> {
@@ -2656,5 +3035,185 @@ mod fuzz_tests {
             }
         }
         assert!(overlaps > 40, "only {overlaps} overlapping cases generated");
+    }
+
+    /// The eight corners of an axis-aligned cube with half extent 1.
+    fn cube_points() -> Vec<V3> {
+        let mut points = Vec::new();
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                for z in [-1.0, 1.0] {
+                    points.push([x, y, z]);
+                }
+            }
+        }
+        points
+    }
+
+    fn cube_topology(points: &[V3]) -> HullTopology {
+        let faces = robot_model::hull::hull_faces(points).expect("a cube has a solid hull");
+        HullTopology::build(points, &faces)
+    }
+
+    #[test]
+    fn a_cube_hull_merges_its_triangles_into_six_quads() {
+        let points = cube_points();
+        let topo = cube_topology(&points);
+        assert_eq!(topo.polygons().len(), 6, "a cube has six faces");
+        for p in topo.polygons() {
+            assert_eq!(p.vertices.len(), 4, "each cube face is a quad: {p:?}");
+            // Every vertex of the face lies on the face's own plane.
+            let offset = dot(p.normal, points[p.vertices[0]]);
+            for &v in &p.vertices {
+                assert!(
+                    (dot(p.normal, points[v]) - offset).abs() < 1e-12,
+                    "face vertex off its plane"
+                );
+            }
+            // The normal is outward: the plane is on the far side of the origin.
+            assert!(offset > 0.0, "face normal points inward: {p:?}");
+        }
+    }
+
+    #[test]
+    fn hillclimbing_support_agrees_with_the_exhaustive_scan() {
+        // An ellipsoid sampling: every point is a hull vertex, well over the
+        // hill-climbing threshold, so the walk is genuinely exercised.
+        let mut points = Vec::new();
+        let n = 16;
+        for i in 0..n {
+            for j in 0..n {
+                let theta = core::f64::consts::PI * (i as f64 + 0.5) / n as f64;
+                let phi = 2.0 * core::f64::consts::PI * (j as f64) / n as f64;
+                points.push([
+                    0.30 * theta.sin() * phi.cos(),
+                    0.12 * theta.sin() * phi.sin(),
+                    0.45 * theta.cos(),
+                ]);
+            }
+        }
+        assert!(points.len() >= HILLCLIMB_MIN);
+        let faces = robot_model::hull::hull_faces(&points).expect("solid hull");
+        let topo = HullTopology::build(&points, &faces);
+        let mut rng = Lcg(97);
+        for case in 0..500 {
+            let d = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
+            if norm(d) < 1e-6 {
+                continue;
+            }
+            let walked = hull_support_index(&points, Some(&topo), d);
+            let scanned = hull_support_index(&points, None, d);
+            // Ties may pick different vertices; the support *value* must agree.
+            let (hw, hs) = (dot(points[walked], d), dot(points[scanned], d));
+            assert!(
+                (hw - hs).abs() <= 1e-12 * hs.abs().max(1.0),
+                "case {case}: walk gave {hw}, scan gave {hs} along {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hull_resting_flat_on_the_plane_gets_a_spanning_manifold() {
+        // The cube as a hull, bottom face on z = 0: the manifold must span the
+        // face, not report the single deepest vertex — that one-point contact
+        // is exactly what could not resist tipping (`specs/07`).
+        let points = cube_points();
+        let topo = cube_topology(&points);
+        let placed = at(
+            Primitive::Hull {
+                points: &points,
+                topo: Some(&topo),
+            },
+            [0.0, 0.0, 1.0],
+        );
+        let got = plane_contact_points(&placed, 0);
+        assert_eq!(
+            got.len(),
+            4,
+            "a face-down hull rests on four points: {got:?}"
+        );
+        for (p, r) in &got {
+            assert!(
+                *r == 0.0 && p[2].abs() < 1e-12,
+                "contact off the plane: {p:?}"
+            );
+        }
+        // The four points are the four bottom corners, in some order.
+        let mut xy: Vec<(i64, i64)> = got
+            .iter()
+            .map(|(p, _)| (p[0].round() as i64, p[1].round() as i64))
+            .collect();
+        xy.sort_unstable();
+        assert_eq!(xy, vec![(-1, -1), (-1, 1), (1, -1), (1, 1)]);
+
+        // Without topology the single-point fallback remains, so a degenerate
+        // hull keeps the old honest behaviour.
+        let bare = at(
+            Primitive::Hull {
+                points: &points,
+                topo: None,
+            },
+            [0.0, 0.0, 1.0],
+        );
+        assert_eq!(plane_contact_points(&bare, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_tilted_hull_touches_the_plane_at_its_deepest_vertex_first() {
+        // Rotated 45° about x, the cube meets the plane along an edge: the
+        // support vertex plus the manifold vertices filtered by the caller's
+        // depth test. The deepest returned point must be the true lowest
+        // corner.
+        let points = cube_points();
+        let topo = cube_topology(&points);
+        let s = core::f64::consts::FRAC_1_SQRT_2;
+        let placed = Placed {
+            shape: Primitive::Hull {
+                points: &points,
+                topo: Some(&topo),
+            },
+            rotation: [[1.0, 0.0, 0.0], [0.0, s, -s], [0.0, s, s]],
+            translation: [0.0, 0.0, 2.0],
+        };
+        let got = plane_contact_points(&placed, 0);
+        let lowest = got.iter().map(|(p, _)| p[2]).fold(f64::INFINITY, f64::min);
+        // The cube's lowest point after the tilt is sqrt(2) below the centre.
+        assert!(
+            (lowest - (2.0 - 2.0 * s)).abs() < 1e-12,
+            "deepest point at {lowest}"
+        );
+        // The first point is the support vertex itself.
+        assert!((got[0].0[2] - lowest).abs() < 1e-12);
+    }
+
+    #[test]
+    fn hull4_returns_small_polygons_whole_and_spreads_large_ones() {
+        // A regular octagon in the plane: hull4 must keep the anchor and pick
+        // a well-spread quadrilateral.
+        let n = 8;
+        let points: Vec<V3> = (0..n)
+            .map(|k| {
+                let a = 2.0 * core::f64::consts::PI * k as f64 / n as f64;
+                [a.cos(), a.sin(), 0.0]
+            })
+            .collect();
+        let poly: Vec<usize> = (0..n).collect();
+        let picked = hull4(&poly, &points, 2);
+        assert_eq!(picked.len(), 4);
+        assert_eq!(picked[0], 2, "the anchor leads");
+        let area = {
+            let v = |i: usize| points[picked[i]];
+            0.5 * norm(cross(sub(v(0), v(2)), sub(v(1), v(3))))
+        };
+        // The best quadrilateral in a unit octagon is the inscribed square,
+        // area 2; the greedy rule must get close to it.
+        assert!(area > 1.5, "picked a thin quadrilateral, area {area}");
+
+        let triangle: Vec<usize> = vec![4, 6, 7];
+        assert_eq!(hull4(&triangle, &points, 1), vec![6, 7, 4]);
     }
 }

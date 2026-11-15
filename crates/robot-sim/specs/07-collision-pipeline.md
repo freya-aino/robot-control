@@ -33,19 +33,33 @@ What runs:
   (example 04 section 1.5). `collision::Primitive::Hull` borrows the vertices
   rather than owning them, so a hull costs no allocation per query.
 
-Still absent, and each a cost rather than a wrong answer:
+Still absent, a cost rather than a wrong answer:
 
 - The **mid-phase bounding-volume tree** (item 1's third stage).
-- **Hill-climbing support** (`mjc_hillclimbSupport`). The example scans
-  exhaustively below ten vertices and walks a vertex adjacency graph above it;
-  this implementation scans at every size. The pelvis hull is 5583 vertices, so
-  the scan is the dominant narrow-phase cost on a mesh pair. A 2-second G1
-  stance at 0.5 ms runs in 8.5 s of wall clock today, so it is affordable and
-  it is the first thing that will stop being so.
-- **The three extra plane-hull contacts** of `mjc_PlaneConvex`, which need the
-  mesh's polygon topology. A hull reduced to vertices gets the one contact the
-  example's own no-polygon branch returns, so a hull lying flat on the plane
-  cannot resist tipping about it.
+
+Closed in 0.1.10-draft (both needed the hull's surface structure, which
+`robot_model::hull::hull_faces` now exposes from the triangles the quickhull
+construction always built, and `collision::HullTopology` carries as plain
+index arrays — adjacency graph, coplanar-merged face polygons, vertex-polygon
+map and the 27-entry extreme-vertex seed grid — built once per hull at `World`
+construction):
+
+- **Hill-climbing support** (`mjc_hillclimbSupport`): at ten vertices and
+  above with a topology attached, the support query walks the vertex adjacency
+  graph from the seed grid instead of scanning; a vertex no neighbour beats is
+  the global maximum of a linear function over a convex polytope, and a
+  500-direction randomized test holds the walk to the exhaustive scan's
+  support value. (The predicted stance speedup did not materialize — a timed
+  before/after of the 2 s stance at 0.5 ms is 5.3 s both ways on this
+  machine, because the stance's narrow phase is broad-phase-rejected hull
+  pairs plus the plane path, not hull-hull GJK. The walk matters where
+  hull-hull queries actually run, e.g. the zero-torque fold.)
+- **The three extra plane-hull contacts** of `mjc_PlaneConvex`: the polygon
+  incident to the support vertex that is most anti-aligned with the plane
+  normal contributes up to three more vertices through `hull4`'s
+  quadrilateral-area rule, so a hull lying flat on the plane now rests on a
+  spanning manifold and can resist tipping. A degenerate hull without a solid
+  surface keeps the single-contact no-polygon branch.
 
 **Retired, not kept as an option.** Item 1 said the single hard-coded
 point-vs-plane penalty model "remains a separate, smaller benchmark". Under the

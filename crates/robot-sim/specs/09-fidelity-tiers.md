@@ -8,8 +8,11 @@ carries every knob old Section 12 enumerates as a per-run parameter —
 `condim` (all four of the example's values), `contact_slots`, `margin`, `gap`,
 `limit_margin`, `warm_start`,
 `solref`, `solimp` and the convex-collision budget (`CcdConfig`: tolerance,
-iterations, `max_faces`). `contact_slots` is validated and recorded but not yet
-enforced on the CPU path, and no exhaustion counter exists. They are **validated rather than clamped**: an invalid
+iterations, `max_faces`). `contact_slots` is enforced on the CPU path since
+0.1.10-draft: the budget is applied in `World::build_rows`, where contacts are
+born, and `StepReport::dropped_contacts` counts every discarded point, so a
+run under budget pressure is bounded *and* auditable rather than silently
+thinner. They are **validated rather than clamped**: an invalid
 combination is refused, not silently adjusted. `SimOptions::record()` emits them
 as key/value pairs so a run carries the configuration that produced it, which is
 Section 12.1's requirement. Appendix D M-21 is closed.
@@ -41,8 +44,37 @@ accurately they are integrated. Whether it belongs in a named tier is open; see
 
 The analytic fidelity harness (`fidelity.rs`) is at schema v8 and runs ten
 checks, now including a plane force balance, a friction-cone bound and a
-narrow-phase depth row (Appendix D M-20 closed, ADR 0008 amended). The named
-tiers themselves remain open under Appendix B S-03.
+narrow-phase depth row (Appendix D M-20 closed, ADR 0008 amended).
+
+**The named tiers exist (0.1.11-draft), and S-03 is resolved by the sweep it
+asked for.** The 2 s G1 floating stance
+(`robot sim multibody --floating`, release build, this machine, 2026-11-15)
+at every integrator over `dt` 1e-4 to 1e-3:
+
+| Integrator | 1e-4 | 2e-4 | 5e-4 | 1e-3 |
+| --- | --- | --- | --- | --- |
+| `euler` | PASS (24.0 s wall) | PASS | PASS | **FAIL** (settled energy 2.18 J against the 0.50 J bound) |
+| `implicitfast` | PASS | PASS | PASS (7.6 s) | PASS (4.1 s, settled energy 0.014 J) |
+| `rk4` | PASS (132.5 s) | PASS | PASS (18.6 s) | **diverges** (singular mass matrix at 0.58 s) |
+
+The pelvis-height minimum is 0.788 m in every passing cell — the knobs here
+trade stability and energy behaviour, not the stance geometry. The pattern
+is the textbook one, measured rather than assumed: implicit-in-velocity
+damping extends the stable timestep (step [03](03-integrators.md)), an
+explicit high-order method does not, and at 1 ms only `implicitfast`
+survives the G1's stiff distal joints.
+
+`options::Tier` names three bundles grounded in those rows — `rollout`
+(`implicitfast` at 1 ms: 5.9x the reference's speed, full battery PASS),
+`reference` (**identical to `SimOptions::default()`**, so every existing
+measurement in this crate is a measurement of this tier), `acceptance` (RK4
+at 100 µs, for the long-horizon energy behaviour RK4 is kept for). A tier
+is a pure `match` (the purity contract below), `--tier` seeds
+`robot sim multibody` with explicit knobs overriding, and the humanoid
+training environment (`robot_tasks::env::g1_stand`) runs the rollout tier.
+The harness's own `reference`/`coarse` *measurement* tiers (ADR 0008) are a
+separate axis: they name timesteps the analytic battery is evaluated at,
+not run configurations.
 
 **Goal**: Make each fidelity knob (timestep, integrator, solver algorithm, iteration budget, `condim`, contact-slot budget, collision margin/gap) an explicit per-run parameter, and define named tiers as bundles of those knobs. Covers old §12 in full.
 

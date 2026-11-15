@@ -31,10 +31,10 @@ what it's becoming.
 | `constraint` | Pure `std` equality-constraint subset implemented from the standard formulation: `joint_equality_row` (`mjEQ_JOINT`, one or two scalar joints with the quartic coupling), `impedance`, `stiffness_damping`, `effective_timeconst` (`2*dt` clamp, mixed-format refusal), and `solve_equality`, a closed-form solve of an equality-only problem returning forces, `qacc` and clamped rows. Kept as the CPU oracle for the GPU equality kernel; simulation uses `solver`/`newton`, which carry contact, friction, limit and equality rows together. Not ported: connect, weld and tendon rows |
 | `articulated` | `ArticulatedBody`: multi-body forward (Articulated-Body Algorithm) and inverse (Recursive Newton-Euler) dynamics over any `robot_model::RobotProfile`, including a floating base. Sphere ground contact (`forward_dynamics_with_ground`, `step_with_ground`, `lowest_contact_height`), a clamped PD `stance_torques` hold, plus `MultibodyState`, a semi-implicit-Euler stepper. Legacy path: its ABA/RNE recursions are the oracle the `composite` path is validated against, and its sphere-penalty contact is retired and reached by no command |
 | `composite` | Example `02`'s dynamics on plain arrays: `crb` (composite-rigid-body mass matrix), `factor_m`/`solve_ld` (`L' D L`), `rne` bias forces, `forward_dynamics`, `integrate_pos` with the `Free`-joint quaternion path, and `rk_correct_free_velocity` (Munthe-Kaas correction for RK4) |
-| `collision` | Broad-phase rejection (`spheres_apart`, `aabbs_apart`) and pair filters, signed-volume GJK with EPA (`CcdConfig` budget), exact plane manifolds for sphere, box, cylinder and convex hull (`Primitive::Hull`, support query over the import-time hull), and box-box SAT with face clipping |
+| `collision` | Broad-phase rejection (`spheres_apart`, `aabbs_apart`) and pair filters, signed-volume GJK with EPA (`CcdConfig` budget), exact plane manifolds for sphere, box, cylinder and convex hull, and box-box SAT with face clipping. `HullTopology` (adjacency graph, coplanar-merged face polygons, 27-direction seed grid, built once per hull) gives a hull the hill-climbing support walk of `mjc_hillclimbSupport` at ten vertices and above and the up-to-four-point plane manifold of `mjc_PlaneConvex` through `hull4` |
 | `solver` | The unified constraint problem of examples `07` and `08`: contact rows as the generator-direction pyramid (`contact_rows`, all four `condim` values, `sliding_friction`, `decode_pyramid`), limit and equality rows, `solref`/`solimp` impedance (`row_impedance`) and the projected Gauss-Seidel `solve` used as the cross-check |
 | `newton` | `solve_newton`: the primal Newton solver of example `08` section 6, the default algorithm (Gauss-Seidel needs about a thousand sweeps where Newton needs one on sixteen pyramidal rows) |
-| `options` | `SimOptions` (every Section 12.1 knob plus `limit_margin`, `warm_start`, `solref`, `solimp` and `CcdConfig`), `Integrator` (`Euler`, `ImplicitFast`, `Rk4`), `SolverAlgorithm`; validated rather than clamped, and `record()` emits them so a run carries its configuration |
+| `options` | `SimOptions` (every Section 12.1 knob plus `limit_margin`, `warm_start`, `solref`, `solimp` and `CcdConfig`), `Integrator` (`Euler`, `ImplicitFast`, `Rk4`), `SolverAlgorithm`, and `Tier` — the named fidelity bundles `rollout`/`reference`/`acceptance` of S-03, grounded in the measured stance sweep; validated rather than clamped, and `record()` emits them so a run carries its configuration |
 | `sensors` | `SensorSuite`: noise-free joint encoders and an IMU at a link site (specific force `R'(a - g)` and angular velocity from finite differences of the site pose); noise is `robot-perception`'s, per specs Appendix B S-06 |
 | `world` | `World`: the default simulation path (`robot sim multibody`) — composite dynamics, exact collision manifolds, the unified solver, the model's declared actuators through `actuator_torques` (`ActuationMode`), `Ground` from the scene layer; `WorldEnv` is its `Environment`/`Backend` (`cpu-world`) |
 
@@ -50,11 +50,19 @@ implemented: `Ball` joints; full `implicit` (the qLU path and
 `mjd_freeMhat`'s free-body gyroscopic block); polynomial, muscle, DC-motor,
 PID, tendon, flex, gravity-compensation and fluid passive terms; connect,
 weld and tendon equality rows; the elliptic friction cone and constraint
-islands; a mid-phase BVH and hill-climbing hull support (the support query
-is an exhaustive vertex scan and a plane-hull contact yields one point);
-enforcement of the `contact_slots` budget; and named fidelity tiers
-(S-03). The paragraphs that follow describe the legacy `articulated` path,
-which is kept as the oracle.
+islands; and a mid-phase BVH. Closed in
+0.1.10-draft: hull support hill-climbs the vertex adjacency graph of
+`collision::HullTopology` (built once per hull at `World` construction from
+`robot_model::hull::hull_faces`), a hull resting on the plane gets the
+up-to-four-point incident-polygon manifold of `mjc_PlaneConvex` instead of
+one point, and the `contact_slots` budget is enforced with the dropped
+count reported per step. Closed in 0.1.11-draft: the named fidelity tiers
+(S-03), `options::Tier` — `rollout` (`implicitfast` at 1 ms, the only
+integrator that passes the stance battery there), `reference` (identical to
+`SimOptions::default()`) and `acceptance` (RK4 at 100 µs) — grounded in the
+measured stance sweep recorded in `specs/09-fidelity-tiers.md`, and
+reachable per run as `robot sim multibody --tier`. The paragraphs that
+follow describe the legacy `articulated` path, which is kept as the oracle.
 
 `spatial`/`articulated` are a real, validated multi-body dynamics solver
 (see their own doc comments and `SIMULATION_SPECS.md` §4 item 1: their
@@ -348,7 +356,7 @@ not a tautology).
 
 ## Testing
 
-`cargo test -p robot-sim` — 301 unit tests and 9 integration tests (`tests/fidelity_extension.rs`, the external `FidelityCheck` API, including the v6 series-tolerance rejections for `rel > 0` and `abs = NaN`). The `oracle` tests cover the separatrix period asymptote, a 3.0 rad RK4 cross-check, the largest admissible `theta0` below `pi`, and the energy zero policy. The articulated-body and spatial-algebra modules have dedicated regression coverage for the dense solver and array adapters. Fidelity tests (`cargo test -p robot-sim fidelity`) cover the pass rule, every declared tier, the report round trip, strict reader rejection (tampered pass/all_pass, relabelled system, wrong scope, contact rows that disagree with the timestep rule), duplicate names, the step budget, and failure injection at a 200 ms tier. Earlier coverage: the pendulum (analytic period,
+`cargo test -p robot-sim` — 310 unit tests and 9 integration tests (`tests/fidelity_extension.rs`, the external `FidelityCheck` API, including the v6 series-tolerance rejections for `rel > 0` and `abs = NaN`). The `oracle` tests cover the separatrix period asymptote, a 3.0 rad RK4 cross-check, the largest admissible `theta0` below `pi`, and the energy zero policy. The articulated-body and spatial-algebra modules have dedicated regression coverage for the dense solver and array adapters. Fidelity tests (`cargo test -p robot-sim fidelity`) cover the pass rule, every declared tier, the report round trip, strict reader rejection (tampered pass/all_pass, relabelled system, wrong scope, contact rows that disagree with the timestep rule), duplicate names, the step budget, and failure injection at a 200 ms tier. Earlier coverage: the pendulum (analytic period,
 energy bound, monotonic dissipation under damping, gravity-compensated PD
 convergence), the contact body (steady-state penetration depth, energy loss
 on impact, non-reversing friction, push-and-recover), the environment
