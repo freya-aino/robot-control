@@ -504,8 +504,9 @@ fn parse_f64(element: &'static str, attribute: &'static str, text: &str) -> Resu
 /// URDF's `rpy` is extrinsic roll-pitch-yaw about fixed X, Y, Z axes applied
 /// in that order, which composes as `Rz * Ry * Rx` on a column vector; this
 /// is the one rotation convention this importer assumes, because it is
-/// URDF's own fixed convention rather than a project-wide one (C-04 remains
-/// about canonical *project* frames, not about what URDF itself defines).
+/// URDF's own fixed convention, a fact about the file format (the project
+/// convention of ADR 0022 is about canonical project frames, and imports
+/// still convert explicitly rather than assuming agreement).
 fn parse_origin(origin: Option<&XmlElement>) -> Result<RigidPose, UrdfError> {
     let Some(origin) = origin else {
         return Ok(RigidPose::IDENTITY);

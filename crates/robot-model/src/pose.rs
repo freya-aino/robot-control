@@ -1,8 +1,8 @@
 //! A local rigid pose: translation and rotation with no named frame.
 //!
 //! The named-frame machinery in `robot_types::frames` exists for genuinely
-//! cross-cutting frames — world, a sensor's output convention, the
-//! orientation C-04 leaves open — where naming the frames a transform maps
+//! cross-cutting frames — world (the canonical convention of ADR 0022), a
+//! sensor's output convention — where naming the frames a transform maps
 //! between prevents silently assuming a shared convention. A joint's origin,
 //! a sensor's mounting offset and a collision shape's placement are not that
 //! kind of fact: each is *structurally* local to exactly one link, and

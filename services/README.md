@@ -53,8 +53,9 @@ Written in the bounded TOML subset of `robot-artifacts`, flat keys only:
    pinned revision and its license closure recorded in
    `docs/ledger/evidence-ledger.md`; the `Containerfile` exists with
    pinned sources; the image is built and `image_digest` pinned. The
-   first service to reach this state also adds rootless `podman` to
-   `devenv.nix` in the same change (§2.4 item 8, C-30).
+   designated runtime is the host's system-level **Docker** (§2.4
+   item 8, ADR 0023); nothing enters `devenv.nix`, and rootless
+   `podman` is the recorded fallback for a host without Docker.
 3. **Rebuild or retag** — a version change under SPECS.md §3: dependent
    claims demote, the ledger records the new digest.
 

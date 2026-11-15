@@ -192,9 +192,8 @@ impl From<ProfileError> for FixtureError {
 /// joint's own declared velocity/effort limit standing in for a real
 /// actuator envelope, since URDF carries no transmission ratio, gain,
 /// thermal or command-latency data. No sensors are populated. The gravity
-/// convention is [`GravityConvention::minus_z_standard`], documented on
-/// that constructor as "a configuration default for tests and fixtures,
-/// not a project convention" — C-04 remains open.
+/// convention is [`GravityConvention::minus_z_standard`], which is the
+/// canonical project convention since ADR 0022 resolved C-04.
 ///
 /// The firmware contract declares **no** independent emergency stop. This
 /// is not a claim that the real G1 lacks one; it is the absence of a

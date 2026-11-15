@@ -4,8 +4,8 @@
 //! constrained inverse kinematics that uses it lives in `motion-retarget`.
 //! What belongs here is the one unambiguous computation: given a joint value
 //! for every actuated joint, where is every link, expressed as a
-//! [`RigidPose`] relative to the profile's root (which stands in for world,
-//! since no project-wide world frame is fixed until C-04 resolves).
+//! [`RigidPose`] relative to the profile's root, which a fixed-base caller
+//! seats in the canonical world frame of ADR 0022 (C-04, resolved).
 
 use crate::joint::JointKind;
 use crate::pose::RigidPose;

@@ -12,8 +12,9 @@
 //! Local, structural poses — a joint's origin, a sensor's mounting offset, a
 //! collision shape's placement — use [`pose::RigidPose`], not
 //! `robot_types::frames::Transform`: that type's named-frame checking exists
-//! for genuinely cross-cutting project frames, which C-04 leaves open, and a
-//! per-link synthetic frame identity would not be one of those.
+//! for genuinely cross-cutting project frames (the canonical convention of
+//! ADR 0022), and a per-link synthetic frame identity would not be one of
+//! those.
 //!
 //! Every category of entity carries a typed, stable ID from `robot-types`;
 //! [`profile::RobotProfile::validate`] is the single place uniqueness, graph

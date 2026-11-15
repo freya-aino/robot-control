@@ -2,17 +2,19 @@
 //!
 //! Two requirements shape this module.
 //!
-//! SPECS.md Appendix A.3 and [C-04] leave the canonical frame, gravity
-//! direction, root convention and quaternion ordering **open**: "no code may
-//! assume a project-wide convention, and every transform MUST name the frames it
-//! maps between". [`Transform`] therefore carries its source and target
-//! [`FrameId`] and refuses to compose with a transform that does not meet it.
+//! SPECS.md Appendix A.3 fixes the canonical convention (C-04, resolved by
+//! `docs/decisions/0022-canonical-convention.md`): a right-handed, Z-up
+//! world, gravity −Z at standard magnitude unless a profile declares
+//! otherwise, and w-first unit quaternions. The bookkeeping discipline of
+//! ADR 0002 remains in force under it: every transform still names the
+//! frames it maps between, so [`Transform`] carries its source and target
+//! [`FrameId`] and refuses to compose with a transform that does not meet
+//! it — a convention is not a license to stop saying which frame a number
+//! is in.
 //!
 //! SPECS.md Section 7.2 requires "typed quaternion serialization with named
 //! components over ambiguous four-element arrays". [`Quat`] has no array
 //! constructor and no `as_array`; components are reached by name.
-//!
-//! [C-04]: ../../../SPECS.md
 
 use crate::units::{Metres, Radians};
 use core::fmt;
@@ -590,8 +592,8 @@ pub struct FrameId(pub u16);
 impl FrameId {
     /// The world frame of a given profile, by convention index zero.
     ///
-    /// The *orientation* of this frame is still open under C-04; only its index
-    /// is fixed, so that a transform can name it.
+    /// Its orientation is the canonical convention of ADR 0022 (C-04):
+    /// right-handed, Z up, gravity −Z unless a profile declares otherwise.
     pub const WORLD: Self = Self(0);
 
     /// The index.
@@ -779,9 +781,10 @@ impl Point {
 
 /// The direction of gravity in a named frame.
 ///
-/// Carried explicitly because C-04 leaves the canonical gravity direction open;
-/// a simulator, an estimator and an importer each state the convention they were
-/// configured with rather than assuming a shared one.
+/// Carried explicitly even though ADR 0022 fixes the canonical direction
+/// (−Z): a profile may declare a different convention, and a simulator, an
+/// estimator and an importer each state the convention they were configured
+/// with rather than assuming — the consumer reads what is declared.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct GravityConvention {
     /// Frame the direction is expressed in.
@@ -793,10 +796,10 @@ pub struct GravityConvention {
 }
 
 impl GravityConvention {
-    /// The widely used `-Z` convention at standard gravity.
-    ///
-    /// This is a *configuration default for tests and fixtures*, not a project
-    /// convention: C-04 is open, and a profile states its own.
+    /// The `-Z` convention at standard gravity — the canonical project
+    /// convention since ADR 0022 resolved C-04. A profile may still declare
+    /// a different convention explicitly, and consumers read the declared
+    /// one.
     #[must_use]
     pub const fn minus_z_standard(frame: FrameId) -> Self {
         Self {

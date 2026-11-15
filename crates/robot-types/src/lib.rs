@@ -15,8 +15,10 @@
 //!
 //! # What is deliberately *not* decided here
 //!
-//! Appendix C leaves the canonical coordinate frame, gravity direction, root
-//! convention and quaternion ordering open under C-04. This crate therefore
+//! The canonical coordinate frame, gravity direction, root convention and
+//! quaternion ordering are fixed by ADR 0022 (C-04, resolved): Z-up
+//! right-handed, gravity −Z unless declared otherwise, w-first unit
+//! quaternions. This crate still
 //! supplies [`frames::Transform`], which *names* the frames it maps between, and
 //! [`frames::Quat`], whose components are reached by name — but it declares no
 //! project-wide convention, because there is not yet a decision record to

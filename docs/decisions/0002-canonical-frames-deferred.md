@@ -1,6 +1,9 @@
 # 0002 — canonical frames, gravity direction and quaternion ordering remain open
 
-- Status: accepted (an explicit non-decision)
+- Status: superseded by `0022-canonical-convention.md` (2026-11-15) — C-04
+  is now resolved; the enforcement discipline this record built (named
+  frames, named quaternion components, explicit import conversions)
+  remains in force under the ratified convention.
 - Date: 2026-10-26
 - Tracks: C-04
 - Touches: SPECS.md Appendix A.3, every schema in §7
