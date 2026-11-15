@@ -45,10 +45,12 @@
   # no branching, parsing or numerics belongs here.
   scripts.robot-fmt-check.exec = "cargo fmt --all -- --check";
   scripts.robot-clippy.exec = "cargo clippy --workspace --all-targets -- -D warnings";
-  # Section 2.1 item 4 and row A-25. The checks (no excluded runtime in the
-  # lockfile, a path-only default closure, no shipping crate reaching
-  # robot-devtools) are Rust, in crates/robot-devtools/src/exclusion_gate.rs;
-  # this alias only runs that binary, which exits 1 on any violation.
+  # Section 2.1 item 4, row A-25, and the Section 2.4 services gate (row
+  # A-51). The checks (no excluded runtime in the lockfile, a path-only
+  # default closure, no shipping crate reaching robot-devtools, every
+  # services/*/service.toml a valid robot-service/1 record) are Rust, in
+  # crates/robot-devtools/src/{exclusion_gate,services_gate}.rs; this
+  # alias only runs that binary, which exits 1 on any violation.
   scripts.robot-exclusion-gate.exec = "cargo run -q -p robot-devtools --bin exclusion-gate --offline";
 
   # git-hooks: local and CI enforcement share this one definition (item 3).
@@ -57,9 +59,9 @@
     clippy.enable = true;
     robot-exclusion-gate = {
       enable = true;
-      name = "robot exclusion gate (SPECS.md Section 2.1 item 4, row A-25)";
+      name = "robot exclusion gate (SPECS.md Section 2.1 item 4, rows A-25 and A-51)";
       entry = "cargo run -q -p robot-devtools --bin exclusion-gate --offline";
-      files = "(Cargo\\.(toml|lock)|devenv\\.(nix|yaml|lock))$";
+      files = "(Cargo\\.(toml|lock)|devenv\\.(nix|yaml|lock)|services/.*)$";
       pass_filenames = false;
     };
   };

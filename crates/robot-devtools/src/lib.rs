@@ -8,7 +8,9 @@
 //! behind the `exclusion-gate` binary that `devenv test` and the git hook
 //! run: no excluded runtime in the lockfile, a path-only default closure,
 //! and no shipping crate depending on this one (Section 2.1 item 4, row
-//! A-25).
+//! A-25). [`services_gate`] holds the Section 2.4 checks over the
+//! `services/` registry of containerized foreign services (rows A-51 and
+//! A-52), run by the same binary.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -18,3 +20,4 @@ pub mod exclusion_gate;
 pub mod inventory;
 pub mod knowledge_base;
 pub mod ledger;
+pub mod services_gate;

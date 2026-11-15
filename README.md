@@ -87,9 +87,26 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`robot-control`](crates/robot-control/README.md) | §5, §5.1 | The control loop: policy and tactical tiers with decision age, sensor taps into the supervisor, four-quantity timing reports, the incident channel |
 | [`robot-eval`](crates/robot-eval/README.md) | §14 | Acceptance profiles as content-addressed artifacts, t-based statistics, Welch and TOST, interval-based evaluation, regression gates, the acceptance matrix closed only by ledger artifacts |
 | [`robot-persona`](crates/robot-persona/README.md) | §12.5 | Versioned styles bounded inside validated ranges, an expression arbiter that yields to recovery, session-scoped opponent memory, recognizability and non-degradation evaluation |
-| [`robot-devtools`](crates/robot-devtools/README.md) | §§2.3.1, 13.1 | The exclusion gate, the dependency knowledge base (Cargo.lock inventory, staleness sweeps, fault records) and evidence-ledger diffing that refuses unsupported promotions |
+| [`robot-devtools`](crates/robot-devtools/README.md) | §§2.3.1, 13.1, 2.4 | The exclusion gate, the §2.4 services gate over `services/`, the dependency knowledge base (Cargo.lock inventory, staleness sweeps, fault records) and evidence-ledger diffing that refuses unsupported promotions |
 | [`robot-viewer`](crates/robot-viewer/README.md) | §6, §11.2 | Inspection data layer (skeletons, contacts, tracking error, synchronized playback) — no rendering toolkit is wired in; see its README for why |
 | [`robot-cli`](crates/robot-cli/README.md) | PLAN.md §4 | The `robot` binary: data import, motion retarget and validate, sim, train, eval (including `--bundle` verification and the activation gate), skills, adapt identify and replay over the library crates; `deps` and `deploy` named with their reasons |
+
+### External services (`services/`)
+
+Foreign stacks the project uses as development tools — a video-to-SMPL-X
+estimator and NVIDIA Isaac GR00T as an offline demonstration source are
+the first two registered candidates — are not dependencies: they are
+**containerized foreign services** under SPECS.md Section 2.4 and
+[ADR 0017](docs/decisions/0017-containerized-foreign-services.md). Each
+lives in [`services/`](services/README.md) as a `robot-service/1` record
+(image pinned by digest once qualified, licensed model assets fetched
+under the user's own license, never vendored) and exchanges **files
+only**: its output enters through `robot data import` as untrusted,
+content-addressed input. Nothing in `services/` touches the Cargo
+closure, a robot host, or a control path, and the `exclusion-gate`
+binary validates every record (rows A-51 and A-52). Both current records
+are `unverified` and unpinned; no container runtime is provisioned until
+the first one qualifies (open question C-30).
 
 ### What's genuinely limited, right now
 

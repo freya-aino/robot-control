@@ -1,13 +1,16 @@
-//! `exclusion-gate`: the executable form of SPECS.md Section 2.1 item 4 and
-//! row A-25. Exit code 0 means every check passed; 1 means at least one
-//! violation, each printed on its own line to stderr; 2 means the gate
-//! could not gather its inputs.
+//! `exclusion-gate`: the executable form of SPECS.md Section 2.1 item 4,
+//! row A-25, and the Section 2.4 services gate (row A-51). Exit code 0
+//! means every check passed; 1 means at least one violation, each printed
+//! on its own line to stderr; 2 means the gate could not gather its
+//! inputs.
 //!
 //! Usage: `exclusion-gate [workspace-root]`. The root defaults to the
 //! workspace containing this crate. The checks themselves are in
-//! `robot_devtools::exclusion_gate`; this binary only reads `Cargo.lock`,
-//! runs `cargo tree --workspace -e normal --prefix none --offline` and
-//! reads every `crates/*/Cargo.toml`.
+//! `robot_devtools::exclusion_gate` and `robot_devtools::services_gate`;
+//! this binary only reads `Cargo.lock`, runs `cargo tree --workspace -e
+//! normal --prefix none --offline`, reads every `crates/*/Cargo.toml`,
+//! and lists `services/*/` (an absent `services/` directory is an empty,
+//! passing registry).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -15,6 +18,7 @@ use std::process::{Command, ExitCode};
 use robot_devtools::exclusion_gate::{
     devtools_dependents, excluded_names_in_lock, foreign_packages_in_tree, Violation,
 };
+use robot_devtools::services_gate::{check_services, ServiceEntry};
 
 fn main() -> ExitCode {
     let root = match std::env::args().nth(1) {
@@ -77,30 +81,71 @@ fn main() -> ExitCode {
         }
     };
 
+    let services = match read_services(&root.join("services")) {
+        Ok(services) => services,
+        Err(error) => {
+            eprintln!("exclusion gate: cannot read services registry: {error}");
+            return ExitCode::from(2);
+        }
+    };
+
     let mut violations: Vec<Violation> = excluded_names_in_lock(&lock);
     violations.extend(foreign_packages_in_tree(&tree, &root));
     violations.extend(devtools_dependents(&manifests));
+    let service_violations = check_services(&services);
 
-    if violations.is_empty() {
+    if violations.is_empty() && service_violations.is_empty() {
         let packages = tree.lines().filter(|l| !l.trim().is_empty()).count();
         let lock_entries = lock
             .lines()
             .filter(|l| l.trim_start().starts_with("name = "))
             .count();
         println!(
-            "exclusion gate: ok ({} default-closure entries, all workspace paths; {} lockfile packages, none an excluded runtime; {} manifests, none reach robot-devtools)",
+            "exclusion gate: ok ({} default-closure entries, all workspace paths; {} lockfile packages, none an excluded runtime; {} manifests, none reach robot-devtools; {} service record(s), all valid robot-service/1)",
             packages,
             lock_entries,
-            manifests.len()
+            manifests.len(),
+            services.len()
         );
         ExitCode::SUCCESS
     } else {
         for violation in &violations {
             eprintln!("exclusion gate: {violation}");
         }
-        eprintln!("exclusion gate: {} violation(s)", violations.len());
+        for violation in &service_violations {
+            eprintln!("exclusion gate: {violation}");
+        }
+        eprintln!(
+            "exclusion gate: {} violation(s)",
+            violations.len() + service_violations.len()
+        );
         ExitCode::from(1)
     }
+}
+
+fn read_services(services_dir: &Path) -> std::io::Result<Vec<ServiceEntry>> {
+    let mut services = Vec::new();
+    if !services_dir.is_dir() {
+        return Ok(services);
+    }
+    for entry in std::fs::read_dir(services_dir)? {
+        let entry = entry?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let record = match std::fs::read_to_string(entry.path().join("service.toml")) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        services.push(ServiceEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            record,
+            has_containerfile: entry.path().join("Containerfile").is_file(),
+        });
+    }
+    services.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(services)
 }
 
 fn read_manifests(crates_dir: &Path) -> std::io::Result<Vec<(String, String)>> {

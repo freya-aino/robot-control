@@ -1246,3 +1246,39 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
   status" note (EPA convergence surfacing, C3D label dedup, chain_ratio
   errors, TOML array-table header bound, among others) are recorded there
   and deliberately not fixed in this pass.
+
+## Entry 2026-11-15 (third session: containerized-foreign-service registry)
+
+- **Tool:** Claude Code (Anthropic CLI agent), shell, file-edit and
+  build-tool access, offline.
+- **Model identity/version:** `claude-fable-5` (Anthropic).
+- **Request:** the user proposed "building a library of container runtimes
+  that build these external services with an API, for example [Isaac
+  GR00T] or video to SMPL-X projects, so we have them bundled and ready
+  to be built inside this project, the attached api parses to the same
+  structured datamodel we use", and asked for it to be implemented if it
+  does not interfere with the project so far.
+- **Artifacts produced:** SPECS.md 0.9.0-draft (Section 2.4, the
+  dependency-class table row, rows A-51 and A-52, the glossary entry,
+  C-30); `docs/decisions/0017-containerized-foreign-services.md`;
+  `services/README.md` and the two `unverified`, unpinned records
+  `services/video-to-smplx/` and `services/isaac-gr00t/` (each
+  `service.toml` + `README.md`);
+  `crates/robot-devtools/src/services_gate.rs` with its tests, wired into
+  the `exclusion-gate` binary; `crates/robot-eval/src/matrix.rs` rows
+  A-51 and A-52 (its spec-matching test caught the SPECS §14 addition,
+  as designed; `the_real_ledger_parses` now asserts against `ROWS.len()`
+  instead of a second hard-coded count); `devenv.nix` git-hook trigger
+  pattern and comments; `crates/robot-devtools/README.md`; this ledger's §2.4
+  candidate table; the root `README.md` services pointer.
+- **Gates:** `cargo test -p robot-devtools` (26 passed, including the
+  committed-registry fixture test), `cargo fmt --all -- --check`,
+  `cargo clippy -p robot-devtools --all-targets -- -D warnings`, and the
+  `exclusion-gate` binary (ok: 2 service records, all valid
+  robot-service/1; a deliberately malformed record was shown to fail
+  with named violations and exit 1, then removed). Full
+  `cargo test --workspace` run at the end of the session.
+- **Deliberately not done:** no `Containerfile` is written and no
+  `podman` enters `devenv.nix`, because no candidate is
+  `code_inspected` and Section 2.2 forbids speculative inputs (C-30);
+  no upstream estimator claim was promoted beyond `unverified`.

@@ -83,6 +83,21 @@ embodiment, firmware or acceptance profile (SPECS.md §3).
 (Empty. No dependency version, robot profile, firmware or acceptance profile
 has changed since this ledger was opened.)
 
+## Containerized foreign service candidates (§2.4, ADR 0017)
+
+Candidate upstream implementations for the `services/` registry of
+SPECS.md §2.4. Both registered records keep empty digests; nothing here
+is qualified, and no container runtime is provisioned (C-30). A row
+promotes to `code_inspected` only with the pinned revision, license
+closure and built-image digest named in its admitting artifact.
+
+| Lead | Claim | State | Admitting artifact | Accessed | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| GVHMR (zju3dv) | Candidate estimator for `services/video-to-smplx`: world-grounded human motion recovery from monocular video | `unverified` | — | 2026-11-15 | Named from conversation and public listings; identity, SMPL-X output compatibility and license (code and required body models) not verified |
+| 4D-Humans / HMR 2.0 (shubham-goel) | Candidate estimator for `services/video-to-smplx` | `unverified` | — | 2026-11-15 | Native output is reportedly SMPL, not SMPL-X; a conversion step would need its own validation before the AMASS-layout contract holds |
+| SMPLer-X | Candidate estimator for `services/video-to-smplx`: expressive pose and shape estimation | `unverified` | — | 2026-11-15 | Model-zoo license terms unexamined; per-frame output may need temporal smoothing before retargeting |
+| NVIDIA Isaac GR00T N-series | Offline demonstration-episode and distillation source for `services/isaac-gr00t` | `unverified` | — | 2026-11-15 | Policy-class model: output enters as data only, never a controller (§2.4 item 7). Checkpoint identity, weights license and episode schema all open; the record's `output_format` says so rather than inventing one |
+
 ## Acceptance rows
 
 SPECS.md §14: "A row is closed by an artifact in the evidence ledger, not

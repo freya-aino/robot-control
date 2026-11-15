@@ -11,7 +11,7 @@
 //! support.
 
 /// `(id, area, requirement source)` for every row.
-pub const ROWS: [(&str, &str, &str); 50] = [
+pub const ROWS: [(&str, &str, &str); 52] = [
     ("A-01", "Rust constraint", "§2, §1.1"),
     ("A-02", "Dependency promotion", "B.6"),
     ("A-03", "Evidence discipline", "§3"),
@@ -82,6 +82,8 @@ pub const ROWS: [(&str, &str, &str); 50] = [
     ("A-48", "Probe refusal", "§7.7 item 3"),
     ("A-49", "Web claims are proposals", "§7.7 items 6 and 7"),
     ("A-50", "Agent cannot activate", "§7.7 item 8, §2.3.1"),
+    ("A-51", "Service records valid", "§2.4"),
+    ("A-52", "Services ship in nothing", "§2.4 item 3"),
 ];
 
 /// A row's state.
@@ -181,6 +183,6 @@ mod tests {
     #[test]
     fn the_real_ledger_parses() {
         let ledger = include_str!("../../../docs/ledger/evidence-ledger.md");
-        assert_eq!(status(ledger).len(), 50);
+        assert_eq!(status(ledger).len(), ROWS.len());
     }
 }

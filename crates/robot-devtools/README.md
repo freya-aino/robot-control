@@ -14,6 +14,7 @@ any other shipping crate depends on it.
 | --- | --- |
 | `knowledge_base` | `KnowledgeBaseEntry`, `Citation`, `require_citation`, `update_version`/`refresh` |
 | `exclusion_gate` | `excluded_names_in_lock`, `foreign_packages_in_tree`, `devtools_dependents`: the text checks behind the `exclusion-gate` binary |
+| `services_gate` | `check_record`, `check_services`: the §2.4 `robot-service/1` checks over `services/*/service.toml` (rows A-51 and A-52; ADR 0017), run by the same `exclusion-gate` binary |
 | `inventory` | `lock_inventory` (Cargo.lock as the §13.1 primary key), the `kb-store/1` `Store` (entries with kind and dependencies, fault records), `orphans`, `sweep` (version change marks an entry and its dependents stale, transitively), local `search`, `ledger_cites_kb` |
 | `ledger` | Evidence-ledger rows from every table with a `State` column, and `diff`: added, removed and changed rows, promotions classed by Section 3's order, and promotions with no admitting artifact flagged as unsupported |
 
@@ -33,11 +34,18 @@ bindings, PyTorch, JAX, the reference simulator, CycloneDDS crate names or prefi
 by `cargo tree --workspace -e normal` contains a package that is not a
 workspace path package; or a crate other than this one lists
 `robot-devtools` under `[dependencies]` or `[build-dependencies]`
-(`[dev-dependencies]` is allowed, because it ships in nothing). Exit 2
-means the inputs could not be gathered. `devenv test` runs it before the
-test suite, and `devenv.nix` declares it as a git hook on `Cargo.*` and
-`devenv.*` changes, so §2.2 item 6's "no branching or parsing in a Nix
-script" holds: the Nix side is a one-line alias.
+(`[dev-dependencies]` is allowed, because it ships in nothing). The same
+binary also runs the §2.4 services gate: every directory under
+`services/` must hold a `service.toml` that is a valid `robot-service/1`
+record — unknown keys, a class other than `development-tool`, a pinned
+image digest below `code_inspected`, or a qualified record without its
+`Containerfile` are each refused by name (row A-51). An absent or empty
+`services/` directory passes: the class is admissible, not mandatory.
+Exit 2 means the inputs could not be gathered. `devenv test` runs it
+before the test suite, and `devenv.nix` declares it as a git hook on
+`Cargo.*`, `devenv.*` and `services/` changes, so §2.2 item 6's "no
+branching or parsing in a Nix script" holds: the Nix side is a one-line
+alias.
 
 ## Why an uncited entry can't be used
 
