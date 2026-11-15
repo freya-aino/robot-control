@@ -17,6 +17,11 @@ use crate::ids::{Name, NameError};
 use crate::schema::{SchemaError, SchemaVersion};
 use core::fmt;
 
+/// The widest observation (single field or total) a spec accepts. Generous —
+/// a dense humanoid observation is a few hundred scalars — while keeping a
+/// file-declared width from overflowing the total-width sum.
+pub const MAX_FIELD_WIDTH: usize = 1_000_000;
+
 /// Where an observation field's value can come from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Availability {
@@ -106,6 +111,13 @@ pub enum VectorError {
         /// The offending field.
         field: String,
     },
+    /// A field (or the fields together) declared a width beyond
+    /// [`MAX_FIELD_WIDTH`]. An untrusted manifest could otherwise overflow
+    /// the total-width sum, which the workspace turns into an abort.
+    WidthBeyondLimit {
+        /// The offending field, or the whole spec.
+        field: String,
+    },
     /// A normalizer parameter or serialized state was invalid.
     InvalidParameter,
 }
@@ -124,6 +136,9 @@ impl fmt::Display for VectorError {
             ),
             Self::DuplicateField { field } => write!(f, "duplicate field name {field:?}"),
             Self::ZeroWidthField { field } => write!(f, "field {field:?} has zero width"),
+            Self::WidthBeyondLimit { field } => {
+                write!(f, "{field} is wider than {MAX_FIELD_WIDTH}")
+            }
             Self::InvalidParameter => write!(f, "normalizer state is invalid"),
         }
     }
@@ -132,12 +147,26 @@ impl fmt::Display for VectorError {
 impl core::error::Error for VectorError {}
 
 impl ObservationSpec {
-    /// Builds a spec, rejecting duplicate names and zero-width fields.
+    /// Builds a spec, rejecting duplicate names, zero-width fields and
+    /// widths beyond [`MAX_FIELD_WIDTH`] (singly and in total, so
+    /// [`ObservationSpec::width`] cannot overflow on untrusted input).
     pub fn new(schema_version: SchemaVersion, fields: Vec<FieldSpec>) -> Result<Self, VectorError> {
+        let mut total: usize = 0;
         for (i, f) in fields.iter().enumerate() {
             if f.width == 0 {
                 return Err(VectorError::ZeroWidthField {
                     field: f.name.to_string(),
+                });
+            }
+            if f.width > MAX_FIELD_WIDTH {
+                return Err(VectorError::WidthBeyondLimit {
+                    field: format!("field {:?}", f.name.as_str()),
+                });
+            }
+            total = total.saturating_add(f.width);
+            if total > MAX_FIELD_WIDTH {
+                return Err(VectorError::WidthBeyondLimit {
+                    field: "the observation".to_owned(),
                 });
             }
             if fields[..i].iter().any(|g| g.name == f.name) {
@@ -675,6 +704,25 @@ mod tests {
         assert_eq!(s.span_of("ground_friction"), Some((3, 4)));
         assert_eq!(s.span_of("imu_gyro"), Some((4, 7)));
         assert_eq!(s.span_of("absent"), None);
+    }
+
+    #[test]
+    fn widths_beyond_the_limit_are_rejected_not_summed_into_overflow() {
+        // A single absurd field, and two fields whose sum crosses the
+        // limit: both refused before width() can overflow.
+        let single = ObservationSpec::new(
+            SchemaVersion::new(1, 0),
+            vec![FieldSpec::deployable("a", MAX_FIELD_WIDTH + 1, "1").unwrap()],
+        );
+        assert!(matches!(single, Err(VectorError::WidthBeyondLimit { .. })));
+        let total = ObservationSpec::new(
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldSpec::deployable("a", MAX_FIELD_WIDTH, "1").unwrap(),
+                FieldSpec::deployable("b", MAX_FIELD_WIDTH, "1").unwrap(),
+            ],
+        );
+        assert!(matches!(total, Err(VectorError::WidthBeyondLimit { .. })));
     }
 
     #[test]

@@ -72,6 +72,10 @@ pub enum BundleFileError {
     Format(String),
     /// A construct `robot-bundle/1` does not encode.
     Unsupported(String),
+    /// A key the format does not define. Refused because the digest seal
+    /// covers only what the parser reads back: an ignored key would ride
+    /// inside a "verified" manifest unauthenticated.
+    UnknownKey(String),
     /// A field failed validation.
     Invalid(String),
     /// The manifest digest did not match its contents.
@@ -98,6 +102,7 @@ impl core::fmt::Display for BundleFileError {
             Self::Toml(e) => write!(f, "{e}"),
             Self::Format(found) => write!(f, "not a {FORMAT} file (format = {found:?})"),
             Self::Unsupported(what) => write!(f, "{FORMAT} does not encode {what}"),
+            Self::UnknownKey(what) => write!(f, "{FORMAT} does not define key {what}"),
             Self::Invalid(what) => write!(f, "{what}"),
             Self::DigestMismatch { stated, computed } => {
                 write!(f, "manifest digest {stated} but contents digest {computed}")
@@ -422,6 +427,13 @@ fn string_list(t: &Table, key: &str) -> Result<Vec<String>> {
         .collect()
 }
 
+fn no_unknown_keys(t: &Table, at: &str, known: &[&str]) -> Result<()> {
+    if let Some(k) = t.unknown_keys(known).into_iter().next() {
+        return Err(BundleFileError::UnknownKey(format!("{k:?} in {at}")));
+    }
+    Ok(())
+}
+
 fn tables_of<'a>(root: &'a Table, key: &str) -> Result<Vec<&'a Table>> {
     match root.get(key) {
         None => Ok(Vec::new()),
@@ -445,10 +457,44 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
     if format != FORMAT {
         return Err(BundleFileError::Format(format.to_owned()));
     }
+    // The digest seal covers the parsed manifest, re-serialized: any key
+    // the parser ignored would be invisible to it, so nothing may be
+    // ignored (SPECS Section 7.1: unknown core fields rejected).
+    no_unknown_keys(
+        &root,
+        "the manifest root",
+        &[
+            "format",
+            "schema_version",
+            "bundle_id",
+            "observation",
+            "normalizer_mean",
+            "normalizer_variance",
+            "normalizer_count",
+            "normalizer_clip",
+            "action",
+            "recurrent",
+            "rate_hz",
+            "tier",
+            "component",
+            "envelope",
+            "lineage",
+            "transition",
+            "benchmark",
+            "digest",
+            "signature",
+        ],
+    )?;
 
     let obs_table = root.require_table("observation")?;
+    no_unknown_keys(obs_table, "[observation]", &["schema_version", "field"])?;
     let mut fields = Vec::new();
     for t in tables_of(obs_table, "field")? {
+        no_unknown_keys(
+            t,
+            "[[observation.field]]",
+            &["name", "width", "unit", "availability"],
+        )?;
         let unit_text = t.require_str("unit")?;
         let unit = UNIT_SYMBOLS
             .iter()
@@ -484,6 +530,18 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
     .map_err(|e| BundleFileError::Invalid(format!("observation: {e:?}")))?;
 
     let action_table = root.require_table("action")?;
+    no_unknown_keys(
+        action_table,
+        "[action]",
+        &[
+            "schema_version",
+            "semantics",
+            "scale",
+            "offset",
+            "output_limit",
+            "width",
+        ],
+    )?;
     let semantics = match action_table.require_str("semantics")? {
         "joint-position-target" => ActionSemantics::JointPositionTarget,
         "joint-velocity-target" => ActionSemantics::JointVelocityTarget,
@@ -514,7 +572,10 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
 
     let rec_table = root.require_table("recurrent")?;
     let recurrent = match rec_table.require_str("kind")? {
-        "stateless" => RecurrentStateSpec::Stateless,
+        "stateless" => {
+            no_unknown_keys(rec_table, "[recurrent]", &["kind"])?;
+            RecurrentStateSpec::Stateless
+        }
         "recurrent" => RecurrentStateSpec::Recurrent {
             width: usize::try_from(rec_table.require_integer("width")?)
                 .map_err(|_| BundleFileError::Invalid("negative recurrent width".to_owned()))?,
@@ -537,8 +598,32 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
         }
     };
 
+    if matches!(recurrent, RecurrentStateSpec::Recurrent { .. }) {
+        no_unknown_keys(
+            rec_table,
+            "[recurrent]",
+            &["kind", "width", "on_activation"],
+        )?;
+    }
+
     let mut tiers = TierSchedule::new();
     for t in tables_of(&root, "tier")? {
+        no_unknown_keys(
+            t,
+            "[[tier]]",
+            &[
+                "component",
+                "tier",
+                "rate_hz",
+                "budget_nanos",
+                "measured_percentile",
+                "measured_nanos",
+                "measured_max_nanos",
+                "measured_run_id",
+                "input_freshness_nanos",
+                "on_missing_upper",
+            ],
+        )?;
         let tier_text = t.require_str("tier")?;
         tiers.declare(TierAssignment {
             component: t.require_str("component")?.to_owned(),
@@ -574,6 +659,16 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
 
     let mut components = Vec::new();
     for t in tables_of(&root, "component")? {
+        no_unknown_keys(
+            t,
+            "[[component]]",
+            &[
+                "name",
+                "architecture_version",
+                "weights_digest",
+                "weights_bytes",
+            ],
+        )?;
         let bytes = t.require_integer("weights_bytes")?;
         if bytes < 0 {
             return Err(BundleFileError::Invalid(
@@ -593,6 +688,19 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
     }
 
     let env_table = root.require_table("envelope")?;
+    no_unknown_keys(
+        env_table,
+        "[envelope]",
+        &[
+            "robot_profile",
+            "safety_profile",
+            "position_limits_lo",
+            "position_limits_hi",
+            "velocity_limits",
+            "torque_limits",
+            "qualified_modes",
+        ],
+    )?;
     let lo = float_list(env_table, "position_limits_lo")?;
     let hi = float_list(env_table, "position_limits_hi")?;
     if lo.len() != hi.len() {
@@ -617,6 +725,17 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
     };
 
     let lin_table = root.require_table("lineage")?;
+    no_unknown_keys(
+        lin_table,
+        "[lineage]",
+        &[
+            "inputs",
+            "config_hash",
+            "environment_lock",
+            "source_revision",
+            "held_out",
+        ],
+    )?;
     let lineage = DataLineage {
         inputs: string_list(lin_table, "inputs")?,
         config_hash: lin_table.require_str("config_hash")?.to_owned(),
@@ -627,6 +746,17 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
 
     let mut transitions = Vec::new();
     for t in tables_of(&root, "transition")? {
+        no_unknown_keys(
+            t,
+            "[[transition]]",
+            &[
+                "target",
+                "guard",
+                "minimum_dwell_nanos",
+                "preemptible_by_recovery",
+                "tested_by",
+            ],
+        )?;
         transitions.push(TransitionContract {
             target: t.require_str("target")?.to_owned(),
             guard: t.require_str("guard")?.to_owned(),
@@ -646,6 +776,18 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
 
     let mut benchmarks = Vec::new();
     for t in tables_of(&root, "benchmark")? {
+        no_unknown_keys(
+            t,
+            "[[benchmark]]",
+            &[
+                "metric",
+                "value",
+                "unit",
+                "acceptance_profile",
+                "evidence",
+                "run_id",
+            ],
+        )?;
         let evidence_text = t.require_str("evidence")?;
         benchmarks.push(BenchmarkResult {
             metric: t.require_str("metric")?.to_owned(),
@@ -812,6 +954,26 @@ pub fn load_weights(dir: &Path, component: &str) -> Result<Vec<u8>> {
             what: "not in the manifest".to_owned(),
         })?;
     let bytes = std::fs::read(dir.join("weights").join(c.name.as_str()))?;
+    // Verify the bytes actually being returned, not the ones `read_bundle`
+    // hashed on its own pass: a blob swapped between the two reads must not
+    // come back labeled verified ("content before interpretation").
+    if bytes.len() as u64 != c.weights_bytes {
+        return Err(BundleFileError::Blob {
+            component: component.to_owned(),
+            what: format!(
+                "{} bytes on disk, manifest says {}",
+                bytes.len(),
+                c.weights_bytes
+            ),
+        });
+    }
+    let id = ContentId::of(&bytes).to_string();
+    if id != c.weights_digest {
+        return Err(BundleFileError::Blob {
+            component: component.to_owned(),
+            what: format!("content {id}, manifest says {}", c.weights_digest),
+        });
+    }
     Ok(bytes)
 }
 
@@ -969,6 +1131,57 @@ mod tests {
         assert!(matches!(
             read_bundle(&dir),
             Err(BundleFileError::DigestMismatch { .. })
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn injected_keys_are_refused_everywhere_the_seal_does_not_reach() {
+        // The digest is recomputed from the *parsed* manifest, so a key the
+        // parser ignored would ride inside a "verified" file unauthenticated.
+        let dir = tmp("inject");
+        let blob = weights();
+        write_bundle(&dir, &manifest(), &[("actor", &blob)]).unwrap();
+        let mpath = dir.join("manifest.toml");
+        let sealed = std::fs::read_to_string(&mpath).unwrap();
+
+        // At the root, in a sub-table, and as a whole unknown table.
+        for attack in [
+            format!("{sealed}\nevil = \"payload\"\n"),
+            format!("{sealed}\n[extra]\nevil = 1\n"),
+            sealed.replace("[envelope]", "[envelope]\nevil = \"payload\""),
+        ] {
+            std::fs::write(&mpath, attack).unwrap();
+            assert!(matches!(
+                read_bundle(&dir),
+                Err(BundleFileError::UnknownKey(_))
+            ));
+        }
+        std::fs::write(&mpath, sealed).unwrap();
+        assert!(read_bundle(&dir).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_weights_verifies_the_bytes_it_returns() {
+        // read_bundle's own verification pass reads the blob once; the
+        // bytes handed to the caller are read again and must be re-checked,
+        // or a swap between the two reads returns unverified data.
+        let dir = tmp("reread");
+        let blob = weights();
+        write_bundle(&dir, &manifest(), &[("actor", &blob)]).unwrap();
+        assert_eq!(load_weights(&dir, "actor").unwrap(), blob);
+
+        // Same size, different content is refused. (The swap-between-reads
+        // race itself cannot be staged in a test; this pins the behavior on
+        // bad content and the round trip above pins the good path.)
+        let path = dir.join("weights").join("actor");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            load_weights(&dir, "actor"),
+            Err(BundleFileError::Blob { .. })
         ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
