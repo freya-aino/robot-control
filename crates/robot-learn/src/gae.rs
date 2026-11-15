@@ -43,9 +43,11 @@ pub fn compute_gae(
     lambda: f64,
 ) -> (Vec<f64>, Vec<f64>) {
     let n = rewards.len();
-    debug_assert_eq!(values.len(), n);
-    debug_assert_eq!(next_values.len(), n);
-    debug_assert_eq!(terminations.len(), n);
+    // Real asserts: a release build would otherwise panic on an index below
+    // with no explanation instead of naming the mismatched widths.
+    assert_eq!(values.len(), n, "values width");
+    assert_eq!(next_values.len(), n, "next_values width");
+    assert_eq!(terminations.len(), n, "terminations width");
 
     let mut advantages = vec![0.0; n];
     let mut running = 0.0;

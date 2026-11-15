@@ -73,8 +73,30 @@ fn names(items: &[Name]) -> Value {
 }
 
 /// Writes descriptors as a `skill-manifest/1` document.
-#[must_use]
-pub fn write_manifest(skills: &[SkillDescriptor]) -> String {
+///
+/// # Errors
+///
+/// Refuses what [`read_manifest`] would refuse to read back — duplicate
+/// ids or names, and non-finite embedding values — so a written manifest
+/// is a readable one.
+pub fn write_manifest(skills: &[SkillDescriptor]) -> Result<String, ManifestError> {
+    for (i, d) in skills.iter().enumerate() {
+        if skills[..i].iter().any(|e| e.id == d.id) {
+            return Err(ManifestError::Duplicate(format!("skill id {}", d.id.0)));
+        }
+        if skills[..i].iter().any(|e| e.name == d.name) {
+            return Err(ManifestError::Duplicate(format!(
+                "skill name {:?}",
+                d.name.as_str()
+            )));
+        }
+        if d.embedding.iter().any(|v| !v.is_finite()) {
+            return Err(ManifestError::Invalid {
+                skill: d.name.as_str().to_owned(),
+                what: "embedding holds a non-finite value".to_owned(),
+            });
+        }
+    }
     let mut root = Table::new();
     root.insert("format", Value::String(FORMAT.to_owned()));
     let mut rows = Vec::new();
@@ -138,7 +160,7 @@ pub fn write_manifest(skills: &[SkillDescriptor]) -> String {
         rows.push(Value::Table(t));
     }
     root.insert("skill", Value::Array(rows));
-    toml::to_string(&root)
+    Ok(toml::to_string(&root))
 }
 
 const SKILL_KEYS: &[&str] = &[
@@ -338,7 +360,7 @@ mod tests {
     #[test]
     fn a_manifest_round_trips_exactly() {
         let lib = library();
-        let text = write_manifest(&lib);
+        let text = write_manifest(&lib).unwrap();
         assert!(text.starts_with("format = \"skill-manifest/1\""));
         let back = read_manifest(&text).unwrap();
         assert_eq!(back.len(), 2);
@@ -346,7 +368,7 @@ mod tests {
         assert_eq!(back[0].name.as_str(), "jab");
         assert_eq!(back[0].embedding, lib[0].embedding);
         assert_eq!(back[1].outgoing_transitions, vec![SkillId(1)]);
-        assert_eq!(write_manifest(&back), text);
+        assert_eq!(write_manifest(&back).unwrap(), text);
     }
 
     #[test]
@@ -355,7 +377,7 @@ mod tests {
             read_manifest("format = \"other/9\"\n"),
             Err(ManifestError::Format(_))
         ));
-        let mut text = write_manifest(&library());
+        let mut text = write_manifest(&library()).unwrap();
         text.push_str("\nextra = 1\n");
         assert!(matches!(
             read_manifest(&text),
@@ -363,15 +385,21 @@ mod tests {
         ));
         let mut dup = library();
         dup[1].id = dup[0].id;
+        assert!(
+            matches!(write_manifest(&dup), Err(ManifestError::Duplicate(_))),
+            "the writer refuses what the reader would refuse to read back"
+        );
+        let mut nan = library();
+        nan[0].embedding[0] = f64::NAN;
         assert!(matches!(
-            read_manifest(&write_manifest(&dup)),
-            Err(ManifestError::Duplicate(_))
+            write_manifest(&nan),
+            Err(ManifestError::Invalid { .. })
         ));
     }
 
     #[test]
     fn invalid_fields_are_named() {
-        let text = write_manifest(&library()).replace(
+        let text = write_manifest(&library()).unwrap().replace(
             "expected_duration_nanos = 400000000",
             "expected_duration_nanos = -1",
         );

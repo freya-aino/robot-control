@@ -396,10 +396,16 @@ impl PolicyBundleManifest {
             .map_err(BundleError::PrivilegedObservation)?;
 
         let width = self.observation.width();
-        if self.normalizer_mean.len() != width || self.normalizer_variance.len() != width {
+        if self.normalizer_mean.len() != width {
             return Err(BundleError::NormalizerWidth {
                 expected: width,
                 found: self.normalizer_mean.len(),
+            });
+        }
+        if self.normalizer_variance.len() != width {
+            return Err(BundleError::NormalizerWidth {
+                expected: width,
+                found: self.normalizer_variance.len(),
             });
         }
 

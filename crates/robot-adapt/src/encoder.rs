@@ -87,7 +87,12 @@ impl ContextEncoder {
         match window.flatten(now_ns) {
             Some(x) if x.len() == self.network.input_width() => {
                 let out_of_range = self.envelope.outside(&x);
-                let y = self.network.forward_with_trace(&x).output().to_vec();
+                let y = self
+                    .network
+                    .forward_with_trace(&x)
+                    .expect("width checked by the match arm")
+                    .output()
+                    .to_vec();
                 (y, ContextSource::Encoded { out_of_range })
             }
             _ => (
@@ -121,7 +126,9 @@ pub fn mse(network: &Mlp, data: &[(Vec<f64>, Vec<f64>)]) -> f64 {
     let total: f64 = data
         .iter()
         .map(|(x, y)| {
-            let out = network.forward_with_trace(x);
+            let out = network
+                .forward_with_trace(x)
+                .expect("training pairs share the network's input width");
             out.output()
                 .iter()
                 .zip(y)
@@ -163,7 +170,9 @@ pub fn train(
             let mut grads = Gradients::zeros_like(network);
             for &i in chunk {
                 let (x, y) = &data[i];
-                let trace = network.forward_with_trace(x);
+                let trace = network
+                    .forward_with_trace(x)
+                    .expect("training pairs share the network's input width");
                 let n = y.len().max(1) as f64;
                 let d: Vec<f64> = trace
                     .output()

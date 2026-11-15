@@ -228,7 +228,9 @@ mod tests {
 
         let mut loss = f64::INFINITY;
         for _ in 0..200 {
-            let trace = mlp.forward_with_trace(&x);
+            let trace = mlp
+                .forward_with_trace(&x)
+                .expect("input width matches the net");
             let output = trace.output()[0];
             loss = 0.5 * (output - target).powi(2);
             let d_output = output - target;

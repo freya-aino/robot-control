@@ -282,7 +282,10 @@ impl PpoAgent {
                 self.normalizer
                     .normalize(&t.observation, &mut normalized_obs)
                     .expect("width matches");
-                self.value_net.forward_with_trace(&normalized_obs).output()[0]
+                self.value_net
+                    .forward_with_trace(&normalized_obs)
+                    .expect("input width matches the net")
+                    .output()[0]
             })
             .collect();
         let next_values: Vec<f64> = transitions
@@ -291,7 +294,10 @@ impl PpoAgent {
                 self.normalizer
                     .normalize(&t.next_observation, &mut normalized_obs)
                     .expect("width matches");
-                self.value_net.forward_with_trace(&normalized_obs).output()[0]
+                self.value_net
+                    .forward_with_trace(&normalized_obs)
+                    .expect("input width matches the net")
+                    .output()[0]
             })
             .collect();
 
@@ -347,7 +353,11 @@ impl PpoAgent {
                 self.normalizer
                     .normalize(&transitions[i].observation, &mut normalized_obs)
                     .expect("width matches");
-                let trace = self.policy.mean_net.forward_with_trace(&normalized_obs);
+                let trace = self
+                    .policy
+                    .mean_net
+                    .forward_with_trace(&normalized_obs)
+                    .expect("input width matches the net");
                 let new_log_prob = self
                     .policy
                     .log_prob_from_trace(&trace, &transitions[i].action);
@@ -380,7 +390,10 @@ impl PpoAgent {
                     *acc += g;
                 }
 
-                let value_trace = self.value_net.forward_with_trace(&normalized_obs);
+                let value_trace = self
+                    .value_net
+                    .forward_with_trace(&normalized_obs)
+                    .expect("input width matches the net");
                 let value_error = value_trace.output()[0] - returns[i];
                 let d_value = [self.config.value_loss_weight * value_error / n as f64];
                 let (vg, _) = backward(&self.value_net, &value_trace, &d_value);
@@ -526,7 +539,12 @@ mod tests {
         let mut buffer = RolloutBuffer::new(schema, 64);
         let mut rollout_rng = Rng::new(SeedStream::new(3, 2));
 
-        let mean_before = agent.policy.mean_net.forward_with_trace(&[0.0]).output()[0];
+        let mean_before = agent
+            .policy
+            .mean_net
+            .forward_with_trace(&[0.0])
+            .expect("input width matches the net")
+            .output()[0];
         for _ in 0..200 {
             buffer.clear();
             agent.collect_rollout(
@@ -543,7 +561,12 @@ mod tests {
             );
             agent.update(&buffer);
         }
-        let mean_after = agent.policy.mean_net.forward_with_trace(&[0.0]).output()[0];
+        let mean_after = agent
+            .policy
+            .mean_net
+            .forward_with_trace(&[0.0])
+            .expect("input width matches the net")
+            .output()[0];
 
         assert!(
             (mean_after - TARGET).abs() < (mean_before - TARGET).abs() * 0.3,
@@ -902,6 +925,7 @@ mod tests {
                     .policy
                     .mean_net
                     .forward_with_trace(&normalized)
+                    .expect("input width matches the net")
                     .output()
                     .to_vec();
                 let outcome = env.step(&action, robot_types::time::Duration::from_millis(20));

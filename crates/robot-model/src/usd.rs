@@ -45,7 +45,7 @@ use std::path::Path;
 pub struct ImportReport {
     /// Rigid links (prims with `physics:mass`), excluding the `world` link.
     pub links: usize,
-    /// Revolute joints.
+    /// Joints of every supported kind (revolute and fixed).
     pub joints: usize,
     /// Collision spheres.
     pub collision_spheres: usize,

@@ -267,10 +267,11 @@ fn print_usage() {
     eprintln!("  robot eval summarize <values...>");
     eprintln!("  robot eval --bundle <dir> --robot <g1-usd|go2-usd|h1-usd>");
     eprintln!("  robot skills <list|search> --manifest <skill-manifest.toml> [query...]");
-    eprintln!();
-    eprintln!("named in PLAN.md but not implemented yet:");
     eprintln!("  robot data import, robot motion retarget, robot eval run,");
-    eprintln!("  robot train, robot deps, robot adapt, robot deploy, robot replay");
+    eprintln!("  robot train, robot adapt, robot replay (see each command's --help)");
+    eprintln!();
+    eprintln!("named in PLAN.md but not implemented yet (each refuses with its reason):");
+    eprintln!("  robot deps, robot deploy");
 }
 
 #[cfg(test)]

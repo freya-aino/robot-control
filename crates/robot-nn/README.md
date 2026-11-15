@@ -14,7 +14,7 @@ isolation" to warrant existing.
 | Module | Contents |
 | --- | --- |
 | `layer` | `Activation` (identity/tanh/ReLU/sigmoid) and `Linear`, a dense `y = Wx + b` layer |
-| `mlp` | `Mlp`: a validated sequence of `Linear` + `Activation` pairs; `Scratch`: preallocated ping-pong buffers; `forward_with_trace` → `ForwardTrace` for backpropagation; `ParamGroup`/`frozen_mask` for named, freezable parameter ranges |
+| `mlp` | `Mlp`: a validated sequence of `Linear` + `Activation` pairs; `Scratch`: preallocated ping-pong buffers; `forward_with_trace` → `Result<ForwardTrace, LayerError>` for backpropagation (a wrong-width input is an error, not a panic); `ParamGroup`/`frozen_mask` for named, freezable parameter ranges |
 | `init` | Fan-in-scaled normal initialization driven by a `robot_types::rng::Rng`, so network init is part of one reproducible seed stream |
 | `policy` | `Policy` (deterministic observation→action seam, implemented for `Mlp`) and `StochasticPolicy: Policy` (allocation-free sampling with log-probability), the plug-in contract `ControlLoop` is generic over |
 | `format` | `robot-mlp/1`, the versioned binary weights format of §7.4: magic, version, per-layer widths and activation code, `f64` parameters. Decoding refuses an unknown activation code as an unsupported operator naming its layer. It also refuses widths that do not chain, a size mismatch either way, non-finite values, and parameter counts over `MAX_PARAMETERS` |

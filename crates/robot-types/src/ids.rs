@@ -117,6 +117,9 @@ pub enum NameError {
         /// The offending character.
         found: char,
     },
+    /// The name was `.` or `..`, which a file-system path would resolve as
+    /// the current or parent directory.
+    PathLike,
 }
 
 impl fmt::Display for NameError {
@@ -129,6 +132,7 @@ impl fmt::Display for NameError {
             Self::InvalidCharacter { found } => {
                 write!(f, "name contains {found:?}; permitted: a-z A-Z 0-9 _ - .")
             }
+            Self::PathLike => write!(f, "name is '.' or '..', which a path would resolve"),
         }
     }
 }
@@ -147,6 +151,9 @@ impl Name {
         }
         if text.len() > Self::MAX_LEN {
             return Err(NameError::TooLong { len: text.len() });
+        }
+        if text == "." || text == ".." {
+            return Err(NameError::PathLike);
         }
         if let Some(bad) = text
             .chars()

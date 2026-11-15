@@ -63,7 +63,10 @@ impl GaussianPolicy {
     /// noise.
     #[must_use]
     pub fn sample(&self, observation: &[f64], rng: &mut Rng) -> ActionSample {
-        let trace = self.mean_net.forward_with_trace(observation);
+        let trace = self
+            .mean_net
+            .forward_with_trace(observation)
+            .expect("input width matches the net");
         let mean = trace.output();
         let action: Vec<f64> = mean
             .iter()
@@ -95,9 +98,11 @@ impl GaussianPolicy {
             .sum()
     }
 
-    /// Gradient of `-log_prob` (the negative log-likelihood) with respect to
-    /// the mean network's output and the log-std vector, scaled by
-    /// `upstream` (the PPO loss's own gradient with respect to `log_prob`).
+    /// Gradient of `log_prob` with respect to the mean network's output and
+    /// the log-std vector, scaled by `upstream` (the PPO loss's own gradient
+    /// with respect to `log_prob`); the caller supplies any negation through
+    /// `upstream`. Verified against finite differences in this module's
+    /// tests.
     ///
     /// Returns `(d_mean, d_log_std)`.
     #[must_use]
@@ -241,7 +246,10 @@ mod tests {
         let p = policy();
         let mut rng = Rng::new(SeedStream::new(1, 0));
         let obs = [1.0, 0.0];
-        let trace = p.mean_net.forward_with_trace(&obs);
+        let trace = p
+            .mean_net
+            .forward_with_trace(&obs)
+            .expect("input width matches the net");
         let mean = trace.output()[0];
         let samples: Vec<f64> = (0..2000)
             .map(|_| p.sample(&obs, &mut rng).action[0])
@@ -278,7 +286,11 @@ mod tests {
         let mut scratch = Scratch::new(Policy::scratch_len(&p));
         let mut action = [0.0; 1];
         Policy::act(&p, &obs, &mut action, &mut scratch).unwrap();
-        let mean = p.mean_net.forward_with_trace(&obs).output()[0];
+        let mean = p
+            .mean_net
+            .forward_with_trace(&obs)
+            .expect("input width matches the net")
+            .output()[0];
         assert_eq!(action[0], mean);
     }
 
@@ -286,7 +298,10 @@ mod tests {
     fn log_prob_gradient_matches_central_finite_differences_on_mean() {
         let p = policy();
         let obs = [1.0, 0.0];
-        let trace = p.mean_net.forward_with_trace(&obs);
+        let trace = p
+            .mean_net
+            .forward_with_trace(&obs)
+            .expect("input width matches the net");
         let action = [0.3];
         let (d_mean, _) = p.log_prob_gradient(&trace, &action, 1.0);
 
@@ -305,7 +320,10 @@ mod tests {
     fn log_prob_gradient_matches_central_finite_differences_on_log_std() {
         let p = policy();
         let obs = [1.0, 0.0];
-        let trace = p.mean_net.forward_with_trace(&obs);
+        let trace = p
+            .mean_net
+            .forward_with_trace(&obs)
+            .expect("input width matches the net");
         let action = [0.3];
         let (_, d_log_std) = p.log_prob_gradient(&trace, &action, 1.0);
 

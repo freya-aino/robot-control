@@ -26,6 +26,9 @@ pub enum FilterError {
     },
     /// The innovation covariance was singular and could not be inverted.
     SingularInnovationCovariance,
+    /// A propagation step's `dt` was non-positive or non-finite, which
+    /// would corrupt the discretized process-noise scaling.
+    InvalidStep,
     /// An underlying linear-algebra operation failed.
     Linalg(LinalgError),
 }
@@ -43,6 +46,9 @@ impl fmt::Display for FilterError {
                     f,
                     "innovation covariance is singular; measurement update refused"
                 )
+            }
+            Self::InvalidStep => {
+                write!(f, "propagation step dt must be positive and finite")
             }
             Self::Linalg(e) => write!(f, "{e}"),
         }

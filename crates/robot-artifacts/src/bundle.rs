@@ -807,8 +807,17 @@ pub fn from_toml(text: &str) -> Result<PolicyBundleManifest> {
             "negative normalizer_count".to_owned(),
         ));
     }
+    let schema_version = version_of(root.require_str("schema_version")?, "schema_version")?;
+    // A future-schema bundle is refused by name, as the run-manifest reader
+    // already does, rather than misread.
+    if !robot_types::bundle::BUNDLE_SCHEMA_VERSION.can_read(schema_version) {
+        return Err(BundleFileError::Unsupported(format!(
+            "schema_version {schema_version} (this reader is {})",
+            robot_types::bundle::BUNDLE_SCHEMA_VERSION
+        )));
+    }
     Ok(PolicyBundleManifest {
-        schema_version: version_of(root.require_str("schema_version")?, "schema_version")?,
+        schema_version,
         bundle_id: root.require_str("bundle_id")?.to_owned(),
         observation,
         normalizer_mean: float_list(&root, "normalizer_mean")?,

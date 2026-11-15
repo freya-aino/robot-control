@@ -215,8 +215,14 @@ impl Store {
                     None => Vec::new(),
                     Some(Value::Array(a)) => a
                         .iter()
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect(),
+                        .map(|v| {
+                            // A silently dropped non-string entry would hide
+                            // an edge from the transitive staleness sweep.
+                            v.as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| e("depends_on holds a non-string"))
+                        })
+                        .collect::<Result<_, _>>()?,
                     Some(_) => return Err(e("depends_on must be an array")),
                 },
             });

@@ -103,10 +103,16 @@ impl ExpertCache {
     }
 
     /// Admits a validated expert (re-checking memory, which may have
-    /// changed since the worker validated it).
+    /// changed since the worker validated it). The same skill's old entry
+    /// is retired first, so replacing a resident expert is budgeted as the
+    /// swap it is, not as both generations at once.
     pub fn admit(&mut self, a: &ExpertArtifact) -> Result<(), StageError> {
-        self.validate(a)?;
+        let old = self.resident.clone();
         self.resident.retain(|(s, _)| *s != a.skill);
+        if let Err(e) = self.validate(a) {
+            self.resident = old;
+            return Err(e);
+        }
         self.resident.push((a.skill, a.memory_bytes));
         Ok(())
     }

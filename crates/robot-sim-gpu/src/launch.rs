@@ -527,7 +527,12 @@ pub(crate) mod backend {
                 } else {
                     -timeconst / f32::max(d1 * d1, 1.0e-15f32)
                 };
-                let damp = if dr > 0.0f32 {
+                // Both branches select on the time constant's sign, matching
+                // the CPU reference (`stiffness_damping`): selecting the
+                // damping branch on `dr`'s sign instead is exactly the
+                // pre-M-13 defect, masked today by the host wrapper's
+                // mixed-format rejection but one refactor from diverging.
+                let damp = if timeconst > 0.0f32 {
                     2.0f32 / f32::max(d1 * timeconst, 1.0e-15f32)
                 } else {
                     -dr / f32::max(d1, 1.0e-15f32)

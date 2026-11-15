@@ -15,7 +15,6 @@
 use super::{EXIT_FAILURE, EXIT_USAGE};
 use robot_artifacts::bundle::read_bundle;
 use robot_model::fixtures;
-use robot_model::joint::JointKind;
 use robot_model::profile::RobotProfile;
 use robot_skills::catalog::Catalog;
 use robot_skills::manifest::read_manifest;
@@ -110,12 +109,9 @@ pub fn skills(args: &[String]) -> i32 {
 }
 
 fn host_envelope(profile: &RobotProfile) -> HostEnvelope {
-    let actuated = profile.joints.iter().filter(|j| {
-        matches!(
-            j.kind,
-            JointKind::Revolute | JointKind::Continuous | JointKind::Prismatic
-        )
-    });
+    // The profile's own definition of "actuated", so the envelope's width
+    // can never disagree with the supervisor's.
+    let actuated = profile.actuated_joints();
     let mut position = Vec::new();
     let mut velocity = Vec::new();
     let mut torque = Vec::new();
@@ -274,7 +270,7 @@ mod tests {
             outgoing_transitions: vec![],
         };
         let path = dir.join("skills.toml");
-        std::fs::write(&path, write_manifest(&[d])).unwrap();
+        std::fs::write(&path, write_manifest(&[d]).unwrap()).unwrap();
         let p = path.display().to_string();
         let a = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         assert_eq!(skills(&a(&["list", "--manifest", &p])), 0);

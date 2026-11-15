@@ -397,26 +397,28 @@ impl Mlp {
     /// Allocates: this is an offline/training-time path, not the
     /// deadline-critical one, and §5's no-allocation rule applies to the
     /// control path, not to training.
-    #[must_use]
-    pub fn forward_with_trace(&self, input: &[f64]) -> ForwardTrace {
+    ///
+    /// # Errors
+    ///
+    /// Rejects an input whose width does not match the first layer; the
+    /// construction validates the chain, not the caller's input.
+    pub fn forward_with_trace(&self, input: &[f64]) -> Result<ForwardTrace, LayerError> {
         let mut pre_activations = Vec::with_capacity(self.layers.len());
         let mut post_activations = Vec::with_capacity(self.layers.len());
         let mut current = input.to_vec();
         for (layer, activation) in self.layers.iter().zip(&self.activations) {
             let mut z = vec![0.0; layer.out_features()];
-            layer
-                .forward(&current, &mut z)
-                .expect("widths validated at construction");
+            layer.forward(&current, &mut z)?;
             let a: Vec<f64> = z.iter().map(|v| activation.apply(*v)).collect();
             pre_activations.push(z);
             post_activations.push(a.clone());
             current = a;
         }
-        ForwardTrace {
+        Ok(ForwardTrace {
             input: input.to_vec(),
             pre_activations,
             post_activations,
-        }
+        })
     }
 }
 
@@ -598,7 +600,13 @@ mod tests {
     #[test]
     fn trace_output_matches_direct_forward() {
         let net = two_layer_net();
-        let trace = net.forward_with_trace(&[0.5, -0.25]);
+        let trace = net
+            .forward_with_trace(&[0.5, -0.25])
+            .expect("input width matches the net");
+        assert!(
+            net.forward_with_trace(&[0.5]).is_err(),
+            "wrong width errors"
+        );
         let mut scratch = Scratch::new(net.scratch_len());
         let mut out = [0.0; 1];
         net.forward(&[0.5, -0.25], &mut out, &mut scratch).unwrap();

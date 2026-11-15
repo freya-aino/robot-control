@@ -167,7 +167,9 @@ mod tests {
     /// Computes the scalar loss `L = 0.5 * output[0]^2` and its gradient via
     /// this module's `backward`, for a one-dimensional output.
     fn loss_and_grad(mlp: &Mlp, input: &[f64]) -> (f64, Gradients) {
-        let trace = mlp.forward_with_trace(input);
+        let trace = mlp
+            .forward_with_trace(input)
+            .expect("input width matches the net");
         let output = trace.output()[0];
         let loss = 0.5 * output * output;
         let (grads, _) = backward(mlp, &trace, &[output]);
@@ -232,15 +234,21 @@ mod tests {
         for i in 0..2 {
             let mut plus = base_input;
             plus[i] += eps;
-            let trace_plus = mlp.forward_with_trace(&plus);
+            let trace_plus = mlp
+                .forward_with_trace(&plus)
+                .expect("input width matches the net");
             let loss_plus = 0.5 * trace_plus.output()[0].powi(2);
 
             let mut minus = base_input;
             minus[i] -= eps;
-            let trace_minus = mlp.forward_with_trace(&minus);
+            let trace_minus = mlp
+                .forward_with_trace(&minus)
+                .expect("input width matches the net");
             let loss_minus = 0.5 * trace_minus.output()[0].powi(2);
 
-            let trace = mlp.forward_with_trace(&base_input);
+            let trace = mlp
+                .forward_with_trace(&base_input)
+                .expect("input width matches the net");
             let (_, d_input) = backward(&mlp, &trace, &[trace.output()[0]]);
             let numeric = (loss_plus - loss_minus) / (2.0 * eps);
             assert!(
@@ -255,7 +263,9 @@ mod tests {
     fn backward_trace_matches_plain_forward() {
         let mlp = net();
         let input = [0.1, 0.2];
-        let trace = mlp.forward_with_trace(&input);
+        let trace = mlp
+            .forward_with_trace(&input)
+            .expect("input width matches the net");
         let mut scratch = Scratch::new(mlp.scratch_len());
         let mut out = [0.0];
         mlp.forward(&input, &mut out, &mut scratch).unwrap();
@@ -267,16 +277,22 @@ mod tests {
         let mlp = net();
         let mut total = Gradients::zeros_like(&mlp);
         for input in [[0.1, 0.2], [0.3, -0.1]] {
-            let trace = mlp.forward_with_trace(&input);
+            let trace = mlp
+                .forward_with_trace(&input)
+                .expect("input width matches the net");
             let (g, _) = backward(&mlp, &trace, &[1.0]);
             total.add_assign(&g);
         }
         total.scale(0.5);
         // Spot check: the averaged bias gradient for the last layer should
         // equal the mean of the two individual bias gradients.
-        let trace0 = mlp.forward_with_trace(&[0.1, 0.2]);
+        let trace0 = mlp
+            .forward_with_trace(&[0.1, 0.2])
+            .expect("input width matches the net");
         let (g0, _) = backward(&mlp, &trace0, &[1.0]);
-        let trace1 = mlp.forward_with_trace(&[0.3, -0.1]);
+        let trace1 = mlp
+            .forward_with_trace(&[0.3, -0.1])
+            .expect("input width matches the net");
         let (g1, _) = backward(&mlp, &trace1, &[1.0]);
         let expected = (g0.bias[1][0] + g1.bias[1][0]) / 2.0;
         assert!((total.bias[1][0] - expected).abs() < 1e-12);

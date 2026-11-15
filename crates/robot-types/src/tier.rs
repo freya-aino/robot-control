@@ -194,6 +194,12 @@ pub enum TierError {
         /// The component.
         component: String,
     },
+    /// A component declared more than one tier assignment; which one
+    /// governs would depend on declaration order.
+    DuplicateComponent {
+        /// The component.
+        component: String,
+    },
     /// Tier rates were not non-increasing with height.
     RateIncreasesWithHeight {
         /// The lower tier.
@@ -261,6 +267,12 @@ pub enum TierError {
 impl fmt::Display for TierError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateComponent { component } => {
+                write!(
+                    f,
+                    "component {component:?} declares more than one tier assignment"
+                )
+            }
             Self::NoDeclaredTier { component } => {
                 write!(
                     f,
@@ -405,8 +417,18 @@ impl TierSchedule {
     /// `policy_rate` is the rate the deployed policy tier must meet or exceed,
     /// taken from the robot's acceptance profile rather than assumed.
     pub fn validate(&self, policy_rate: Hertz) -> Result<(), TierError> {
-        for a in &self.assignments {
+        for (i, a) in self.assignments.iter().enumerate() {
             a.validate()?;
+            // Two assignments for one component would make the governing
+            // tier depend on declaration order; refused instead.
+            if self.assignments[..i]
+                .iter()
+                .any(|b| b.component == a.component)
+            {
+                return Err(TierError::DuplicateComponent {
+                    component: a.component.clone(),
+                });
+            }
         }
 
         // Item 2: rates are non-increasing with height. Compare the slowest

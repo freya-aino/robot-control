@@ -328,16 +328,49 @@ fn base_tracking(ctx: &HumanoidContext<'_>) -> f64 {
     )
 }
 
+/// Why a tracking reference was rejected at construction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReferenceError {
+    /// The reference holds no frames; every per-step lookup would index
+    /// out of bounds.
+    Empty,
+    /// `times`, `joints` and `base` differ in length.
+    LengthMismatch,
+}
+
+impl core::fmt::Display for ReferenceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "tracking reference is empty"),
+            Self::LengthMismatch => {
+                write!(f, "tracking reference arrays differ in length")
+            }
+        }
+    }
+}
+
+impl core::error::Error for ReferenceError {}
+
 impl TrackingTask {
     /// A tracking task over a reference.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty reference and mismatched array lengths, which
+    /// would otherwise index out of bounds on the first step.
     pub fn new(
         times: Vec<f64>,
         joints: Vec<Vec<f64>>,
         base: Vec<Vec3>,
         limits: FallLimits,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ReferenceError> {
+        if times.is_empty() {
+            return Err(ReferenceError::Empty);
+        }
+        if times.len() != joints.len() || times.len() != base.len() {
+            return Err(ReferenceError::LengthMismatch);
+        }
+        Ok(Self {
             times,
             joints,
             base,
@@ -361,7 +394,7 @@ impl TrackingTask {
                     compute: upright,
                 },
             ]),
-        }
+        })
     }
 
     /// The reference linearly interpolated at `t`.
@@ -927,13 +960,26 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_or_ragged_tracking_reference_is_refused_at_construction() {
+        assert_eq!(
+            TrackingTask::new(Vec::new(), Vec::new(), Vec::new(), limits()).err(),
+            Some(ReferenceError::Empty)
+        );
+        assert_eq!(
+            TrackingTask::new(vec![0.0], Vec::new(), vec![Vec3::ZERO], limits()).err(),
+            Some(ReferenceError::LengthMismatch)
+        );
+    }
+
+    #[test]
     fn tracking_interpolates_and_terminates_when_lost() {
         let t = TrackingTask::new(
             vec![0.0, 1.0],
             vec![vec![0.0], vec![1.0]],
             vec![Vec3::new(0.0, 0.0, 0.75), Vec3::new(1.0, 0.0, 0.75)],
             limits(),
-        );
+        )
+        .expect("a valid two-frame reference");
         let (q, b) = t.reference(0.25);
         assert!((q[0] - 0.25).abs() < 1e-12 && (b.x - 0.25).abs() < 1e-12);
         let mut s = standing(1);

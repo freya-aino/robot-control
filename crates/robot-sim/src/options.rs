@@ -249,6 +249,11 @@ impl SimOptions {
             && self.limit_margin >= 0.0
             && self.ccd.is_valid()
             && self.solref.iter().all(|v| v.is_finite())
+            // Mixed solref formats (one positive time-constant entry, one
+            // negative direct-stiffness entry) are refused by name in
+            // `constraint::effective_timeconst`; the same input must not be
+            // silently reinterpreted on this path.
+            && (self.solref[0] > 0.0) == (self.solref[1] > 0.0)
             && self.solimp.iter().all(|v| v.is_finite())
             && self.contact_slots.is_none_or(|n| n > 0)
     }

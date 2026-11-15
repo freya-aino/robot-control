@@ -151,10 +151,9 @@ impl AttitudeFilter {
     /// discretized process-noise scaling.
     pub fn propagate(&mut self, gyro_measurement: Vec3, dt: Duration) -> Result<(), FilterError> {
         let dt_s = dt.as_secs_f64();
-        debug_assert!(
-            dt_s > 0.0 && dt_s.is_finite(),
-            "propagate requires a positive finite dt"
-        );
+        if !(dt_s > 0.0 && dt_s.is_finite()) {
+            return Err(FilterError::InvalidStep);
+        }
 
         let omega_hat = gyro_measurement - self.bias;
         // Nominal propagation: integrate the quaternion by the bias-corrected
