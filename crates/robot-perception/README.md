@@ -44,14 +44,22 @@ own doc comment.
 ## Where this estimator stops
 
 The accelerometer correction gates on specific-force *magnitude* as a proxy
-for "the body is approximately static," not on ground contact. SPECS.md
-§11.2 asks the module to specify its contact assumption explicitly, and the
-explicit answer here is: this filter does not use one. `ContactClassifier`
-exists and is tested, but wiring its output into the attitude filter's gate
-(a strictly better assumption for a legged robot standing on one foot vs.
-airborne) is future work for whichever crate integrates a specific robot
-profile — most likely `robot-control`, once a reference embodiment is
-chosen (C-02).
+for "the body is approximately static," and now also on an explicit,
+robot-independent contact condition. SPECS.md §11.2 asks the module to
+specify its contact assumption; the answer is `ContactSupport`:
+`correct_with_accelerometer_in_contact` refuses the update outright for an
+`Airborne` body (a ballistic body's specific force carries no attitude
+information, and a swing-phase reading can pass the magnitude band while
+the body genuinely accelerates — exactly the sample the proxy wrongly
+admits; the test constructs one and shows contact knowledge refusing it),
+passes `Supported` and `Unknown` through to the magnitude and Mahalanobis
+gates unchanged, and reports the decision in `CorrectionReport`.
+`ContactSupport::from_confidences` derives the condition conservatively
+from `ContactClassifier` outputs: one confident contact is support,
+airborne needs *every* site confidently off, and an uncertain sensor
+degrades to `Unknown` rather than asserting flight. Which sites make up
+"support" on a particular robot stays the integrating crate's knowledge
+(C-02); this filter only consumes the condition.
 
 ## Qualification against synthetic truth
 
@@ -73,7 +81,7 @@ and against the same errors with an overconfident one.
 
 ## Testing
 
-`cargo test -p robot-perception`: 25 tests. The original 15 cover the Kalman filter checked
+`cargo test -p robot-perception`: 27 tests, including the airborne refusal of a misleading at-gravity reading and the conservative `ContactSupport` derivation. The original 15 cover the Kalman filter checked
 against analytic constant-velocity tracking, covariance collapse under a
 near-perfect sensor, Mahalanobis-gate outlier rejection, and Joseph-form
 positive-semidefiniteness after 200 updates (via eigenvalue check); the

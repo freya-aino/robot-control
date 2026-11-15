@@ -83,11 +83,76 @@ pub struct AttitudeFilter {
     gravity: GravityConvention,
 }
 
+/// The contact condition a caller supplies to the accelerometer gate —
+/// SPECS.md Section 11.2's "contact assumptions", as an explicit input
+/// rather than an assumption this filter makes on its own.
+///
+/// Robot-independent by construction: it says what the caller knows about
+/// support, not which feet a particular robot has.
+/// [`ContactSupport::from_confidences`] derives it from
+/// [`crate::contact::ContactClassifier`] outputs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ContactSupport {
+    /// At least one contact is confidently load-bearing: the
+    /// quasi-static assumption behind an accelerometer attitude update is
+    /// as good as it gets, and the magnitude and Mahalanobis gates decide.
+    Supported,
+    /// Every contact is confidently off: the body is ballistic. In free
+    /// fall the specific force carries **no attitude information at all**
+    /// (it reads near zero), and during a swing or jump a reading can pass
+    /// the magnitude band while the body genuinely accelerates — exactly
+    /// the sample the magnitude proxy wrongly admits. The accelerometer
+    /// update is refused outright.
+    Airborne,
+    /// No contact information. The magnitude proxy alone decides, which is
+    /// the filter's original dependency-free behaviour and the default.
+    #[default]
+    Unknown,
+}
+
+impl ContactSupport {
+    /// Derives the support state from per-site contact confidences
+    /// (`ContactClassifier::update`'s `(in_contact, confidence)` pairs).
+    ///
+    /// Any site confidently in contact (`in_contact` with confidence at
+    /// least `threshold`) is support. Airborne needs *every* site
+    /// confidently out of contact — an uncertain sensor must degrade to
+    /// [`Self::Unknown`], never assert flight. No sites at all is
+    /// `Unknown`, because "no sensors" is not "no contact".
+    #[must_use]
+    pub fn from_confidences<I>(sites: I, threshold: f64) -> Self
+    where
+        I: IntoIterator<Item = (bool, f64)>,
+    {
+        let mut saw_any = false;
+        let mut all_confidently_off = true;
+        for (in_contact, confidence) in sites {
+            saw_any = true;
+            if in_contact {
+                if confidence >= threshold {
+                    return Self::Supported;
+                }
+                all_confidently_off = false;
+            } else if confidence < threshold {
+                all_confidently_off = false;
+            }
+        }
+        if saw_any && all_confidently_off {
+            Self::Airborne
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
 /// A consistency report over one correction, for the qualification suite
 /// SPECS.md Section 11.2 asks for ("Compare observable-state error and
 /// covariance consistency against analytic or synthetic truth").
 #[derive(Clone, Copy, Debug)]
 pub struct CorrectionReport {
+    /// Whether the contact condition admitted the sample ([`ContactSupport::Airborne`]
+    /// refuses it before anything else runs; `Supported` and `Unknown` admit).
+    pub contact_admitted: bool,
     /// Whether the magnitude check admitted the sample at all.
     pub magnitude_admitted: bool,
     /// Whether the Mahalanobis gate admitted it (only meaningful if
@@ -186,7 +251,8 @@ impl AttitudeFilter {
     }
 
     /// Corrects the filter using a raw (non-unit) accelerometer reading,
-    /// interpreted as specific force in the body frame.
+    /// interpreted as specific force in the body frame, with no contact
+    /// information ([`ContactSupport::Unknown`]).
     ///
     /// Returns a report describing whether, and why, the correction was or
     /// was not applied.
@@ -194,12 +260,39 @@ impl AttitudeFilter {
         &mut self,
         specific_force: Vec3,
     ) -> Result<CorrectionReport, FilterError> {
+        self.correct_with_accelerometer_in_contact(specific_force, ContactSupport::Unknown)
+    }
+
+    /// [`Self::correct_with_accelerometer`] conditioned on the caller's
+    /// contact knowledge: [`ContactSupport::Airborne`] refuses the update
+    /// outright (a ballistic body's specific force says nothing about its
+    /// attitude), the other states fall through to the magnitude and
+    /// Mahalanobis gates unchanged.
+    ///
+    /// This is the contact-conditioned gating the README previously named
+    /// as future work, as a robot-independent hook: which sites make up
+    /// "support" stays the caller's knowledge, this filter only consumes
+    /// the resulting [`ContactSupport`].
+    pub fn correct_with_accelerometer_in_contact(
+        &mut self,
+        specific_force: Vec3,
+        support: ContactSupport,
+    ) -> Result<CorrectionReport, FilterError> {
+        if support == ContactSupport::Airborne {
+            return Ok(CorrectionReport {
+                contact_admitted: false,
+                magnitude_admitted: false,
+                gate_admitted: false,
+                mahalanobis_squared: None,
+            });
+        }
         let magnitude = specific_force.norm();
         let g = self.gravity.magnitude;
         if !magnitude.is_finite()
             || (magnitude - g).abs() > self.config.max_specific_force_deviation * g
         {
             return Ok(CorrectionReport {
+                contact_admitted: true,
                 magnitude_admitted: false,
                 gate_admitted: false,
                 mahalanobis_squared: None,
@@ -207,6 +300,7 @@ impl AttitudeFilter {
         }
         let Some(measured_up) = specific_force.normalized(1e-9) else {
             return Ok(CorrectionReport {
+                contact_admitted: true,
                 magnitude_admitted: false,
                 gate_admitted: false,
                 mahalanobis_squared: None,
@@ -228,6 +322,7 @@ impl AttitudeFilter {
 
         if d2 > self.config.mahalanobis_gate {
             return Ok(CorrectionReport {
+                contact_admitted: true,
                 magnitude_admitted: true,
                 gate_admitted: false,
                 mahalanobis_squared: Some(d2),
@@ -237,6 +332,7 @@ impl AttitudeFilter {
         self.kf.apply_update(&h, &r, &y, &s)?;
         self.inject_and_reset()?;
         Ok(CorrectionReport {
+            contact_admitted: true,
             magnitude_admitted: true,
             gate_admitted: true,
             mahalanobis_squared: Some(d2),
@@ -431,5 +527,64 @@ mod tests {
             filter.propagate(Vec3::new(0.0, 0.0, 0.5), dt).unwrap();
         }
         assert!(filter.attitude().angle_to(Quat::IDENTITY).value() < 1e-6);
+    }
+
+    #[test]
+    fn an_airborne_body_gets_no_accelerometer_update_even_at_gravity_magnitude() {
+        // The sample the magnitude proxy wrongly admits: a swing-phase
+        // reading at exactly |g| while the body genuinely accelerates.
+        // Contact knowledge is what refuses it.
+        let gravity = GravityConvention::minus_z_standard(FrameId::WORLD);
+        let mut filter = AttitudeFilter::new(
+            Quat::IDENTITY,
+            gravity,
+            AttitudeFilterConfig::default(),
+            0.1,
+            0.01,
+        )
+        .unwrap();
+        let before = filter.attitude();
+        // A tilted at-gravity reading that the plain gates would accept.
+        let misleading = Vec3::new(2.0, 0.0, 9.6);
+        let misleading = misleading.normalized(1e-12).unwrap() * gravity.magnitude;
+        let report = filter
+            .correct_with_accelerometer_in_contact(misleading, ContactSupport::Airborne)
+            .unwrap();
+        assert!(!report.contact_admitted);
+        assert!(!report.magnitude_admitted && !report.gate_admitted);
+        assert_eq!(
+            filter.attitude(),
+            before,
+            "an airborne update must not move the state"
+        );
+        // The same reading under support is admitted by the earlier gates.
+        let admitted = filter
+            .correct_with_accelerometer_in_contact(misleading, ContactSupport::Supported)
+            .unwrap();
+        assert!(admitted.contact_admitted && admitted.magnitude_admitted);
+    }
+
+    #[test]
+    fn contact_support_is_derived_conservatively_from_confidences() {
+        use super::ContactSupport as S;
+        // One confident stance foot is support, whatever the other reads.
+        assert_eq!(
+            S::from_confidences([(true, 0.9), (false, 0.9)], 0.5),
+            S::Supported
+        );
+        // Airborne needs every site confidently off.
+        assert_eq!(
+            S::from_confidences([(false, 0.9), (false, 0.8)], 0.5),
+            S::Airborne
+        );
+        // An uncertain sensor degrades to Unknown, never asserts flight.
+        assert_eq!(
+            S::from_confidences([(false, 0.9), (false, 0.2)], 0.5),
+            S::Unknown
+        );
+        // A tentative contact (in contact, low confidence) is Unknown too.
+        assert_eq!(S::from_confidences([(true, 0.1)], 0.5), S::Unknown);
+        // No sensors is not "no contact".
+        assert_eq!(S::from_confidences([], 0.5), S::Unknown);
     }
 }
