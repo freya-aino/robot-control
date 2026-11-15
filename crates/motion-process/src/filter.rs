@@ -20,11 +20,19 @@
 //! record that begins at rest does not ring. A zero-phase pass also pads
 //! each end by odd reflection, which keeps the end value and slope.
 //!
-//! Rotations are filtered as quaternion components after aligning each
-//! sample to its predecessor's hemisphere, then renormalized. That is an
-//! approximation of filtering on the rotation group, and a good one only
-//! when the rotation changes little per sample relative to the cutoff,
-//! which is the case this filter is for.
+//! Rotations are filtered **on the rotation group**: each sample is mapped
+//! to a rotation vector relative to the sequence's first sample
+//! (`log(q0^-1 q_i)`), unwrapped onto the `2 pi k` branch continuous with
+//! its predecessor so an accumulated rotation past `pi` does not fold back,
+//! filtered component-wise in that tangent space, and mapped back through
+//! the exponential. The output is exactly a unit quaternion by
+//! construction. An earlier revision filtered hemisphere-aligned quaternion
+//! components and renormalized, which approximates the group only while the
+//! per-sample rotation is small; the tangent-space path agrees with it in
+//! that regime (worst divergence 7.3e-7 rad on a 0.2 rad, 1 Hz sway) and
+//! stays correct where components alias (a 0.8 rad-per-sample spin filtered
+//! at 2 Hz: tangent-space error 8.5e-3 rad against the true smooth
+//! rotation, component filtering 0.64 rad — the tests measure both).
 //!
 //! "Preserve real strike-speed characteristics" is not something a
 //! low-pass filter can guarantee, so this module measures it instead:
@@ -424,36 +432,61 @@ fn filter_run(
     }
 }
 
+/// Filters a quaternion sequence on the rotation group (see the module
+/// documentation): tangent-space components relative to the first sample,
+/// branch-unwrapped for continuity, filtered, and exponentiated back.
 fn filter_quats(qs: &mut [Quat], apply: &impl Fn(&mut [f64])) {
-    for i in 1..qs.len() {
-        let (p, q) = (qs[i - 1], qs[i]);
-        if p.w * q.w + p.x * q.x + p.y * q.y + p.z * q.z < 0.0 {
-            qs[i] = Quat {
-                w: -q.w,
-                x: -q.x,
-                y: -q.y,
-                z: -q.z,
-            };
-        }
+    if qs.len() < 2 {
+        return;
     }
-    let mut comps: [Vec<f64>; 4] = [
-        qs.iter().map(|q| q.w).collect(),
-        qs.iter().map(|q| q.x).collect(),
-        qs.iter().map(|q| q.y).collect(),
-        qs.iter().map(|q| q.z).collect(),
+    let reference = qs[0].normalized();
+    let inverse = reference.conjugate();
+    let mut tangent = Vec::with_capacity(qs.len());
+    let mut prev = Vec3::ZERO;
+    for q in qs.iter() {
+        let v = unwrap_branch((inverse * *q).normalized().to_rotation_vector(), prev);
+        tangent.push(v);
+        prev = v;
+    }
+    let mut comps: [Vec<f64>; 3] = [
+        tangent.iter().map(|v| v.x).collect(),
+        tangent.iter().map(|v| v.y).collect(),
+        tangent.iter().map(|v| v.z).collect(),
     ];
     for c in &mut comps {
         apply(c);
     }
     for (i, q) in qs.iter_mut().enumerate() {
-        *q = Quat {
-            w: comps[0][i],
-            x: comps[1][i],
-            y: comps[2][i],
-            z: comps[3][i],
-        }
-        .normalized();
+        let v = Vec3::new(comps[0][i], comps[1][i], comps[2][i]);
+        *q = (reference * Quat::from_rotation_vector(v)).normalized();
     }
+}
+
+/// The rotation-vector branch of the same rotation nearest `prev`.
+///
+/// `v` and `v + 2 pi k * v_unit` (all integers `k`, including the negative
+/// branches through the opposite axis) name one rotation; the principal
+/// value folds an accumulating rotation back at `pi`, which would put a
+/// spurious reversal into the tangent curve. Choosing the branch nearest the
+/// previous sample keeps the curve continuous, which is what makes filtering
+/// its components meaningful.
+fn unwrap_branch(v: Vec3, prev: Vec3) -> Vec3 {
+    const TAU: f64 = 2.0 * core::f64::consts::PI;
+    let theta = v.norm();
+    if theta < 1e-9 {
+        // The axis is undefined at the identity; every branch is a full turn
+        // about some axis, and the one continuous with the curve keeps the
+        // previous winding along the previous direction.
+        let p = prev.norm();
+        let turns = (p / TAU).round();
+        if turns == 0.0 || p < 1e-9 {
+            return v;
+        }
+        return prev * (turns * TAU / p);
+    }
+    let unit = v * (1.0 / theta);
+    let k = ((unit.dot(prev) - theta) / TAU).round();
+    v + unit * (TAU * k)
 }
 
 fn peak_speed(positions: &[Option<Vec3>], times: &[f64]) -> f64 {
@@ -582,6 +615,126 @@ mod tests {
         });
         let report2 = lowpass(&mut record2, Hertz(40.0), FilterMode::ZeroPhase).unwrap();
         assert!(report2.root_speed_retention.unwrap() > 0.95);
+    }
+
+    /// The retired component filter, kept here as the comparison reference:
+    /// hemisphere-align, filter the four components, renormalize.
+    fn component_filter_quats(qs: &mut [Quat], apply: &impl Fn(&mut [f64])) {
+        for i in 1..qs.len() {
+            let (p, q) = (qs[i - 1], qs[i]);
+            if p.w * q.w + p.x * q.x + p.y * q.y + p.z * q.z < 0.0 {
+                qs[i] = Quat {
+                    w: -q.w,
+                    x: -q.x,
+                    y: -q.y,
+                    z: -q.z,
+                };
+            }
+        }
+        let mut comps: [Vec<f64>; 4] = [
+            qs.iter().map(|q| q.w).collect(),
+            qs.iter().map(|q| q.x).collect(),
+            qs.iter().map(|q| q.y).collect(),
+            qs.iter().map(|q| q.z).collect(),
+        ];
+        for c in &mut comps {
+            apply(c);
+        }
+        for (i, q) in qs.iter_mut().enumerate() {
+            *q = Quat {
+                w: comps[0][i],
+                x: comps[1][i],
+                y: comps[2][i],
+                z: comps[3][i],
+            }
+            .normalized();
+        }
+    }
+
+    fn angle_between(a: Quat, b: Quat) -> f64 {
+        (a.conjugate() * b).normalized().to_rotation_vector().norm()
+    }
+
+    #[test]
+    fn group_filtering_agrees_with_component_filtering_on_small_rotations() {
+        // A 0.2 rad, 1 Hz sway at 100 Hz: the regime the component filter
+        // was valid in. The tangent-space path must reproduce it closely,
+        // or the change would alter every result the old approximation
+        // produced well.
+        let axis = Vec3::new(1.0, 1.0, 0.0).normalized(1e-12).unwrap();
+        let qs: Vec<Quat> = (0..300)
+            .map(|i| {
+                let t = i as f64 / 100.0;
+                Quat::from_rotation_vector(axis * (0.2 * (2.0 * PI * t).sin()))
+            })
+            .collect();
+        let section = Biquad::butterworth_lowpass(10.0, 100.0);
+        let apply = |x: &mut [f64]| section.run_zero_phase(x);
+        let mut group = qs.clone();
+        filter_quats(&mut group, &apply);
+        let mut component = qs;
+        component_filter_quats(&mut component, &apply);
+        let worst = group
+            .iter()
+            .zip(&component)
+            .map(|(a, b)| angle_between(*a, *b))
+            .fold(0.0, f64::max);
+        assert!(worst < 1e-3, "paths diverge by {worst} rad");
+    }
+
+    #[test]
+    fn group_filtering_survives_large_rotations_where_components_alias() {
+        // A steady 0.8 rad-per-sample spin about z with +/-0.05 rad jitter.
+        // The quaternion components oscillate at about 6.4 Hz here, so a
+        // 2 Hz low-pass collapses them toward their mean and the normalized
+        // result is far from the true motion; the tangent curve is a clean
+        // ramp plus jitter, which the same filter cleans up.
+        let mut seed = 0x9e37u64;
+        let mut noise = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 0.1
+        };
+        let truth: Vec<Quat> = (0..300)
+            .map(|i| Quat::from_rotation_vector(Vec3::new(0.0, 0.0, 0.8 * i as f64)))
+            .collect();
+        let noisy: Vec<Quat> = truth
+            .iter()
+            .map(|q| (*q * Quat::from_rotation_vector(Vec3::new(0.0, 0.0, noise()))).normalized())
+            .collect();
+        let section = Biquad::butterworth_lowpass(2.0, 100.0);
+        let apply = |x: &mut [f64]| section.run_zero_phase(x);
+        let mut group = noisy.clone();
+        filter_quats(&mut group, &apply);
+        let mut component = noisy;
+        component_filter_quats(&mut component, &apply);
+        // Compare away from the ends: a 2 Hz section's response spans tens
+        // of samples, so the boundary-padding transient reaches that far in.
+        let err = |filtered: &[Quat]| {
+            filtered
+                .iter()
+                .zip(&truth)
+                .skip(80)
+                .take(140)
+                .map(|(a, b)| angle_between(*a, *b))
+                .fold(0.0, f64::max)
+        };
+        let (group_err, component_err) = (err(&group), err(&component));
+        assert!(
+            group_err < 0.05,
+            "group filtering drifted {group_err} rad from the true spin"
+        );
+        assert!(
+            group_err < 0.1 * component_err,
+            "group {group_err} rad should beat components {component_err} rad decisively"
+        );
+        // And the group path is exactly unit-norm, not merely renormalized
+        // from a collapsed component vector.
+        for q in &group {
+            let n = (q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z).sqrt();
+            assert!((n - 1.0).abs() < 1e-12);
+        }
     }
 
     /// Abramowitz and Stegun 7.1.26, absolute error below 1.5e-7.

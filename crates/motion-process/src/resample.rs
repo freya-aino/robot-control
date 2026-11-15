@@ -182,6 +182,54 @@ impl fmt::Display for AntiAliasError {
 
 impl core::error::Error for AntiAliasError {}
 
+/// [`lowpass`] for a record that may be non-uniformly sampled, per SPECS.md
+/// Section 8.2 item 4: a uniform record is filtered as it stands, and a
+/// non-uniform one is first resampled to its own **median rate** through
+/// [`resample`] (interpolation, zero phase delay), so the caller no longer
+/// has to resample by hand before filtering. The returned record carries
+/// both provenance steps when resampling ran, and one when it did not.
+///
+/// The median rate is the resampling target because it changes the typical
+/// frame not at all and reconciles only the jittered ones; a caller wanting
+/// a different rate resamples explicitly, exactly as before.
+///
+/// # Errors
+///
+/// Only what the resampler and the filter themselves refuse, by name:
+/// [`ResampleError`] for a record the resampler rejects, [`FilterError`] for
+/// a cutoff the (now uniform) record cannot support or a record too short to
+/// filter.
+pub fn lowpass_resampled<K: MotionKind>(
+    record: &MotionRecord<K>,
+    cutoff: Hertz,
+    mode: FilterMode,
+) -> Result<(MotionRecord<K>, FilterReport), AntiAliasError> {
+    let mut out = match uniform_rate(record) {
+        Ok(_) => record.clone(),
+        Err(FilterError::NonUniformSampling { .. }) => {
+            let intervals: Vec<i64> = record
+                .frames
+                .windows(2)
+                .map(|w| w[1].timestamp.nanos() - w[0].timestamp.nanos())
+                .collect();
+            let mut sorted = intervals;
+            sorted.sort_unstable();
+            let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0);
+            if median <= 0 {
+                // Out-of-order or coincident timestamps: no rate describes
+                // this record, and the resampler's own refusal names it.
+                return Err(AntiAliasError::Resample(ResampleError::InvalidRate {
+                    rate: Hertz(f64::INFINITY),
+                }));
+            }
+            resample(record, Hertz(1e9 / median as f64)).map_err(AntiAliasError::Resample)?
+        }
+        Err(e) => return Err(AntiAliasError::Filter(e)),
+    };
+    let report = lowpass(&mut out, cutoff, mode).map_err(AntiAliasError::Filter)?;
+    Ok((out, report))
+}
+
 fn interpolate_frame(
     a: &MotionFrame,
     b: &MotionFrame,
@@ -440,5 +488,91 @@ mod tests {
             .frames
             .iter()
             .all(|f| f.validity[0] != Validity::Valid));
+    }
+
+    /// A 2 s record at a nominal 100 Hz where every seventh interval
+    /// stretches to 15 ms — the dropped-frame shape real captures have.
+    /// The median interval stays 10 ms, so the median rate is the right
+    /// resampling target.
+    fn jittered_record() -> MotionRecord<HumanSkeleton> {
+        let channels = vec![Channel {
+            name: Name::new("joint").unwrap(),
+            parent: None,
+            offset: Default::default(),
+        }];
+        let mut t = 0i64;
+        let frames = (0..200)
+            .map(|i| {
+                let f = frame(t, Quat::IDENTITY);
+                t += if i % 7 == 6 { 15_000_000 } else { 10_000_000 };
+                f
+            })
+            .collect();
+        MotionRecord::new(
+            HumanSkeleton,
+            "sha256:abc",
+            license(),
+            "session",
+            "skeleton",
+            FrameId::WORLD,
+            ClockId::Source(0),
+            channels,
+            frames,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn lowpass_resampled_takes_the_non_uniform_record_the_filter_refuses() {
+        let source = jittered_record();
+        // The direct filter refuses this record by name...
+        assert!(matches!(
+            lowpass(&mut source.clone(), Hertz(10.0), FilterMode::ZeroPhase),
+            Err(FilterError::NonUniformSampling { .. })
+        ));
+        // ...and the resampling entry point takes it, producing a uniform
+        // record at the median rate with both provenance steps.
+        let (out, report) = lowpass_resampled(&source, Hertz(10.0), FilterMode::ZeroPhase).unwrap();
+        let rate = uniform_rate(&out).unwrap();
+        assert!((rate.value() - 100.0).abs() < 1.0, "{rate}");
+        assert_eq!(report.phase_delay, Duration::ZERO);
+        let steps: Vec<&str> = out
+            .provenance
+            .iter()
+            .map(|s| s.operation.as_str())
+            .collect();
+        assert!(
+            steps.contains(&"resample") && steps.contains(&"lowpass"),
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn lowpass_resampled_filters_a_uniform_record_without_resampling() {
+        let source = record_at(100.0);
+        let (out, _) = lowpass_resampled(&source, Hertz(10.0), FilterMode::ZeroPhase).unwrap();
+        let steps: Vec<&str> = out
+            .provenance
+            .iter()
+            .map(|s| s.operation.as_str())
+            .collect();
+        assert!(!steps.contains(&"resample"), "{steps:?}");
+        assert!(steps.contains(&"lowpass"));
+    }
+
+    #[test]
+    fn lowpass_resampled_passes_through_the_refusals_it_cannot_fix() {
+        // Too short for the filter and the resampler alike.
+        let mut short = record_at(100.0);
+        short.frames.truncate(1);
+        assert!(matches!(
+            lowpass_resampled(&short, Hertz(10.0), FilterMode::ZeroPhase),
+            Err(AntiAliasError::Filter(FilterError::TooShort))
+        ));
+        // A cutoff the uniform record cannot support.
+        assert!(matches!(
+            lowpass_resampled(&record_at(100.0), Hertz(60.0), FilterMode::ZeroPhase),
+            Err(AntiAliasError::Filter(FilterError::InvalidCutoff { .. }))
+        ));
     }
 }

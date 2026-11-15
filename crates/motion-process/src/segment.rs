@@ -14,7 +14,9 @@
 //!    `evasion_speed` (a slip or duck), or a hand closes on the head faster
 //!    than `block_speed` while within `guard_radius` of it (a block);
 //! 4. **locomotion**: the root's speed across the ground exceeds
-//!    `locomotion_speed`;
+//!    `locomotion_speed`, or two or more foot-contact changes (from the
+//!    labels the contact stage wrote) fall within `step_window` of the
+//!    frame — stepping in place travels nowhere but is not stance;
 //! 5. **stance**: none of the above.
 //!
 //! Runs of equal raw labels become segments. A segment shorter than its
@@ -191,6 +193,15 @@ pub struct SegmentConfig {
     pub guard_radius: f64,
     /// Root ground speed above which the subject is travelling, m/s.
     pub locomotion_speed: f64,
+    /// Window within which two or more foot-contact changes count as
+    /// stepping, labelling the frame locomotion even with the root still.
+    ///
+    /// The contact changes are read from the labels
+    /// [`crate::contact::estimate_contacts`] writes on the record's frames.
+    /// `Duration::ZERO` disables the rule, which is the prior behaviour —
+    /// and a record with no contact labels behaves as if disabled, so the
+    /// segmenter never requires the contact stage to have run.
+    pub step_window: Duration,
     /// Shortest strike, defense or recovery segment kept as such.
     pub min_action: Duration,
     /// Shortest stance or locomotion segment kept as such.
@@ -217,6 +228,7 @@ impl SegmentConfig {
         if self.min_action.nanos() < 0
             || self.min_posture.nanos() < 0
             || self.recovery_window.nanos() < 0
+            || self.step_window.nanos() < 0
         {
             return Err(SegmentError::InvalidConfig("durations"));
         }
@@ -299,6 +311,39 @@ pub fn raw_labels<K: MotionKind>(
         .collect();
 
     let n = record.frames.len();
+
+    // Foot-contact change times, read from the labels the contact stage
+    // wrote. Two or more changes within `step_window` of a frame mean the
+    // feet are alternating — stepping in place is locomotion even though
+    // the root goes nowhere, which is the gap this rule closes.
+    let step_window = config.step_window.as_secs_f64();
+    let stepping: Vec<bool> = if step_window > 0.0 {
+        let mut changes: Vec<f64> = Vec::new();
+        for (f, pair) in record.frames.windows(2).enumerate() {
+            for label in &pair[1].contacts {
+                let was = pair[0]
+                    .contacts
+                    .iter()
+                    .find(|c| c.site == label.site)
+                    .map(|c| c.in_contact);
+                if was.is_some_and(|w| w != label.in_contact) {
+                    changes.push(times[f + 1]);
+                }
+            }
+        }
+        (0..n)
+            .map(|f| {
+                changes
+                    .iter()
+                    .filter(|t| (**t - times[f]).abs() <= step_window)
+                    .count()
+                    >= 2
+            })
+            .collect()
+    } else {
+        vec![false; n]
+    };
+
     let window = config.recovery_window.as_secs_f64();
     let mut last_strike: Option<f64> = None;
     let mut labels = Vec::with_capacity(n);
@@ -338,7 +383,7 @@ pub fn raw_labels<K: MotionKind>(
             continue;
         }
         let ground_speed = root_vel[f].map_or(0.0, |v| (v - up * v.dot(up)).norm());
-        labels.push(if ground_speed > config.locomotion_speed {
+        labels.push(if ground_speed > config.locomotion_speed || stepping[f] {
             SegmentKind::Locomotion
         } else {
             SegmentKind::Stance
@@ -439,6 +484,7 @@ mod tests {
             block_speed: 1.5,
             guard_radius: 0.3,
             locomotion_speed: 0.4,
+            step_window: Duration::ZERO,
             min_action: Duration::from_millis(40),
             min_posture: Duration::from_millis(100),
         }
@@ -570,6 +616,78 @@ mod tests {
         let segments = segment(&mut r, body, &cfg).unwrap();
         assert!(segments.iter().all(|s| !s.kind.is_action()));
         assert!(segments.iter().any(|s| s.kind == SegmentKind::Transition));
+    }
+
+    /// A 3 s record at 100 Hz with the body perfectly still and the feet'
+    /// contact labels alternating at 2 Hz (left down while right up), the
+    /// motion a treadmill or in-place march produces.
+    fn stepping_in_place() -> MotionRecord<HumanSkeleton> {
+        let mut r = bout();
+        for (i, f) in r.frames.iter_mut().enumerate() {
+            let t = i as f64 / 100.0;
+            // Freeze the scripted bout's motion: only the contacts move.
+            f.root.translation = Vec3::new(0.0, 0.0, 1.0);
+            let head = Vec3::new(0.0, 0.0, 1.6);
+            let lh = Vec3::new(0.15, 0.15, 1.5);
+            let rh = Vec3::new(0.15, -0.15, 1.5);
+            for (ci, p) in [(1usize, head), (2, lh), (3, rh)] {
+                if let JointValue::Position { position } = &mut f.values[ci] {
+                    *position = p;
+                }
+            }
+            let phase = (t * 2.0) as i64 % 2 == 0;
+            f.contacts = vec![
+                robot_types::motion::ContactLabel {
+                    site: robot_types::ids::ContactSiteId::new(0),
+                    in_contact: phase,
+                    confidence: 0.9,
+                },
+                robot_types::motion::ContactLabel {
+                    site: robot_types::ids::ContactSiteId::new(1),
+                    in_contact: !phase,
+                    confidence: 0.9,
+                },
+            ];
+        }
+        r
+    }
+
+    #[test]
+    fn stepping_in_place_is_stance_without_contacts_and_locomotion_with_them() {
+        let r = stepping_in_place();
+        let body = BodyMap::find(&r).unwrap();
+        // The prior behaviour, which the README recorded as a limit: no
+        // root travel means stance, however the feet alternate.
+        let blind = raw_labels(&r, body, &config()).unwrap();
+        assert!(blind.iter().all(|k| *k == SegmentKind::Stance));
+        // With the contact rule on, the alternation is locomotion.
+        let mut cfg = config();
+        cfg.step_window = Duration::from_millis(300);
+        let labels = raw_labels(&r, body, &cfg).unwrap();
+        // The lead-in and tail before the first and after the last contact
+        // change are genuinely outside any window; the interior must read
+        // as locomotion throughout.
+        assert!(
+            labels[50..250]
+                .iter()
+                .all(|k| *k == SegmentKind::Locomotion),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
+    fn constant_contacts_stay_stance_with_the_step_rule_on() {
+        let mut r = stepping_in_place();
+        for f in &mut r.frames {
+            for c in &mut f.contacts {
+                c.in_contact = true; // planted throughout: a true stance
+            }
+        }
+        let body = BodyMap::find(&r).unwrap();
+        let mut cfg = config();
+        cfg.step_window = Duration::from_millis(300);
+        let labels = raw_labels(&r, body, &cfg).unwrap();
+        assert!(labels.iter().all(|k| *k == SegmentKind::Stance));
     }
 
     #[test]
