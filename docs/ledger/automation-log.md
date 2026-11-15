@@ -1408,5 +1408,14 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
 - **Verification:** the full gate green after every phase and at this
   entry (fmt, clippy 0, workspace tests 0 failures, exclusion gate with
   2 service + 4 data-source records).
-- **Remaining from the plan:** phase 5, the deep robot-sim ports (full
-  `implicit` first), begun next.
+- **Phase 5, first unit:** full `implicit` landed (specs 0.1.12-draft):
+  the analytic RNE velocity derivative as the example's dense variant,
+  held to finite differences of the bias on the floating G1 (worst
+  relative error < 1e-6), the unsymmetric solve by dense LU, and the
+  documented free-body physics measured with both signs (Euler
+  amplifies the anisotropic spin, `implicit` mildly damps it).
+  `--integrator implicit` joins the knob.
+- **Remaining from the plan:** phase 5's cost/accuracy units — the
+  mid-phase BVH, the elliptic friction cone and constraint islands —
+  each queued as its own gate-green unit; the specs mark all three "a
+  cost rather than a wrong answer" at today's 33-shape scale.
