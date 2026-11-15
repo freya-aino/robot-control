@@ -63,6 +63,25 @@ This is SPECS.md §3 applied to this crate's own history: the failed
 verification was kept as a record, and its correction is recorded with
 the measurement that supports it.
 
+## The humanoid training path exists, and what that does and does not claim
+
+`tests/humanoid_training_path.rs` runs the whole humanoid seam end to end:
+the vendored G1 in `robot-sim`'s world under its own declared drives,
+wrapped by `robot-tasks`' `HumanoidEnv` (`robot_tasks::env::g1_stand`, the
+rollout-tier physics settings), rewarded by the stand task's registry
+through the outcome channel, collected by `collect_rollout` and optimized
+by `update`. The test asserts plumbing facts only: every control step
+yields a schema-valid transition with a finite registry reward, widths
+match the 29-drive action space, and the update genuinely moves the policy
+parameters.
+
+**Nothing humanoid is trained.** Two smoke-scale iterations verify the
+seams; a policy that stands is a compute-scale run (hours of CPU at the
+rollout tier, or the GPU-batched backend `SIMULATION_SPECS.md` targets)
+that this workspace has not performed. The claim this section makes is
+narrower and new: the path from the vendored robot to a PPO update is
+built, tested, and runs.
+
 ## Checkpointing
 
 SPECS.md §9.2 requires "checkpoint/resume including optimizer, RNG and

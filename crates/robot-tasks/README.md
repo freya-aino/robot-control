@@ -15,6 +15,7 @@ and `robot-sim`.
 | `humanoid` | `HumanoidState` (base pose and velocities, joints, torques, tracked links, foot and forbidden contacts), `StateExtractor` from `robot-sim`'s `World` through the profile's own kinematics, `ObservationSpec` with `actor_audit`, `Status` (`Terminated` vs `Truncated`), `HumanoidRegistry`, the `HumanoidTask` trait, `step_task` |
 | `terms` | Shared terms: upright, height, power, action rate, joint speed, undesirable contacts, base drift |
 | `tasks` | `StandTask`, `PerturbationTask` (push schedule, recovery after a window), `TrackingTask` (interpolated reference, terminated when lost, truncated at the end), `ReachTask`, `FootworkTask` (velocity command, landing reward), `BoxingTask` (pad strikes scored once per entry above a speed, guard) |
+| `env` | `HumanoidEnv`: the world stepped under the model's declared drives at a control rate (`substeps` physics steps per held action), observed through a task, as `robot-sim`'s `Environment`; the outcome channel (`outcome_task_fn`) that hands the registry's reward and the task's status to `robot-learn`'s task closure; `g1_stand`, the reference G1 wiring at the measured rollout-tier settings (`implicitfast`, 1 ms, 5 substeps) |
 | `randomize` | `Randomization`: ranges with a calibration source, held-out sub-intervals never drawn in training, sensitivity ranking |
 
 `robot-sim`'s `WorldEnv` gains `push_base`, the impulsive base velocity
@@ -70,7 +71,12 @@ balance task's config should mean in the first place.
 
 ## Testing
 
-`cargo test -p robot-tasks`: 27 tests (including the alive bonus). 11 are the original ones: the registry's per-term reporting
+`cargo test -p robot-tasks`: 32 tests (including the alive bonus). The
+`env` module adds four: the G1 standing through the environment under its
+declared drives for 25 control steps at the rollout-tier physics settings,
+seed-deterministic resets that genuinely differ across seeds, the outcome
+channel terminating with zero reward on a missing outcome or a physics
+failure, and the malformed constructions refused by name. 11 are the original ones: the registry's per-term reporting
 and duplicate-name rejection, the upright term's periodicity and maximum at
 `theta = pi`, and every termination path (fall, step-limit truncation,
 physics failure, and the corrected "within the fall angle, continues" case).

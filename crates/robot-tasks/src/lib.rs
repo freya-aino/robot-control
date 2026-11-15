@@ -8,6 +8,7 @@
 //! | [`humanoid`] | `HumanoidState` and its extractor from `robot-sim`'s world, observation specs with the privileged-input audit, termination versus truncation, the humanoid reward registry and task trait |
 //! | [`terms`] | Shared reward terms: balance, energy, smoothness, constraints, contacts |
 //! | [`tasks`] | Stand, perturbation, tracking, reach, footwork and boxing-pad tasks |
+//! | [`env`] | `HumanoidEnv`: the world stepped under the model's declared drives at a control rate, observed through a task, as `robot-sim`'s `Environment` for `robot-learn` |
 //! | [`randomize`] | Calibrated domain randomization with held-out ranges and sensitivity ranking |
 
 #![forbid(unsafe_code)]
@@ -15,6 +16,7 @@
 #![warn(clippy::all)]
 
 pub mod balance;
+pub mod env;
 pub mod humanoid;
 pub mod randomize;
 pub mod reward;
