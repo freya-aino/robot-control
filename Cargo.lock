@@ -5741,6 +5741,8 @@ dependencies = [
 name = "robot-hardware"
 version = "0.1.0"
 dependencies = [
+ "robot-artifacts",
+ "robot-model",
  "robot-types",
 ]
 

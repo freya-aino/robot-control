@@ -1,0 +1,51 @@
+# The Unitree G1 as a robot-bridge/1 configuration (ADR 0025, C-02).
+#
+# The wire indices are the G1's own low-level joint order, read from the
+# vendor SDK's example source at the pinned revision recorded in the
+# evidence ledger (unitree_sdk2 @ aaf69cb56c9d5ed63d8b284008ec3a8ab999bec1,
+# example/g1/low_level/g1_ankle_swing_example.cpp, enum G1JointIndex,
+# G1_NUM_MOTOR = 29; BSD-3-Clause). The robot's native transport is DDS
+# (topics rt/lowcmd, rt/lowstate, IDL unitree_hg::msg::dds_::LowCmd_/
+# LowState_, CRC32 over the command); this project's committed protocol is
+# robot-wire/1, so a firmware-side shim translating between the two is the
+# remaining hardware-bound work, named in the ledger row rather than
+# pretended away. Until a robot exists, this bridge drives the loopback
+# and replay devices, which is what its tests do.
+format = "robot-bridge/1"
+robot = "unitree-g1-29dof"
+protocol = "robot-wire/1"
+endpoint = "udp://robot.local:9000 (placeholder until a robot exists; C-02)"
+command_validity_us = 100000
+delay_bound_us = 2000
+interface_source = "unitree_sdk2 @ aaf69cb5 example/g1/low_level (rt/lowcmd, rt/lowstate, 29 motors, PD+tau_ff command, CRC32); see the evidence ledger"
+
+[joints]
+left_hip_pitch_joint = 0
+left_hip_roll_joint = 1
+left_hip_yaw_joint = 2
+left_knee_joint = 3
+left_ankle_pitch_joint = 4
+left_ankle_roll_joint = 5
+right_hip_pitch_joint = 6
+right_hip_roll_joint = 7
+right_hip_yaw_joint = 8
+right_knee_joint = 9
+right_ankle_pitch_joint = 10
+right_ankle_roll_joint = 11
+waist_yaw_joint = 12
+waist_roll_joint = 13
+waist_pitch_joint = 14
+left_shoulder_pitch_joint = 15
+left_shoulder_roll_joint = 16
+left_shoulder_yaw_joint = 17
+left_elbow_joint = 18
+left_wrist_roll_joint = 19
+left_wrist_pitch_joint = 20
+left_wrist_yaw_joint = 21
+right_shoulder_pitch_joint = 22
+right_shoulder_roll_joint = 23
+right_shoulder_yaw_joint = 24
+right_elbow_joint = 25
+right_wrist_roll_joint = 26
+right_wrist_pitch_joint = 27
+right_wrist_yaw_joint = 28

@@ -16,6 +16,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod bridge;
 pub mod device;
 pub mod link;
 pub mod loopback;

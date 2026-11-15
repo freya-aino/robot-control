@@ -12,18 +12,24 @@ boundary named in SPECS.md §6's workspace table and exercised by §4's
 | `loopback` | `LoopbackDevice`: commands become feedback after a configurable, per-command, independently-counted poll delay |
 | `replay` | `ReplayDevice`: deterministic playback of a pre-loaded frame sequence; never actuates; exhaustion is a distinct terminal error, never a repeat |
 | `wire` | `robot-wire/1`, this project's documented device protocol: 24-byte header (magic, version, kind, sequence, sender timestamp, command validity, flags, width), `f64` values, CRC-32 trailer. Allocation-free encode/decode into caller buffers |
+| `bridge` | `BridgeConfig`: the `robot-bridge/1` configuration of ADR 0025 — a robot described to this layer as an artifact, never code. Validates the whole joint-to-wire mapping against the robot's own profile (every actuated joint exactly once, indices dense, command validity cross-checked against the firmware contract), builds the `WireAdapter`, and permutes between profile and wire order so no consumer learns a robot-specific ordering. The committed `assets/bridges/unitree_g1.toml` is the first configuration |
 | `link` | `WireAdapter`: the host side as a `HardwareAdapter` over any `Transport` (UDP, or the in-process `MemoryLink`). Preallocated buffers, newest-frame feedback, counted corrupt/stale/lost frames, device sampling times mapped onto the host clock with a stated uncertainty, transmit disabled at start. `FirmwarePeer`: the reference device side, where commands are valid for their stated period and the watchdog holds position and flags itself when none is |
 
 PLAN.md Phase 5: "Implement a hardware adapter first against a loopback
 device, then a replay device, then an actual documented protocol." This
 crate delivers all three. The protocol is `robot-wire/1`, documented in
 `wire`'s module docs and specified by its tests. It is this project's own
-protocol, not a vendor transcription. C-02 (first hardware target) is
-open, and SPECS.md §1.1 treats every field of the retired `unitree/`
-DDS/SDK reference as "a hypothesis requiring hardware verification". A
-vendor bridge speaking `robot-wire/1` on one side and the vendor protocol
-on the other is where those hypotheses get verified. This crate links no
-vendor SDK.
+protocol, not a vendor transcription. C-02's design half is now settled
+(ADR 0025): a robot plugs in as a `robot-bridge/1` configuration, and
+the committed G1 bridge maps the 29 joints onto the motor order read
+from the vendor SDK's own example source at a pinned revision
+(`paper_verified`, see the evidence ledger — the mapping proved to be
+the identity against the vendored profile, now an explicit validated
+fact instead of an assumption). The G1's native transport is DDS, an
+excluded runtime, so the firmware-side shim speaking `robot-wire/1` on
+one side and DDS on the other is the named remaining hardware-bound
+work; until a robot exists the bridge drives the loopback and replay
+devices, which is what its tests do. This crate links no vendor SDK.
 
 ## Clocks across the link
 
