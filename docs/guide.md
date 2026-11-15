@@ -117,7 +117,7 @@ The floating run is judged on pelvis drop, ground penetration and settled
 energy, and prints PASS, FAIL or INCONCLUSIVE with the numbers. Useful
 flags: `--tier rollout|reference|acceptance` (the measured knob bundles of
 `robot_sim::options::Tier`; explicit flags override what a tier seeds),
-`--integrator euler|implicitfast|rk4`, `--actuation
+`--integrator euler|implicitfast|implicit|rk4`, `--actuation
 drives|damping|zero` (the model's own USD drive gains are the default),
 `--scene <usda>` for a different environment, `--dt`, `--steps`,
 `--limit-margin`.

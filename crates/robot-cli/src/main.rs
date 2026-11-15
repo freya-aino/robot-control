@@ -101,7 +101,7 @@ fn run_sim(args: &[String]) -> i32 {
         }
         Some(other) => unknown_subcommand("sim", other),
         None => usage_error(
-            "robot sim <qualify|multibody|fidelity> [--steps N] [--dt SECONDS] [--floating] [--zero-torque] [--out DIR] [--scene FILE] [--actuation drives|damping|zero] [--limit-margin RAD] [--integrator euler|implicitfast|rk4] [--tier rollout|reference|acceptance]",
+            "robot sim <qualify|multibody|fidelity> [--steps N] [--dt SECONDS] [--floating] [--zero-torque] [--out DIR] [--scene FILE] [--actuation drives|damping|zero] [--limit-margin RAD] [--integrator euler|implicitfast|implicit|rk4] [--tier rollout|reference|acceptance]",
         ),
     }
 }
@@ -208,9 +208,10 @@ fn run_multibody(flags: &[String]) -> i32 {
             }),
         Some(Some(v)) if v == "euler" => robot_sim::options::Integrator::SemiImplicitEuler,
         Some(Some(v)) if v == "implicitfast" => robot_sim::options::Integrator::ImplicitFast,
+        Some(Some(v)) if v == "implicit" => robot_sim::options::Integrator::Implicit,
         Some(Some(v)) if v == "rk4" => robot_sim::options::Integrator::Rk4,
         Some(_) => {
-            return invalid_flag("--integrator expects euler, implicitfast or rk4");
+            return invalid_flag("--integrator expects euler, implicitfast, implicit or rk4");
         }
     };
     let actuation = match flags
@@ -295,7 +296,7 @@ fn print_usage() {
     eprintln!("  robot data inspect <path>");
     eprintln!("  robot motion validate <path>");
     eprintln!("  robot sim qualify [--steps N] [--dt SECONDS]");
-    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--out DIR] [--scene FILE] [--actuation drives|damping|zero]\n           [--limit-margin RAD] [--integrator euler|implicitfast|rk4]\n           [--tier rollout|reference|acceptance]");
+    eprintln!("  robot sim multibody [--steps N] [--dt SECONDS] [--floating] [--zero-torque]\n           [--out DIR] [--scene FILE] [--actuation drives|damping|zero]\n           [--limit-margin RAD] [--integrator euler|implicitfast|implicit|rk4]\n           [--tier rollout|reference|acceptance]");
     eprintln!("  robot eval summarize <values...>");
     eprintln!("  robot eval --bundle <dir> --robot <g1-usd|go2-usd|h1-usd>");
     eprintln!("  robot skills <list|search> --manifest <skill-manifest.toml> [query...]");

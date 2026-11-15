@@ -66,6 +66,7 @@ pub mod collision;
 pub mod composite;
 pub mod constraint;
 pub mod contact;
+pub mod derivative;
 pub mod env;
 pub mod fidelity;
 pub mod integrators;

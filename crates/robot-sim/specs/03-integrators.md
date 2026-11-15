@@ -61,14 +61,28 @@ rather than changing an answer. It is what makes a stiffer gain set usable, and
 [05](05-passive-forces-and-actuators.md) no longer has to record a drive's
 damping as explicit-only.
 
-**Not ported**: full `implicit` — `mj_implicit`'s `qLU` path with the
-recursive-Newton-Euler derivative (`mjd_smooth_vel` with `flg_bias = 1`) and the
-unsymmetric LU solve — and `mjd_freeMhat`, the free-body gyroscopic block that
-reinstates the bias derivative for a standalone free body and is what makes
-`implicitfast` and `implicit` identical for one. Without it a tumbling free body
-is integrated as `implicitfast` proper rather than as `implicit`, which is the
-example's own behaviour for a non-free-body system and a divergence only for a
-free one.
+**Full `implicit` is implemented** (0.1.12-draft): `Integrator::Implicit`
+solves `(M + h (diag(kd) + ∂bias/∂qvel)) qacc = tau - qfrc_bias` with the
+analytic RNE velocity derivative of `derivative::rne_vel` — the example's
+own dense variant (11 section 2.4, stated there as mathematically
+identical to the sparse production recursion) — and a dense partial-pivot
+LU for the unsymmetric matrix, the `qLU` path in dense form. Validated the
+project's way: the derivative agrees with central finite differences of
+the RNE bias on the full floating G1 at a non-trivial state to a worst
+relative error below 1e-6, vanishes identically at rest, and the
+integrator shows the documented physics — the anisotropic tumbling free
+body that semi-implicit Euler *amplifies* is *mildly damped* under
+`implicit` (both signs asserted, with the damping smaller in magnitude
+than the amplification), the two implicit variants agree to rounding when
+the bias derivative vanishes, and the G1 stance holds at 1 ms.
+`--integrator implicit` is the per-run knob.
+
+Still unported: `mjd_freeMhat`, the special case that reinstates the
+gyroscopic derivative for a standalone free body **under `implicitfast`**.
+Full `implicit` covers that body through the global derivative, so the gap
+is now only that `implicitfast` on a lone tumbling body behaves as
+`implicitfast` proper — the example's own behaviour for a non-free-body
+system — rather than borrowing the implicit treatment.
 
 One correction to this step's own history: the `dt = 5e-4` divergence it was
 partly written around no longer reproduces. The G1 holds a stance for 2 s at

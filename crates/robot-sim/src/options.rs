@@ -48,6 +48,15 @@ pub enum Integrator {
     /// explicit and a stiffer gain set than the layer's declared one could not
     /// be used.
     ImplicitFast,
+    /// Full `implicit`: `implicitfast` plus the analytic velocity
+    /// derivative of the RNE bias (`crate::derivative::rne_vel`,
+    /// example 11), solved against the resulting **unsymmetric** matrix by
+    /// dense LU — the example's `qLU` path. What it buys over
+    /// `implicitfast` is implicit treatment of the centripetal, Coriolis
+    /// and gyroscopic terms, which is what the example's own documentation
+    /// prescribes for a spinning free body and for the stiff
+    /// small-distal-mass regimes step 03 names.
+    Implicit,
     /// Classical fourth-order Runge-Kutta, including the
     /// Runge-Kutta-Munthe-Kaas correction that makes it higher order on a
     /// rotating free body (`crate::composite::CompositeState::rk4_step`).

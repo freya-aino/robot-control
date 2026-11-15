@@ -800,10 +800,12 @@ impl World {
         // `M + h diag(kd)` rather than `M`, which is the whole content of the
         // integrator: the forces stay at the old velocity and the matrix
         // carries their derivative.
-        let qacc_smooth = if self.options.integrator == Integrator::ImplicitFast {
-            self.implicit_forward_dynamics(&pos, qd, tau)?
-        } else {
-            composite::forward_dynamics(&self.model, &pos, qd, tau)?
+        let qacc_smooth = match self.options.integrator {
+            Integrator::ImplicitFast => self.implicit_forward_dynamics(&pos, qd, tau)?,
+            Integrator::Implicit => {
+                self.full_implicit_forward_dynamics(&pos, &cvel, &cdof_dot, qd, tau)?
+            }
+            _ => composite::forward_dynamics(&self.model, &pos, qd, tau)?,
         };
         let (rows, dropped_contacts) = self.build_rows(q, &pos, &cvel, &cdof_dot, qd)?;
         // Both solvers answer the same convex problem and have the same
@@ -860,6 +862,44 @@ impl World {
         Ok(acc)
     }
 
+    /// Full `implicit` (`mj_implicit`, example 01 section 9.3 and
+    /// example 11): the smooth-force velocity derivative *including* the
+    /// analytic RNE bias derivative, solved against the unsymmetric
+    /// `A = M + h (diag(kd) + dbias/dqvel)` by dense partial-pivot LU —
+    /// the example's `qLU` path. The forces themselves stay at the old
+    /// velocity, exactly as in `implicitfast`; only the matrix carries
+    /// more of their derivative.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the dynamics stages report, and
+    /// [`CompositeError::SingularInertia`] when the matrix is singular.
+    fn full_implicit_forward_dynamics(
+        &self,
+        pos: &Position,
+        cvel: &[[f64; 6]],
+        cdof_dot: &[[f64; 6]],
+        qd: &[f64],
+        tau: &[f64],
+    ) -> Result<Vec<f64>, CompositeError> {
+        let nv = self.model.nv();
+        let h = self.options.timestep.as_secs_f64();
+        let bias = composite::rne(&self.model, pos, qd, None)?;
+        let mut a = composite::full_m(&self.model.tree, &composite::crb(&self.model, pos));
+        let dbias = crate::derivative::rne_vel(&self.model, pos, cvel, cdof_dot, qd)?;
+        for (slot, d) in a.iter_mut().zip(&dbias) {
+            *slot += h * d;
+        }
+        for (i, k) in self.smooth_velocity_derivative().iter().enumerate() {
+            if *k != 0.0 {
+                a[i * nv + i] += h * k;
+            }
+        }
+        let mut acc: Vec<f64> = tau.iter().zip(&bias).map(|(t, b)| t - b).collect();
+        solve_dense_lu(&mut a, &mut acc, nv)?;
+        Ok(acc)
+    }
+
     /// Advances `state` by one timestep.
     ///
     /// The integrator is whichever [`SimOptions::integrator`] names. For
@@ -897,9 +937,10 @@ impl World {
             self.accel_at(&state.q, &state.qd, tau, warm.as_deref())?;
 
         match self.options.integrator {
-            // Both take the same semi-implicit update; they differ only in how
-            // `qacc` was obtained, which `accel_at` has already decided.
-            Integrator::SemiImplicitEuler | Integrator::ImplicitFast => {
+            // All three take the same semi-implicit update; they differ only
+            // in how `qacc` was obtained, which `accel_at` has already
+            // decided.
+            Integrator::SemiImplicitEuler | Integrator::ImplicitFast | Integrator::Implicit => {
                 for (v, a) in state.qd.iter_mut().zip(&qacc) {
                     *v += dt * a;
                 }
@@ -1479,6 +1520,51 @@ impl Backend for WorldEnv {
     }
 }
 
+/// Dense partial-pivot LU solve of `a x = b` in place (`a` row-major
+/// `n x n`, destroyed; `b` becomes `x`) — the unsymmetric solve full
+/// `implicit` needs, the example's `qLU` in dense form.
+fn solve_dense_lu(a: &mut [f64], b: &mut [f64], n: usize) -> Result<(), CompositeError> {
+    for k in 0..n {
+        let mut pivot = k;
+        let mut best = a[k * n + k].abs();
+        for r in k + 1..n {
+            let v = a[r * n + k].abs();
+            if v > best {
+                best = v;
+                pivot = r;
+            }
+        }
+        // NaN pivots fail this comparison too, which is the point.
+        if best.partial_cmp(&1e-300) != Some(core::cmp::Ordering::Greater) {
+            return Err(CompositeError::SingularInertia { dof: k });
+        }
+        if pivot != k {
+            for c in 0..n {
+                a.swap(k * n + c, pivot * n + c);
+            }
+            b.swap(k, pivot);
+        }
+        let d = a[k * n + k];
+        for r in k + 1..n {
+            let f = a[r * n + k] / d;
+            if f != 0.0 {
+                for c in k..n {
+                    a[r * n + c] -= f * a[k * n + c];
+                }
+                b[r] -= f * b[k];
+            }
+        }
+    }
+    for r in (0..n).rev() {
+        let mut x = b[r];
+        for c in r + 1..n {
+            x -= a[r * n + c] * b[c];
+        }
+        b[r] = x / a[r * n + r];
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1487,6 +1573,157 @@ mod tests {
     /// The G1 as the official OpenUSD description, which is the model that
     /// carries the drives (ADR 0015). The URDF fixture below has none, because
     /// URDF does not express actuator metadata at all.
+    /// A single free-floating anisotropic body, for the integrator
+    /// comparisons full `implicit` exists for.
+    fn free_tumbler() -> RobotProfile {
+        use robot_model::link::{LinkSpec, MassProperties};
+        use robot_model::profile::{FirmwareContract, PROFILE_SCHEMA_VERSION};
+        use robot_types::frames::{FrameId, GravityConvention};
+        use robot_types::ids::{LinkId, Name};
+        use robot_types::schema::ExtensionTable;
+        use robot_types::units::Kilograms;
+        let mut mp = MassProperties::MASSLESS;
+        mp.mass = Kilograms(2.0);
+        mp.inertia = robot_model::link::InertiaTensor {
+            ixx: 0.10,
+            iyy: 0.20,
+            izz: 0.28,
+            ixy: 0.0,
+            ixz: 0.0,
+            iyz: 0.0,
+        };
+        let fixed = RobotProfile {
+            schema_version: PROFILE_SCHEMA_VERSION,
+            name: Name::new("fixture-tumbler").unwrap(),
+            profile_version: "1.0".to_owned(),
+            joints: Vec::new(),
+            links: vec![LinkSpec {
+                id: LinkId::new(0),
+                name: Name::new("body").unwrap(),
+                mass: mp,
+                collision: Vec::new(),
+            }],
+            actuators: Vec::new(),
+            sensors: Vec::new(),
+            root_link: LinkId::new(0),
+            gravity: GravityConvention::minus_z_standard(FrameId::WORLD),
+            firmware: FirmwareContract {
+                version: "1.0".to_owned(),
+                command_expiration: Duration::from_millis(100),
+                watchdog_timeout: Duration::from_millis(200),
+                has_independent_estop: true,
+                allowed_modes: Vec::new(),
+            },
+            extensions: ExtensionTable::new(),
+        };
+        robot_model::usd::with_floating_base(fixed).unwrap()
+    }
+
+    /// Relative kinetic-energy drift of the anisotropic spin over
+    /// `seconds` at `dt` under `integrator`, gravity off.
+    fn tumbler_drift(integrator: Integrator, dt: f64, seconds: f64) -> f64 {
+        let options = SimOptions {
+            timestep: Duration::from_nanos((dt * 1e9) as i64),
+            integrator,
+            ..SimOptions::default()
+        };
+        let mut world = World::from_profile(&free_tumbler(), options);
+        world.model.gravity = [0.0, 0.0, 0.0];
+        let mut state = world.rest_state();
+        state.qd = vec![1.0, 0.0, 0.0, 3.0, 5.0, 7.0];
+        let ke0 = world.kinetic_energy(&state).unwrap();
+        let tau = vec![0.0; 6];
+        let steps = (seconds / dt).round() as usize;
+        for _ in 0..steps {
+            world.step(&mut state, &tau).unwrap();
+        }
+        let ke1 = world.kinetic_energy(&state).unwrap();
+        (ke1 - ke0) / ke0
+    }
+
+    #[test]
+    fn full_implicit_damps_the_anisotropic_spin_rather_than_amplifying_it() {
+        // The example's own documentation: the gyroscopic derivative term
+        // "mildly damps" a standalone spinning free body, where the
+        // explicit treatment amplifies. Both signs are asserted, plus the
+        // magnitude ordering, because either alone would be weak.
+        let euler = tumbler_drift(Integrator::SemiImplicitEuler, 1e-3, 0.5);
+        let implicit = tumbler_drift(Integrator::Implicit, 1e-3, 0.5);
+        assert!(euler > 0.0, "the explicit step amplifies: {euler}");
+        assert!(implicit < 0.0, "full implicit mildly damps: {implicit}");
+        assert!(
+            implicit.abs() < euler,
+            "the implicit damping {implicit} should be milder than the              explicit amplification {euler}"
+        );
+    }
+
+    #[test]
+    fn full_implicit_equals_implicitfast_when_the_bias_derivative_vanishes() {
+        // Pure translation: no angular velocity, so the RNE bias derivative
+        // is zero and the two integrators must agree to rounding.
+        for integrator in [Integrator::ImplicitFast, Integrator::Implicit] {
+            let options = SimOptions {
+                timestep: Duration::from_millis(1),
+                integrator,
+                ..SimOptions::default()
+            };
+            let mut world = World::from_profile(&free_tumbler(), options);
+            world.model.gravity = [0.0, 0.0, 0.0];
+            let mut state = world.rest_state();
+            state.qd = vec![0.3, -0.2, 0.1, 0.0, 0.0, 0.0];
+            let tau = vec![0.0; 6];
+            for _ in 0..100 {
+                world.step(&mut state, &tau).unwrap();
+            }
+            // 0.1 s of constant-velocity translation.
+            assert!(
+                (state.q[0] - 0.03).abs() < 1e-12
+                    && (state.q[1] + 0.02).abs() < 1e-12
+                    && (state.q[2] - 0.01).abs() < 1e-12,
+                "{integrator:?}: {:?}",
+                &state.q[..3]
+            );
+        }
+    }
+
+    #[test]
+    fn the_g1_stance_holds_under_full_implicit_at_one_millisecond() {
+        // The regime step 03 names full implicit for: the stiff distal
+        // joints at the rollout-tier timestep. Half a second of stance must
+        // stay finite and supported.
+        let options = SimOptions {
+            timestep: Duration::from_millis(1),
+            integrator: Integrator::Implicit,
+            ..SimOptions::default()
+        };
+        let world = World::from_profile(&g1(), options).with_ground(Ground {
+            height: 0.0,
+            friction: 0.8,
+        });
+        let (_, mut state) = standing_world();
+        let mut world = world;
+        let tau = vec![0.0; world.nv()];
+        for step in 0..500 {
+            let report = world.step(&mut state, &tau).unwrap();
+            assert!(
+                state.q.iter().chain(&state.qd).all(|v| v.is_finite()),
+                "step {step} diverged"
+            );
+            let _ = report;
+        }
+        let pelvis = world
+            .model()
+            .bodies
+            .iter()
+            .find(|b| b.kind == JointKind::Free)
+            .unwrap();
+        assert!(
+            state.q[pelvis.qpos_adr + 2] > 0.5,
+            "pelvis at {}",
+            state.q[pelvis.qpos_adr + 2]
+        );
+    }
+
     fn g1_usd() -> RobotProfile {
         robot_model::fixtures::unitree_g1_29dof_usd_floating_base()
             .expect("the vendored G1 USD model loads")
