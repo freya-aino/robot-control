@@ -413,14 +413,18 @@ mod gpu_tests {
         gpu_plane_sphere_contact(&centers, &radii, plane_height, margin, &mut contacts).unwrap();
 
         for i in 0..centers.len() {
+            // The GPU kernel keeps the fixed world-frame plane at a height;
+            // the CPU reference now takes the plane's own pose and normal
+            // (specs 0.1.6), so the equivalent plane is `+z` at that height.
             let cpu_contact = robot_sim::contact::plane_sphere_contact(
+                [0.0, 0.0, plane_height as f64],
+                [0.0, 0.0, 1.0],
                 [
                     centers[i][0] as f64,
                     centers[i][1] as f64,
                     centers[i][2] as f64,
                 ],
                 radii[i] as f64,
-                plane_height as f64,
                 margin as f64,
             )
             .unwrap();
@@ -586,14 +590,17 @@ mod gpu_tests {
         let mut contacts = vec![None; N];
         gpu_plane_sphere_contact(&centers, &radii, 0.0, 0.02, &mut contacts).unwrap();
         for i in 0..N {
+            // Same plane translation as above: the GPU kernel's fixed `+z`
+            // plane at height 0, in the CPU reference's plane-frame form.
             let cpu = robot_sim::contact::plane_sphere_contact(
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
                 [
                     centers[i][0] as f64,
                     centers[i][1] as f64,
                     centers[i][2] as f64,
                 ],
                 radii[i] as f64,
-                0.0,
                 0.02,
             )
             .unwrap();

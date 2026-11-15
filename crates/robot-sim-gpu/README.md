@@ -39,3 +39,20 @@ adapter; ADR 0012 records Intel and Mesa Lavapipe runs):
 agreement, implicit, equality and repeatability suites. The two examples
 (`gpu_latency`, `gpu_resource_repeatability`) print measurements and
 assert nothing.
+
+On a host whose devenv shell carries no Vulkan loader (the current one),
+the suite still runs under Mesa Lavapipe by pointing the loader and ICD at
+the system's Mesa explicitly — verified green (49 tests) on 2026-11-15:
+
+```
+LD_LIBRARY_PATH=<nix-store vulkan-loader>/lib \
+VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/lvp_icd.x86_64.json \
+cargo test -p robot-sim-gpu --features cubecl
+```
+
+Because the feature-gated build is outside the default gate, its tests can
+rot silently against `robot-sim`'s API: the 0.1.6 `plane_sphere_contact`
+signature change (plane pose and normal instead of a fixed `+z` height)
+broke this suite's two call sites unnoticed until 2026-11-15. Both now
+pass the equivalent explicit plane, and the lesson stands — run this suite
+whenever `robot-sim`'s contact or integrator signatures change.
