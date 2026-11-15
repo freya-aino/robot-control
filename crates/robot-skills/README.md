@@ -1,15 +1,16 @@
 # robot-skills
 
 Skill descriptors, exact retrieval and the R0/R1/R2 tiers of SPECS.md §10.6.
-Depends on `robot-types` and `robot-artifacts` (the latter not yet used —
-reserved for loading a skill manifest from a content-addressed blob).
+Depends on `robot-types` and `robot-artifacts` (the bounded TOML subset, and
+`manifest::load_from_blob` loading a skill library from a content-addressed,
+checksum-verified blob).
 
 ## What's here
 
 | Module | Contents |
 | --- | --- |
 | `descriptor` | `SkillDescriptor`: the typed, authoritative record of §10.2 |
-| `manifest` | The `skill-manifest/1` TOML format (ADR 0016): a skill library's typed descriptors on disk, round-tripping exactly; unknown keys, duplicates and invalid fields refused by name |
+| `manifest` | The `skill-manifest/1` TOML format (ADR 0016): a skill library's typed descriptors on disk, round-tripping exactly; unknown keys, duplicates and invalid fields refused by name. `load_from_blob` reads one from a content-addressed `BlobStore` blob, checksum-verified by the store, with the failing layer named (`Store`, `NotText`, `Manifest`) |
 | `index` | `ExactIndex`: brute-force nearest-neighbor search, with a zero-allocation `nearest_into` for the R2 path |
 | `tiers` | `WorkingSet` (R1, generation-tagged, immutable) and `Router` (R2, resident, stale-generation-rejecting) |
 | `selection` | `Selector`, the R2 decision. Recovery or the protective response comes first when falling, preempting dwell. Then nearest resident candidates, an out-of-distribution distance, a confidence margin, and `GuardTable` feasibility over `FeasibilityState` (stance, joint speed, support, actuator health, opponent distance), where an unknown guard fails closed. Then transition contracts, minimum dwell and hysteresis. A switch carries a `RecurrentAction::Reset` contract. Accepted proposals expire. Rejections are counted by reason and switches by skill in fixed arrays |
@@ -57,7 +58,10 @@ feasibility runs afterwards.
 
 ## Testing
 
-`cargo test -p robot-skills`: 18 tests. 8 are the original ones: nearest-neighbor ordering and
+`cargo test -p robot-skills`: 25 tests, including the manifest round trip
+through a content-addressed blob and the refusal cases naming the layer
+that saw them (missing blob, non-text blob, wrong format). 8 are the
+original ones: nearest-neighbor ordering and
 dimension validation, an empty-index report, R1→R2 generation rejection
 (including the "equal generation is not newer" edge case), the empty-result
 degrade-to-current-controller path, and a refused switch to a non-resident

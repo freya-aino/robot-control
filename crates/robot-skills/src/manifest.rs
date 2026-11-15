@@ -14,7 +14,9 @@
 //! Reading and writing round-trip exactly.
 
 use crate::descriptor::{EmbeddingVersion, SkillDescriptor, SkillId};
+use robot_artifacts::store::{BlobStore, StoreError};
 use robot_artifacts::toml::{self, Table, TomlError, Value};
+use robot_artifacts::ContentId;
 use robot_types::ids::Name;
 use robot_types::time::Duration;
 
@@ -334,6 +336,60 @@ pub fn read_manifest(text: &str) -> Result<Vec<SkillDescriptor>, ManifestError> 
     Ok(out)
 }
 
+/// Why a manifest could not be loaded from a content-addressed blob.
+///
+/// Distinct from [`ManifestError`] because the failure modes differ in
+/// kind: the store layer reports a missing or corrupt blob, this layer
+/// reports bytes that are not text, and only then does the manifest
+/// parser get a say.
+#[derive(Debug)]
+pub enum BlobManifestError {
+    /// The store could not produce the blob: missing, unreadable, or
+    /// failing its checksum (`robot_artifacts::store::BlobStore::get`
+    /// verifies on read).
+    Store(StoreError),
+    /// The blob exists and verifies but is not UTF-8 text, so it cannot be
+    /// a `skill-manifest/1` document.
+    NotText,
+    /// The text is not a valid manifest.
+    Manifest(ManifestError),
+}
+
+impl core::fmt::Display for BlobManifestError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Store(e) => write!(f, "{e}"),
+            Self::NotText => write!(f, "blob is not UTF-8 text, so it is not a {FORMAT} file"),
+            Self::Manifest(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl core::error::Error for BlobManifestError {}
+
+/// Loads a `skill-manifest/1` document from a content-addressed blob.
+///
+/// This is the loading path the `robot-artifacts` dependency exists for
+/// (ADR 0016): a skill library stored by content identity (SPECS.md
+/// Section 7), fetched and checksum-verified by the store, then parsed by
+/// [`read_manifest`] under the same bounded-TOML limits as a file read
+/// from disk — a blob read back from the store is untrusted input like
+/// any other.
+///
+/// # Errors
+///
+/// [`BlobManifestError::Store`] when the store cannot produce a verified
+/// blob, [`BlobManifestError::NotText`] for non-UTF-8 bytes, and
+/// [`BlobManifestError::Manifest`] for anything [`read_manifest`] refuses.
+pub fn load_from_blob(
+    store: &BlobStore,
+    id: &ContentId,
+) -> Result<Vec<SkillDescriptor>, BlobManifestError> {
+    let bytes = store.get(id).map_err(BlobManifestError::Store)?;
+    let text = core::str::from_utf8(&bytes).map_err(|_| BlobManifestError::NotText)?;
+    read_manifest(text).map_err(BlobManifestError::Manifest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +465,75 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A temporary directory that removes itself. Enough for these tests;
+    /// the same pattern `robot-artifacts`' own store tests use.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let unique = ContentId::of(
+                format!(
+                    "{tag}-{:?}-{:?}",
+                    std::time::SystemTime::now(),
+                    std::thread::current().id()
+                )
+                .as_bytes(),
+            )
+            .short();
+            let path = std::env::temp_dir().join(format!("robot-skills-{tag}-{unique}"));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_manifest_round_trips_through_a_content_addressed_blob() {
+        use robot_artifacts::store::StoreQuota;
+        let dir = TempDir::new("blob-roundtrip");
+        let store = BlobStore::open(&dir.0, StoreQuota::default()).unwrap();
+        let lib = library();
+        let text = write_manifest(&lib).unwrap();
+        let id = store.put(text.as_bytes()).unwrap();
+        let back = load_from_blob(&store, &id).unwrap();
+        assert_eq!(back.len(), lib.len());
+        assert_eq!(back[0].name.as_str(), "jab");
+        assert_eq!(
+            write_manifest(&back).unwrap(),
+            text,
+            "the blob path loads exactly what was stored"
+        );
+    }
+
+    #[test]
+    fn a_missing_blob_and_an_invalid_blob_are_refused_with_the_layer_that_saw_it() {
+        use robot_artifacts::store::StoreQuota;
+        let dir = TempDir::new("blob-refusals");
+        let store = BlobStore::open(&dir.0, StoreQuota::default()).unwrap();
+        // Missing: an identity nothing was stored under.
+        let absent = ContentId::of(b"never stored");
+        assert!(matches!(
+            load_from_blob(&store, &absent),
+            Err(BlobManifestError::Store(StoreError::NotFound { .. }))
+        ));
+        // Stored but not text.
+        let binary = store.put(&[0xff, 0xfe, 0x00, 0x80]).unwrap();
+        assert!(matches!(
+            load_from_blob(&store, &binary),
+            Err(BlobManifestError::NotText)
+        ));
+        // Text but not a manifest.
+        let wrong = store.put(b"format = \"other/9\"\n").unwrap();
+        assert!(matches!(
+            load_from_blob(&store, &wrong),
+            Err(BlobManifestError::Manifest(ManifestError::Format(_)))
+        ));
     }
 }
