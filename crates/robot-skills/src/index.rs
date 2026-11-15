@@ -123,15 +123,15 @@ impl ExactIndex {
                 out[filled] = (*id, distance);
                 filled += 1;
                 if filled == k {
-                    out[..filled].sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                    out[..filled].sort_by(|a, b| a.1.total_cmp(&b.1));
                 }
             } else if distance < out[k - 1].1 {
                 out[k - 1] = (*id, distance);
-                out[..k].sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                out[..k].sort_by(|a, b| a.1.total_cmp(&b.1));
             }
         }
         if filled < k {
-            out[..filled].sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            out[..filled].sort_by(|a, b| a.1.total_cmp(&b.1));
         }
         Ok(filled)
     }

@@ -689,19 +689,48 @@ mod tests {
         }
     }
 
-    fn build_loop() -> ControlLoop<LoopbackDevice, SteppedClock, 8> {
-        let policy = identity_policy();
-        let normalizer = Normalizer::new(2, 5.0);
-        let profile = two_joint_profile();
-        let supervisor = Supervisor::new(
-            &profile,
+    /// A supervisor whose envelope monitor attests the mode's required
+    /// interlocks closed: without one, a hardware mode is (correctly)
+    /// refused with `InterlockOpen` on every tick.
+    fn attested_supervisor(
+        profile: &robot_model::profile::RobotProfile,
+        mode: OperatingMode,
+    ) -> Supervisor<8> {
+        use robot_supervisor::envelope::{EnvelopeConfig, EnvelopeMonitor};
+        use robot_types::units::Celsius;
+        let mut s = Supervisor::new(
+            profile,
             FaultPolicy::conservative_default(),
             FreshnessLimits {
                 observation: Duration::from_millis(50),
                 comms: Duration::from_millis(100),
             },
             CommandKind::Position,
+        )
+        .with_envelope(EnvelopeMonitor::new(
+            profile,
+            EnvelopeConfig {
+                derate_start: 0.9,
+                max_saturated_ticks: u32::MAX,
+                contact_budgets: Vec::new(),
+            },
+        ));
+        s.envelope_mut().unwrap().measure(
+            &[0.0, 0.0],
+            &[Celsius(25.0), Celsius(25.0)],
+            &[],
+            0.0,
+            mode.required_interlocks(),
         );
+        s
+    }
+
+    fn build_loop() -> ControlLoop<LoopbackDevice, SteppedClock, 8> {
+        let policy = identity_policy();
+        let normalizer = Normalizer::new(2, 5.0);
+        let profile = two_joint_profile();
+        let mode = OperatingMode::HwSupported;
+        let supervisor = attested_supervisor(&profile, mode);
         let adapter = LoopbackDevice::new(2, 0);
         let clock = SteppedClock::new(0, ClockId::Simulation);
         ControlLoop::new(ControlLoopConfig {
@@ -710,7 +739,7 @@ mod tests {
             supervisor,
             adapter,
             clock,
-            mode: OperatingMode::HwSupported,
+            mode,
             budget: Duration::from_millis(8),
             freshness: FreshnessLimits {
                 observation: Duration::from_millis(50),
@@ -721,15 +750,7 @@ mod tests {
 
     fn build_loop_in(mode: OperatingMode) -> ControlLoop<LoopbackDevice, SteppedClock, 8> {
         let profile = two_joint_profile();
-        let supervisor = Supervisor::new(
-            &profile,
-            FaultPolicy::conservative_default(),
-            FreshnessLimits {
-                observation: Duration::from_millis(50),
-                comms: Duration::from_millis(100),
-            },
-            CommandKind::Position,
-        );
+        let supervisor = attested_supervisor(&profile, mode);
         ControlLoop::new(ControlLoopConfig {
             policy: identity_policy(),
             normalizer: Normalizer::new(2, 5.0),
@@ -852,15 +873,8 @@ mod tests {
     ) -> ControlLoop<LoopbackDevice, SteppedClock, 8, P, O> {
         let normalizer = Normalizer::new(2, 5.0);
         let profile = two_joint_profile();
-        let supervisor = Supervisor::new(
-            &profile,
-            FaultPolicy::conservative_default(),
-            FreshnessLimits {
-                observation: Duration::from_millis(50),
-                comms: Duration::from_millis(100),
-            },
-            CommandKind::Position,
-        );
+        let mode = OperatingMode::HwSupported;
+        let supervisor = attested_supervisor(&profile, mode);
         let adapter = LoopbackDevice::new(2, 0);
         let clock = SteppedClock::new(0, ClockId::Simulation);
         ControlLoop::with_operation(
@@ -870,7 +884,7 @@ mod tests {
                 supervisor,
                 adapter,
                 clock,
-                mode: OperatingMode::HwSupported,
+                mode,
                 budget: Duration::from_millis(8),
                 freshness: FreshnessLimits {
                     observation: Duration::from_millis(50),
@@ -924,15 +938,8 @@ mod tests {
         operation: O,
     ) -> Result<ControlLoop<LoopbackDevice, SteppedClock, 8, P, O>, ConfigError> {
         let profile = two_joint_profile();
-        let supervisor = Supervisor::new(
-            &profile,
-            FaultPolicy::conservative_default(),
-            FreshnessLimits {
-                observation: Duration::from_millis(50),
-                comms: Duration::from_millis(100),
-            },
-            CommandKind::Position,
-        );
+        let mode = OperatingMode::HwSupported;
+        let supervisor = attested_supervisor(&profile, mode);
         ControlLoop::try_with_operation(
             ControlLoopConfig {
                 policy,
@@ -940,7 +947,7 @@ mod tests {
                 supervisor,
                 adapter: LoopbackDevice::new(adapter_width, 0),
                 clock: SteppedClock::new(0, ClockId::Simulation),
-                mode: OperatingMode::HwSupported,
+                mode,
                 budget: Duration::from_millis(8),
                 freshness: FreshnessLimits {
                     observation: Duration::from_millis(50),
@@ -966,15 +973,7 @@ mod tests {
         feedback: [f64; 2],
     ) -> ControlLoop<ReplayDevice, SteppedClock, 8, P, O> {
         let profile = two_joint_profile();
-        let supervisor = Supervisor::new(
-            &profile,
-            FaultPolicy::conservative_default(),
-            FreshnessLimits {
-                observation: Duration::from_millis(50),
-                comms: Duration::from_millis(100),
-            },
-            CommandKind::Position,
-        );
+        let supervisor = attested_supervisor(&profile, mode);
         let adapter = ReplayDevice::new(
             2,
             vec![RecordedFrame {

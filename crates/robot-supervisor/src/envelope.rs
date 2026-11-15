@@ -124,7 +124,13 @@ impl EnvelopeMonitor {
         let limit = thermal.limit.value();
         let start =
             thermal.ambient.value() + self.config.derate_start * (limit - thermal.ambient.value());
-        let factor = if !t.is_finite() || t <= start {
+        // A temperature that is not a finite number — never measured, or a
+        // failed thermistor — derates to zero: granting full torque on a
+        // missing reading would fail open on exactly the path the thermal
+        // envelope exists to close.
+        let factor = if !t.is_finite() {
+            0.0
+        } else if t <= start {
             1.0
         } else if t >= limit {
             0.0

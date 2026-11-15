@@ -113,6 +113,11 @@ pub struct Supervisor<const N: usize> {
     command_kind: CommandKind,
     last_safe_command: Vec<f64>,
     log: FaultLog<N>,
+    // The most severe declared response over every fault *detected* this
+    // tick, folded at detection time so that a full fault log can never
+    // downgrade the tick's response (the log drops records past capacity;
+    // it must not drop severity).
+    worst: Response,
     envelope: Option<EnvelopeMonitor>,
     // This tick's torque clamp per joint: the effort limit, lowered by the
     // envelope monitor when one is installed.
@@ -150,6 +155,7 @@ impl<const N: usize> Supervisor<N> {
             command_kind,
             last_safe_command: vec![0.0; width],
             log: FaultLog::new(),
+            worst: Response::ClampAndContinue,
             envelope: None,
             torque_now: joints.iter().map(|j| j.limits.effort.value()).collect(),
         }
@@ -210,35 +216,51 @@ impl<const N: usize> Supervisor<N> {
         }
 
         self.log.clear();
+        self.worst = Response::ClampAndContinue;
         self.record_input_faults(input);
 
         for (i, &value) in raw.iter().enumerate() {
             if !value.is_finite() {
-                self.log.push(Fault::NonFiniteCommand {
-                    joint: self.joint_ids[i],
-                });
+                Self::note(
+                    &self.policy,
+                    &mut self.log,
+                    &mut self.worst,
+                    Fault::NonFiniteCommand {
+                        joint: self.joint_ids[i],
+                    },
+                );
                 continue;
             }
             match self.command_kind {
                 CommandKind::Position => {
                     if let Some(limit) = self.position_limits[i] {
                         if !limit.contains(Radians(value)) {
-                            self.log.push(Fault::PositionLimitExceeded {
-                                joint: self.joint_ids[i],
-                                commanded: Radians(value),
-                                limit,
-                            });
+                            Self::note(
+                                &self.policy,
+                                &mut self.log,
+                                &mut self.worst,
+                                Fault::PositionLimitExceeded {
+                                    joint: self.joint_ids[i],
+                                    commanded: Radians(value),
+                                    limit,
+                                },
+                            );
                         }
                     }
                 }
                 CommandKind::Velocity => {
                     let limit = self.velocity_limits[i];
                     if value.abs() > limit.value() {
-                        self.log.push(Fault::VelocityLimitExceeded {
-                            joint: self.joint_ids[i],
-                            commanded: RadiansPerSecond(value),
-                            limit,
-                        });
+                        Self::note(
+                            &self.policy,
+                            &mut self.log,
+                            &mut self.worst,
+                            Fault::VelocityLimitExceeded {
+                                joint: self.joint_ids[i],
+                                commanded: RadiansPerSecond(value),
+                                limit,
+                            },
+                        );
                     }
                 }
                 CommandKind::Torque => {
@@ -246,17 +268,27 @@ impl<const N: usize> Supervisor<N> {
                     let available = self.envelope.as_ref().and_then(|m| m.available_torque(i));
                     self.torque_now[i] = available.map_or(limit.value(), |a| a.min(limit.value()));
                     if value.abs() > limit.value() {
-                        self.log.push(Fault::TorqueLimitExceeded {
-                            joint: self.joint_ids[i],
-                            commanded: NewtonMetres(value),
-                            limit,
-                        });
+                        Self::note(
+                            &self.policy,
+                            &mut self.log,
+                            &mut self.worst,
+                            Fault::TorqueLimitExceeded {
+                                joint: self.joint_ids[i],
+                                commanded: NewtonMetres(value),
+                                limit,
+                            },
+                        );
                     } else if value.abs() > self.torque_now[i] {
-                        self.log.push(Fault::TorqueSpeedExceeded {
-                            joint: self.joint_ids[i],
-                            commanded: NewtonMetres(value),
-                            available: NewtonMetres(self.torque_now[i]),
-                        });
+                        Self::note(
+                            &self.policy,
+                            &mut self.log,
+                            &mut self.worst,
+                            Fault::TorqueSpeedExceeded {
+                                joint: self.joint_ids[i],
+                                commanded: NewtonMetres(value),
+                                available: NewtonMetres(self.torque_now[i]),
+                            },
+                        );
                     }
                 }
                 CommandKind::Unbounded => {}
@@ -271,10 +303,15 @@ impl<const N: usize> Supervisor<N> {
                     .as_mut()
                     .and_then(|m| m.saturation(i, clamped))
                 {
-                    self.log.push(Fault::SustainedSaturation {
-                        joint: self.joint_ids[i],
-                        ticks,
-                    });
+                    Self::note(
+                        &self.policy,
+                        &mut self.log,
+                        &mut self.worst,
+                        Fault::SustainedSaturation {
+                            joint: self.joint_ids[i],
+                            ticks,
+                        },
+                    );
                 }
             }
         }
@@ -312,7 +349,13 @@ impl<const N: usize> Supervisor<N> {
         }
 
         self.log.clear();
-        self.log.push(Fault::NonFiniteObservation { index });
+        self.worst = Response::ClampAndContinue;
+        Self::note(
+            &self.policy,
+            &mut self.log,
+            &mut self.worst,
+            Fault::NonFiniteObservation { index },
+        );
         self.record_input_faults(input);
         self.record_context_faults(input);
 
@@ -328,61 +371,111 @@ impl<const N: usize> Supervisor<N> {
     /// do not depend on the command's values.
     fn record_input_faults(&mut self, input: &TickInput<'_>) {
         if input.observation_age > self.freshness.observation {
-            self.log.push(Fault::StaleObservation {
-                age: input.observation_age,
-                limit: self.freshness.observation,
-            });
+            Self::note(
+                &self.policy,
+                &mut self.log,
+                &mut self.worst,
+                Fault::StaleObservation {
+                    age: input.observation_age,
+                    limit: self.freshness.observation,
+                },
+            );
         }
         if input.comms_age > self.freshness.comms {
-            self.log.push(Fault::CommunicationsLost {
-                age: input.comms_age,
-                limit: self.freshness.comms,
-            });
+            Self::note(
+                &self.policy,
+                &mut self.log,
+                &mut self.worst,
+                Fault::CommunicationsLost {
+                    age: input.comms_age,
+                    limit: self.freshness.comms,
+                },
+            );
         }
         if input.mode.authority() == ActuationAuthority::None {
-            self.log
-                .push(Fault::ActuationNotPermitted { mode: input.mode });
+            Self::note(
+                &self.policy,
+                &mut self.log,
+                &mut self.worst,
+                Fault::ActuationNotPermitted { mode: input.mode },
+            );
         }
     }
 
     /// Records the temperature and contact faults.
     fn record_context_faults(&mut self, input: &TickInput<'_>) {
         for (i, &temp) in input.temperatures.iter().enumerate() {
-            if i < self.thermal_limits.len() && temp.value() >= self.thermal_limits[i].value() {
-                self.log.push(Fault::OverTemperature {
-                    actuator: self.actuator_ids[i],
-                    measured: temp,
-                    limit: self.thermal_limits[i],
-                });
+            // A reading that is not a finite number is a failed sensor, not
+            // a cool actuator: `NaN >= limit` is false, so without the
+            // explicit check it would pass silently at full torque.
+            if i < self.thermal_limits.len()
+                && (!temp.value().is_finite() || temp.value() >= self.thermal_limits[i].value())
+            {
+                Self::note(
+                    &self.policy,
+                    &mut self.log,
+                    &mut self.worst,
+                    Fault::OverTemperature {
+                        actuator: self.actuator_ids[i],
+                        measured: temp,
+                        limit: self.thermal_limits[i],
+                    },
+                );
             }
         }
 
         for &site in input.active_contacts {
             if !input.permitted_contacts.contains(&site) {
-                self.log.push(Fault::UnauthorizedContact { site });
+                Self::note(
+                    &self.policy,
+                    &mut self.log,
+                    &mut self.worst,
+                    Fault::UnauthorizedContact { site },
+                );
             }
         }
 
         if let Some(m) = &self.envelope {
             for (site, energy, budget) in m.over_budget() {
-                self.log.push(Fault::ContactEnergyExceeded {
-                    site,
-                    energy,
-                    budget,
-                });
+                Self::note(
+                    &self.policy,
+                    &mut self.log,
+                    &mut self.worst,
+                    Fault::ContactEnergyExceeded {
+                        site,
+                        energy,
+                        budget,
+                    },
+                );
             }
-            for &interlock in input.mode.required_interlocks() {
-                if !m.is_closed(interlock) {
-                    self.log.push(Fault::InterlockOpen { interlock });
-                }
+        }
+
+        // The interlock requirement comes from the *mode*, not from the
+        // envelope configuration: without a monitor to attest closure, a
+        // required interlock cannot be verified closed and is treated as
+        // open. A supervisor without an envelope monitor therefore refuses
+        // every mode that requires interlocks, instead of skipping the check.
+        for &interlock in input.mode.required_interlocks() {
+            let closed = self
+                .envelope
+                .as_ref()
+                .is_some_and(|m| m.is_closed(interlock));
+            if !closed {
+                Self::note(
+                    &self.policy,
+                    &mut self.log,
+                    &mut self.worst,
+                    Fault::InterlockOpen { interlock },
+                );
             }
         }
     }
 
-    /// The most severe declared response among this tick's recorded faults,
-    /// or [`Response::ClampAndContinue`] when there are none (the vacuous
-    /// case: nothing to clamp, the command passes through).
-    fn most_severe_response(&self) -> Response {
+    /// Records a detected fault: folds its declared response into the
+    /// tick's severity *before* the log's capacity is consulted, then logs
+    /// it (the log drops records past capacity and only counts them; a
+    /// dropped record must never mean a downgraded response).
+    fn note(policy: &FaultPolicy, log: &mut FaultLog<N>, worst: &mut Response, fault: Fault) {
         fn severity(r: Response) -> u8 {
             match r {
                 Response::ClampAndContinue => 0,
@@ -391,13 +484,19 @@ impl<const N: usize> Supervisor<N> {
                 Response::EmergencyStop => 3,
             }
         }
-        self.log
-            .entries()
-            .iter()
-            .flatten()
-            .map(|f| self.policy.response_for(f.category()))
-            .max_by_key(|r| severity(*r))
-            .unwrap_or(Response::ClampAndContinue)
+        let response = policy.response_for(fault.category());
+        if severity(response) > severity(*worst) {
+            *worst = response;
+        }
+        log.push(fault);
+    }
+
+    /// The most severe declared response among this tick's *detected*
+    /// faults — including any the log had no room to record — or
+    /// [`Response::ClampAndContinue`] when there are none (the vacuous
+    /// case: nothing to clamp, the command passes through).
+    fn most_severe_response(&self) -> Response {
+        self.worst
     }
 
     fn apply(&mut self, response: Response, raw: &[f64], out: &mut [f64]) {
@@ -528,9 +627,13 @@ mod tests {
         }
     }
 
+    // Sim-eval: the plain `supervisor()` fixture installs no envelope
+    // monitor, and a hardware mode's required interlocks are treated as
+    // open when no monitor can attest them closed. Hardware modes are
+    // exercised by the envelope tests, which measure interlock closure.
     fn nominal_input() -> TickInput<'static> {
         TickInput {
-            mode: OperatingMode::HwSupported,
+            mode: OperatingMode::SimEval,
             observation_age: Duration::from_millis(1),
             comms_age: Duration::from_millis(1),
             temperatures: &[Celsius(40.0)],
@@ -664,8 +767,10 @@ mod tests {
         s.envelope_mut()
             .unwrap()
             .measure(&[0.0], &[Celsius(30.0)], &[], 0.01, &SUPPORTED[..2]);
+        let mut input = nominal_input();
+        input.mode = OperatingMode::HwSupported;
         assert_eq!(
-            s.check_tick(&nominal_input(), &[0.0], &mut out).unwrap(),
+            s.check_tick(&input, &[0.0], &mut out).unwrap(),
             Response::EmergencyStop
         );
         assert!(s.log().entries().iter().flatten().any(|f| matches!(
@@ -859,5 +964,71 @@ mod tests {
             1,
             "two faults into a one-slot log must overflow once"
         );
+    }
+
+    #[test]
+    fn a_fault_dropped_by_a_full_log_still_escalates_the_response() {
+        // One log slot: the stale-observation fault (hold category) fills
+        // it, and the interlock-open fault — detected later in the tick,
+        // escalation category — is dropped by the log. The response must
+        // come from every *detected* fault, not every recorded one.
+        let mut sup: Supervisor<1> = Supervisor::new(
+            &profile(),
+            FaultPolicy::conservative_default(),
+            FreshnessLimits {
+                observation: Duration::from_millis(1),
+                comms: Duration::from_millis(1),
+            },
+            CommandKind::Position,
+        );
+        let mut bad = nominal_input();
+        bad.observation_age = Duration::from_millis(999);
+        bad.mode = OperatingMode::HwSupported; // interlocks unverifiable: open
+        let mut out = [0.0];
+        let response = sup.check_tick(&bad, &[0.1], &mut out).unwrap();
+        assert_eq!(response, Response::EmergencyStop);
+        assert!(sup.log().overflowed() > 0);
+        assert!(
+            !sup.log()
+                .entries()
+                .iter()
+                .flatten()
+                .any(|f| matches!(f, Fault::InterlockOpen { .. })),
+            "the escalating fault itself was dropped; only its severity survived"
+        );
+    }
+
+    #[test]
+    fn a_hardware_mode_without_an_envelope_monitor_is_refused() {
+        // The interlock requirement comes from the mode. With no monitor to
+        // attest closure, every required interlock counts as open.
+        let mut sup = supervisor();
+        let mut input = nominal_input();
+        input.mode = OperatingMode::HwSupported;
+        let mut out = [0.0];
+        let response = sup.check_tick(&input, &[0.0], &mut out).unwrap();
+        assert_eq!(response, Response::EmergencyStop);
+        assert!(sup
+            .log()
+            .entries()
+            .iter()
+            .flatten()
+            .any(|f| matches!(f, Fault::InterlockOpen { .. })));
+    }
+
+    #[test]
+    fn a_non_finite_temperature_is_a_fault_not_full_torque() {
+        let mut sup = supervisor();
+        let mut input = nominal_input();
+        input.temperatures = &[Celsius(f64::NAN)];
+        let mut out = [0.0];
+        let response = sup.check_tick(&input, &[0.0], &mut out).unwrap();
+        assert!(sup
+            .log()
+            .entries()
+            .iter()
+            .flatten()
+            .any(|f| matches!(f, Fault::OverTemperature { .. })));
+        assert_ne!(response, Response::ClampAndContinue);
     }
 }

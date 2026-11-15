@@ -120,9 +120,13 @@ pub enum Rejection {
     NotResident = 6,
     /// No descriptor for the retrieved id.
     UnknownSkill = 7,
+    /// The query features contained a non-finite value, so no distance to
+    /// any candidate is meaningful (and `NaN` would slip past the
+    /// out-of-distribution gate, whose comparison is false for it).
+    NonFiniteQuery = 8,
 }
 
-const REJECTIONS: usize = 8;
+const REJECTIONS: usize = 9;
 
 /// Routing counters, fixed-size.
 #[derive(Clone, Debug)]
@@ -299,10 +303,24 @@ impl Selector {
                     .descriptor(r)
                     .is_some_and(|d| self.guards.all_pass(&d.initiation_guards, fs));
                 if ok {
-                    return self.commit(router, r, now_ns, dwelling);
+                    // `commit` answers Keep when the router refuses the
+                    // switch (recovery not resident). While falling, "keep
+                    // the ordinary skill" is not an acceptable translation
+                    // of that refusal: fall through to the protective
+                    // response, as for a recovery whose guards fail.
+                    let d = self.commit(router, r, now_ns, dwelling);
+                    if matches!(d, Decision::Keep) {
+                        return Decision::Protective;
+                    }
+                    return d;
                 }
             }
             return Decision::Protective;
+        }
+        if features.iter().any(|v| !v.is_finite()) {
+            self.reject(Rejection::NonFiniteQuery);
+            self.stats.kept += 1;
+            return Decision::Keep;
         }
         let n = router
             .query_into(features, &mut self.buffer)
@@ -545,5 +563,38 @@ mod tests {
             sel.decide(&mut empty, &[0.0], &standing(), 0),
             Decision::Keep
         );
+    }
+
+    #[test]
+    fn falling_with_a_non_resident_recovery_goes_protective() {
+        // The recovery skill is configured and its (empty) guard list
+        // passes, but no working set is installed, so the router refuses
+        // the switch. The ordinary skill must not keep running during a
+        // fall: the decision falls through to Protective.
+        let (mut sel, _) = setup();
+        let mut empty = Router::new();
+        let falling = FeasibilityState {
+            falling: true,
+            stance: Stance::Flight,
+            ..standing()
+        };
+        assert_eq!(
+            sel.decide(&mut empty, &[0.0], &falling, 10),
+            Decision::Protective
+        );
+        assert_eq!(sel.stats.fallbacks, 1);
+        assert!(sel.stats.rejections[Rejection::NotResident as usize] > 0);
+    }
+
+    #[test]
+    fn a_non_finite_query_keeps_and_counts_instead_of_panicking() {
+        // NaN distances would both panic the former partial_cmp sort and
+        // slip past the out-of-distribution gate (NaN > limit is false).
+        let (mut sel, mut router) = setup();
+        assert_eq!(
+            sel.decide(&mut router, &[f64::NAN], &standing(), 0),
+            Decision::Keep
+        );
+        assert_eq!(sel.stats.rejections[Rejection::NonFiniteQuery as usize], 1);
     }
 }
