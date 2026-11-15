@@ -100,6 +100,7 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`robot-persona`](crates/robot-persona/README.md) | §12.5 | Versioned styles bounded inside validated ranges, an expression arbiter that yields to recovery, session-scoped opponent memory, recognizability and non-degradation evaluation |
 | [`robot-devtools`](crates/robot-devtools/README.md) | §§2.3.1, 13.1, 2.4 | The exclusion gate, the §2.4 services gate over `services/`, the dependency knowledge base (Cargo.lock inventory, staleness sweeps, fault records) and evidence-ledger diffing that refuses unsupported promotions |
 | [`robot-viewer`](crates/robot-viewer/README.md) | §6, §11.2 | Inspection data layer (skeletons, contacts, tracking error, synchronized playback) — no rendering toolkit is wired in; see its README for why |
+| [`robot-viewer-app`](crates/robot-viewer-app/README.md) | §6, §11.2, ADR 0019/0024 | The offline replay viewer: Bevy 0.20.1 behind an off-by-default feature (B.6-qualified for this dev tool only), rendering the same collision geometry the simulator contacts with a skeleton overlay; the std-only replay/data half builds and tests in the default gate |
 | [`robot-cli`](crates/robot-cli/README.md) | PLAN.md §4 | The `robot` binary: data import, motion retarget and validate, sim, train, eval (including `--bundle` verification and the activation gate), skills, adapt identify and replay over the library crates; `deps` and `deploy` named with their reasons |
 
 ### External services (`services/`)
@@ -159,8 +160,7 @@ the first one qualifies (open question C-30).
   published GPU-batched simulators, CubeCL and `wgpu`. CubeCL passed the Appendix B.6
   qualification for the implemented subset only (ADR 0012); it is not a default
   dependency.
-- **No GUI/rendering dependency is qualified**, so `robot-viewer` stops at a
-  data layer. `motion-retarget` now carries a **project-authored,
+- **Bevy 0.20.1 is B.6-qualified for the offline replay viewer** (ADRs 0019/0024): `robot-viewer-app` renders recorded runs behind an off-by-default feature, while `robot-viewer` stays the std-only data layer; live-simulation hooks remain future work. `motion-retarget` now carries a **project-authored,
   qualified box-constrained QP** (ADR 0018): the differential-QP IK step of
   Section 8.3 is selectable per map (`[solver] method = "qp"`), meets the
   G1 punch pipeline's acceptance identically to the Levenberg-Marquardt

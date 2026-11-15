@@ -23,6 +23,7 @@ members = [
     "crates/robot-eval",
     "crates/robot-persona",
     "crates/robot-viewer",
+    "crates/robot-viewer-app",
     "crates/robot-cli",
     "crates/robot-devtools",
 ]
