@@ -1304,3 +1304,77 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
   implementation was not read and no dependency closure inventoried;
   no `Containerfile`, no image, no digest, no `podman` in `devenv.nix`;
   the other three candidate leads stay `unverified`.
+
+## Entry 2026-11-15 (fourth session: gap closure across the stack)
+
+- **Tool / model:** Claude Code with Anthropic `claude-fable-5`
+  (Claude Fable 5), operating autonomously under AGENT.md with the
+  user's instruction to raise every component's implementation level.
+- **What was done:** implemented the named contact gaps of
+  `specs/07` (hull surface topology via `robot_model::hull::hull_faces`
+  and `collision::HullTopology`; `mjc_hillclimbSupport`;
+  `mjc_PlaneConvex`'s four-point plane-hull manifold through `hull4`);
+  enforced `contact_slots` with a per-step dropped-contact count;
+  ran the 12-cell G1 stance sweep and resolved B/S-03 as
+  `options::Tier` with `--tier` on `robot sim multibody`
+  (specs 0.1.10-draft and 0.1.11-draft); wrote and qualified the
+  project-authored box QP (`motion_retarget::qp`) and the
+  differential-QP IK step behind `[solver] method = "qp"`
+  (ADR 0018, SPECS 0.9.1-draft, C-09 partially resolved); built
+  `robot_tasks::env::HumanoidEnv` with `g1_stand` and the
+  outcome-channel task closure, and proved the humanoid training
+  path end to end at smoke scale
+  (`robot-learn/tests/humanoid_training_path.rs`); repaired the rotted
+  cubecl-gated `robot-sim-gpu` agreement suite and re-verified all
+  49 feature-on tests under Mesa Lavapipe with the invocation now
+  recorded in that crate's README.
+- **Artifacts produced:** the code and tests above; ADR 0018;
+  six evidence-ledger rows dated 2026-11-15; README updates in
+  `robot-sim`, `robot-sim-gpu`, `robot-model`, `motion-retarget`,
+  `robot-tasks`, `robot-learn` and the root; specs index, step 03/07/09
+  and appendix-B updates.
+- **Verification:** `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets` (0 warnings), `cargo test --workspace` (62 suites,
+  0 failed), the exclusion gate (99 entries, 473 packages, 24
+  manifests, 2 service records, all valid) all green at the end of
+  the session.
+- **Second wave (same session), via parallel subagent forks of the
+  same model, each verified by the coordinating session:** a README
+  gap sweep across all 24 crates classified every named gap as
+  closable, decision-blocked or environment-blocked; the closable
+  ones were then implemented — `robot sim fidelity` (the battery was
+  library-only), `robot_model::kinematics::forward_kinematics_floating`
+  (the plain entry point now refuses a `Free` joint by name instead of
+  panicking), `robot_perception::attitude::ContactSupport` (the
+  contact-conditioned accelerometer gate), `motion-process`'s
+  tangent-space rotation filtering, automatic resampling and
+  contact-aware segmentation, `motion-validate`'s centre-of-pressure
+  check over collision-derived support polygons, `robot-viewer`'s
+  `viewer-frames/1` content-addressed run storage,
+  `robot_skills::manifest::load_from_blob`, `robot-devtools`'
+  `kb-publish`, and the pinning of `robot-usd`'s already-exact half
+  decode. Four further evidence-ledger rows record the measured and
+  inspected claims.
+- **Deliberately not done:** no commit (none requested); the mid-phase
+  BVH, full `implicit`, `Ball` joints, elliptic cone and constraint
+  islands remain open and named in `robot-sim`'s README; the
+  opponent-forecast half of `robot-control`'s tactical tier stays
+  deferred to SPECS.md Section 9.4's staged pipeline, as that crate's
+  README assigns it; nothing humanoid is trained; no container image
+  pinned (C-30 needs the user's licenses and a runtime decision).
+
+## Entry 2026-11-15 (fifth session segment: direction decisions recorded)
+
+- **Tool / model:** Claude Code with Anthropic `claude-fable-5`.
+- **What was done:** transcribed three project-owner direction decisions
+  into change-control records — ADR 0019 (Bevy as the designated viewer
+  rendering candidate, B.6 pending, app-crate isolation plan), ADR 0020
+  (AMD and NVIDIA GPUs as the batched-backend compute targets, work
+  postponed until the systems exist, Vulkan path confirmed), ADR 0021
+  (dataset intake joins the external-source scope as `data-source/1`
+  records, motion data only initially, per-corpus C-07 audits still
+  blocking) — with SPECS.md 0.9.2-draft, the Appendix B survey row,
+  the §11.2 shortlist and `robot-viewer`'s README updated to match.
+- **Artifacts produced:** the three ADRs and the document updates above.
+- **Deliberately not done:** no Bevy dependency added (B.6 first), no
+  `data-source/1` implementation yet, no dataset fetched or audited.

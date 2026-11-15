@@ -36,7 +36,8 @@ use `target/release/robot`. With no arguments it prints its usage.
 | `robot data inspect <path>` | Decodes a binary chunk or a TOML artifact and reports its contents | `cargo run -p robot-cli -- data inspect <file>` |
 | `robot motion validate <path>` | Parses a BVH source file and checks its motion record (channels, frame rate, license, missing frames). It does not validate a retargeted robot motion | `cargo run -p robot-cli -- motion validate <file.bvh>` |
 | `robot sim qualify [--steps N] [--dt S]` | Runs the analytic pendulum energy-drift check (defaults: 2000 steps, 0.001 s) | `cargo run -p robot-cli -- sim qualify` |
-| `robot sim multibody [--floating] [--zero-torque] [--dt S] [--steps N] [--out DIR] [--scene FILE] [--actuation drives\|damping\|zero] [--limit-margin RAD] [--integrator euler\|implicitfast\|rk4]` | Runs the vendored Unitree G1, loaded from its USD description, through the composite-frame dynamics, exact collision manifolds and Newton constraint solver of `robot_sim::world`. Without `--floating` the pelvis is fixed. With `--floating` it is a free base on the scene's ground plane (default `assets/scenes/g1_ground.usda`), held by the model's declared USD drives, or by zero torque with `--zero-torque`. `--out DIR` writes per-step CSV, JSON Lines and SVG pose frames plus two USD replays (`replay.usda`, `replay_playback.usda`) and requires `--floating`. Defaults: `--dt 0.0001`, `--actuation drives`, `--limit-margin 0`, `--integrator euler`; a floating run covers 2 s of simulated time, a fixed-base run 2000 steps | `cargo run -p robot-cli -- sim multibody --floating --out /tmp/g1-frames` |
+| `robot sim fidelity [--out DIR]` | Runs the schema v8 analytic fidelity battery at every declared measurement tier, prints per-tier results with the contact-applicability and probe rows, and with `--out` writes `fidelity.toml` | `cargo run -p robot-cli -- sim fidelity --out /tmp/fidelity` |
+| `robot sim multibody [--floating] [--zero-torque] [--dt S] [--steps N] [--out DIR] [--scene FILE] [--actuation drives\|damping\|zero] [--limit-margin RAD] [--integrator euler\|implicitfast\|rk4] [--tier rollout\|reference\|acceptance]` | Runs the vendored Unitree G1, loaded from its USD description, through the composite-frame dynamics, exact collision manifolds and Newton constraint solver of `robot_sim::world`. Without `--floating` the pelvis is fixed. With `--floating` it is a free base on the scene's ground plane (default `assets/scenes/g1_ground.usda`), held by the model's declared USD drives, or by zero torque with `--zero-torque`. `--out DIR` writes per-step CSV, JSON Lines and SVG pose frames plus two USD replays (`replay.usda`, `replay_playback.usda`) and requires `--floating`. Defaults: `--dt 0.0001`, `--actuation drives`, `--limit-margin 0`, `--integrator euler`; `--tier` seeds the measured knob bundles of `robot_sim::options::Tier` with explicit flags overriding; a floating run covers 2 s of simulated time, a fixed-base run 2000 steps | `cargo run -p robot-cli -- sim multibody --floating --out /tmp/g1-frames` |
 | `robot eval summarize <values...>` | Prints summary statistics for a list of numbers | `cargo run -p robot-cli -- eval summarize 1.0 2.0 3.0` |
 | `robot data import <source> --store <dir> [--license <id>] [--training]` | Detects the format by content (BVH, C3D, AMASS `.npz`), stores the original content-addressed in the blob store, parses it and reports the inspection | `cargo run -p robot-cli -- data import clip.npz --store /tmp/blobs` |
 | `robot motion retarget <bvh> --map <file> --out <csv> [--robot g1\|g1-usd] [--unit m\|cm\|mm] [--up y\|z]` | Retargets a BVH motion onto the named vendored robot through a `retarget-map/1` file and writes the robot-reference CSV | `cargo run -p robot-cli -- motion retarget clip.bvh --map map.toml --out ref.csv` |
@@ -62,7 +63,7 @@ exercised through their tests. Beyond the CLI, these are available:
 - GPU examples (need `--features cubecl` and a working wgpu/Vulkan adapter; ADR 0012 records runs on Intel Vulkan and Mesa Lavapipe):
   - `cargo run -p robot-sim-gpu --features cubecl --example gpu_latency` prints the max error against the CPU reference, bitwise determinism over repeated launches, and wall-clock latency. It is not a throughput benchmark.
   - `cargo run -p robot-sim-gpu --features cubecl --example gpu_resource_repeatability` prints transfer-inclusive resource accounting for the pendulum RK4 and equality paths.
-- Fidelity report: `robot_sim::fidelity` writes `fidelity.toml` (schema v8) through its library API. Only the tests call it, so no command currently produces the file.
+- Fidelity report: `robot sim fidelity [--out DIR]` runs the archival analytic battery (schema v8) at every declared measurement tier and writes `fidelity.toml` through `robot_sim::fidelity`'s own writer; exit 0 is the production pass of the analytic subset, with the G1 contact-applicability and probe rows printed but, per the schema, not changing the verdict.
 
 Every crate below has a real, tested implementation grounded in a specific
 SPECS.md section (no stub crates remain) and its own `README.md` describing
@@ -86,7 +87,7 @@ and PLAN.md Phase 0 are in `docs/ledger/`.
 | [`robot-nn`](crates/robot-nn/README.md) | gap-filling, §9/§10 | Allocation-free MLP and GRU inference, the `robot-mlp/1` weights format with unsupported-operator refusal, and the `Policy` seams |
 | [`robot-sim`](crates/robot-sim/README.md) | §9.1 | Pure-array CPU core: pendulum benchmarks; the `world` simulation path (composite-rigid-body mass matrix, unified contact/limit/equality solver with primal Newton default, GJK/EPA collision with convex-hull meshes, semi-implicit Euler, `implicitfast` and RK4, the model's declared actuators, per-run `SimOptions`); the ABA/RNE solver kept as its oracle; an oracle module and a schema-v8 fidelity harness. The per-step spec index is [`specs/README.md`](crates/robot-sim/specs/README.md) |
 | [`robot-sim-gpu`](crates/robot-sim-gpu/README.md) | §9.1, PLAN.md Phase 3 | Feature-gated CubeCL f32 backend (`--features cubecl`, off by default) for a subset of the `robot-sim` functions, with CPU-vs-GPU agreement tests and `tolerances.toml`. Not part of the default build |
-| [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Stand, perturbation, tracking, reach, footwork and boxing-pad tasks over a robot-agnostic humanoid state; privileged-observation audit; calibrated randomization with held-out ranges |
+| [`robot-tasks`](crates/robot-tasks/README.md) | §9 | Stand, perturbation, tracking, reach, footwork and boxing-pad tasks over a robot-agnostic humanoid state; privileged-observation audit; calibrated randomization with held-out ranges; `HumanoidEnv`, the world-under-declared-drives training environment PPO collects from |
 | [`robot-usd`](crates/robot-usd/README.md) | §7.1, ADR 0015 | Std-only OpenUSD reader (USDC and USDA) with LIVRPS composition (sublayers, inherits, variants, references, payloads, specializes, list edits, layer offsets, target remapping), and the USD replay writer |
 | [`robot-learn`](crates/robot-learn/README.md) | §§7.6, 9.2, 9.5 | Backprop, Adam, GAE, a diagonal Gaussian policy, rollout buffers, PPO |
 | [`robot-skills`](crates/robot-skills/README.md) | §10 | Skill descriptors, exact retrieval, R1 working sets, the R2 selector (feasibility, OOD, transitions, dwell, hysteresis, recovery preemption, counters), expert staging, the Markdown catalog, `skill-manifest/1` files |
@@ -124,15 +125,24 @@ the first one qualifies (open question C-30).
   returns 90.8 to 97.1 against 34.2 for zero action), after the balance task's
   reward was found to pay the agent to fall and was given an alive bonus. The
   earlier negative result and its correction are recorded in `robot-learn`'s
-  README. Nothing humanoid is trained yet.
+  README. **The humanoid training path now exists and runs end to end**
+  (`robot_tasks::env::HumanoidEnv` over the G1 under its declared drives,
+  rewarded by the stand task's registry, collected and updated by PPO at
+  smoke scale) — but nothing humanoid is *trained*: a standing policy is a
+  compute-scale run this workspace has not performed.
 - **`robot-sim` is a partial implementation, not a high-fidelity engine.** The CPU
   path runs the example formulation end to end: composite-frame dynamics, all
   33 of the G1's declared colliders (15 meshes reduced to convex hulls at
   import), joint-limit and contact rows in one Newton-solved convex problem,
   and the model's own declared drives, with `euler`, `implicitfast` and `rk4`
-  selectable per run. Not ported: full `implicit`, hill-climbing hull support
-  and multi-point plane-hull manifolds, `Ball` joints, and named fidelity
-  tiers. The GPU backend covers only the subset listed in
+  selectable per run, hull support hill-climbing the hull's adjacency graph,
+  multi-point plane-hull manifolds, an enforced `contact_slots` budget, and
+  the named fidelity tiers of `--tier` (`rollout`/`reference`/`acceptance`),
+  grounded in a measured stance sweep: `implicitfast` at 1 ms is the only
+  integrator that passes the stance battery there, at 5.9 times the
+  reference configuration's speed. Not ported: full `implicit`, `Ball`
+  joints, a mid-phase BVH, the elliptic cone and constraint islands.
+  The GPU backend covers only the subset listed in
   `crates/robot-sim-gpu/src/lib.rs`; the general closure-based RK4, batched
   G1 dynamics, and the contact, limit and friction solver are not ported.
   The pelvis and torso carry no collision geometry in the vendored layer. At
@@ -149,11 +159,14 @@ the first one qualifies (open question C-30).
   published GPU-batched simulators, CubeCL and `wgpu`. CubeCL passed the Appendix B.6
   qualification for the implemented subset only (ADR 0012); it is not a default
   dependency.
-- **No GUI/rendering or constrained-QP-solver dependency is qualified**, so
-  `robot-viewer` stops at a data layer and `motion-retarget`'s IK is a
-  Levenberg-Marquardt baseline (limits by projection, self-collision as a
-  penalty) rather than the QP/whole-body solve SPECS.md Section 8.3 also
-  names as a later option.
+- **No GUI/rendering dependency is qualified**, so `robot-viewer` stops at a
+  data layer. `motion-retarget` now carries a **project-authored,
+  qualified box-constrained QP** (ADR 0018): the differential-QP IK step of
+  Section 8.3 is selectable per map (`[solver] method = "qp"`), meets the
+  G1 punch pipeline's acceptance identically to the Levenberg-Marquardt
+  baseline and runs faster there (11.4 ms vs 16.0 ms for six frames); the
+  baseline remains the default, and whole-body optimization with general
+  constraint rows remains open.
 - **C-04 (canonical frames/gravity/quaternion convention) and most of
   Appendix C's other open questions remain genuinely open** — not resolved
   by this implementation, by design; see the ADRs in `docs/decisions/` for

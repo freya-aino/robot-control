@@ -107,6 +107,7 @@ first use. The three existing files are the template.
 
 ```sh
 robot sim qualify                      # analytic pendulum energy-drift check
+robot sim fidelity --out /tmp/fid      # schema v8 analytic battery, writes fidelity.toml
 robot sim multibody                    # fixed-base G1, 2000 steps
 robot sim multibody --floating --out /tmp/g1   # free base on the ground scene,
                                        # 2 s, writes CSV/JSONL/SVG frames + USDA replays
@@ -114,7 +115,9 @@ robot sim multibody --floating --out /tmp/g1   # free base on the ground scene,
 
 The floating run is judged on pelvis drop, ground penetration and settled
 energy, and prints PASS, FAIL or INCONCLUSIVE with the numbers. Useful
-flags: `--integrator euler|implicitfast|rk4`, `--actuation
+flags: `--tier rollout|reference|acceptance` (the measured knob bundles of
+`robot_sim::options::Tier`; explicit flags override what a tier seeds),
+`--integrator euler|implicitfast|rk4`, `--actuation
 drives|damping|zero` (the model's own USD drive gains are the default),
 `--scene <usda>` for a different environment, `--dt`, `--steps`,
 `--limit-margin`.
