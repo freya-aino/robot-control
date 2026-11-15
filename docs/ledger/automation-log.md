@@ -1378,3 +1378,35 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
 - **Artifacts produced:** the three ADRs and the document updates above.
 - **Deliberately not done:** no Bevy dependency added (B.6 first), no
   `data-source/1` implementation yet, no dataset fetched or audited.
+
+## Entry 2026-11-15 (sixth session segment: the approved decisions plan, phases 0-4)
+
+- **Tool / model:** Claude Code with Anthropic `claude-fable-5`, executing
+  the plan the project owner approved after the decision rounds.
+- **Phase 0:** the prior session's work landed as thirteen per-component
+  commits on `main`, each gate-checked by the pre-commit hooks.
+- **Phase 1:** ADR 0022 (canonical convention, C-04 resolved, code hedges
+  swept), ADR 0023 (Docker runtime, SPECS 2.4 item 8 changed), C-17 and
+  S-10 confirmations; the acceleration/jerk acceptance gate in
+  motion-validate, derived from declared envelopes with the M_jj
+  derivation held to the CRB diagonal by a cross-algorithm test.
+- **Phase 2:** Bevy 0.20.1 through B.6 (ADR 0024): 336-crate closure
+  swept all-permissive, 117 s clean build, X11-only deviation recorded;
+  `robot-viewer-app` with the std-only replay library and the Bevy
+  renderer behind the off-by-default feature; headless `--dump` verified
+  against a recorded rollout-tier run.
+- **Phase 3:** the `data-source/1` registry (sources gate, format-routed
+  beside robot-service/1); CMU audited from its own front page, one
+  boxing trial fetched and round-tripped through `robot data import`,
+  the record pinned `code_inspected`; AMASS/KIT/LAFAN1 registered
+  `unverified` pending the owner's registrations and audits.
+- **Phase 4:** ADR 0025, the pluggable robot bridge: `robot-bridge/1`
+  configurations validated against the profile, the committed G1 bridge
+  mapping all 29 joints onto the SDK's motor order (surface
+  `paper_verified` at pinned revision `aaf69cb5`), command round-tripped
+  through the adapter and firmware peer.
+- **Verification:** the full gate green after every phase and at this
+  entry (fmt, clippy 0, workspace tests 0 failures, exclusion gate with
+  2 service + 4 data-source records).
+- **Remaining from the plan:** phase 5, the deep robot-sim ports (full
+  `implicit` first), begun next.
