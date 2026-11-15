@@ -190,6 +190,20 @@ struct Src {
     stack: usize,
     path: String,
     offset: Offset,
+    /// The namespace translation the arc behind this source implies:
+    /// `(root in the source layer, root in the composed stage)`. `None`
+    /// for a source that is not behind an arc (identity).
+    root: Option<(String, String)>,
+}
+
+impl Src {
+    /// Where this source's prim sits in the composed namespace.
+    fn composed_path(&self) -> String {
+        match &self.root {
+            Some(roots) => remap_path(&self.path, roots),
+            None => self.path.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -205,6 +219,11 @@ struct Composer {
 }
 
 const MAX_NESTING: usize = 64;
+
+/// The deepest prim nesting the recursive walks follow (the composed-tree
+/// walk here, and the text parser's prim recursion): one stack frame per
+/// level, so a bound keeps a crafted file from overflowing the stack.
+pub(crate) const MAX_PRIM_DEPTH: usize = 256;
 
 impl Composer {
     fn add(&mut self, layer: Layer) -> usize {
@@ -301,7 +320,12 @@ impl Composer {
 
     /// Expands inherits, variant selections, references, payloads and
     /// specializes into an ordered source list, LIVRPS order.
-    fn gather(&mut self, sources: &[Src], depth: usize) -> Result<Vec<Src>> {
+    fn gather(
+        &mut self,
+        sources: &[Src],
+        depth: usize,
+        outer_selections: &[(String, String)],
+    ) -> Result<Vec<Src>> {
         if depth > MAX_NESTING {
             let at: Vec<String> = sources
                 .iter()
@@ -317,6 +341,25 @@ impl Composer {
         let mut refs = Vec::new();
         let mut payloads = Vec::new();
         let mut specializes = Vec::new();
+        // Variant selections compose strongest-wins per set name over the
+        // *whole* source list: a stronger opinion (a local one, or a
+        // stronger sublayer's) replaces a weaker one, it does not add to
+        // it, so only the winning variant of each set becomes a source and
+        // the deselected variant's opinions cannot leak into the prim.
+        let mut chosen: Vec<(String, String)> = outer_selections.to_vec();
+        for s in sources {
+            for (at, _) in self.specs_at(s) {
+                if let Some(Value::Dictionary(sel)) = self.spec(at).field("variantSelection") {
+                    for (set, choice) in sel {
+                        if let Value::String(choice) = choice {
+                            if !chosen.iter().any(|(k, _)| k == set) {
+                                chosen.push((set.clone(), choice.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for s in sources {
             for (field, out) in [
                 ("inherits", &mut inherits),
@@ -328,15 +371,19 @@ impl Composer {
                     })?;
                     out.push(Src {
                         stack: s.stack,
+                        root: Some((path.clone(), s.composed_path())),
                         path,
                         offset: s.offset,
                     });
                 }
             }
+            // This source's declared variant sets, each resolved to the
+            // strongest selection over the whole source list.
+            let mut sets: Vec<String> = Vec::new();
             for (at, _) in self.specs_at(s) {
                 let spec = self.spec(at).clone();
                 if let Some(Value::Dictionary(sel)) = spec.field("variantSelection") {
-                    let mut names = Vec::new();
+                    let mut names: Vec<String> = Vec::new();
                     if let Some(Value::ListOp(op)) = spec.field("variantSetNames") {
                         names = op
                             .effective_items()
@@ -348,16 +395,20 @@ impl Composer {
                         names = sel.iter().map(|(k, _)| k.clone()).collect();
                     }
                     for set in names {
-                        if let Some((_, Value::String(choice))) =
-                            sel.iter().find(|(k, _)| *k == set)
-                        {
-                            variants.push(Src {
-                                stack: s.stack,
-                                path: format!("{}{{{set}={choice}}}", s.path),
-                                offset: s.offset,
-                            });
+                        if !sets.contains(&set) {
+                            sets.push(set);
                         }
                     }
+                }
+            }
+            for set in sets {
+                if let Some((_, choice)) = chosen.iter().find(|(k, _)| *k == set) {
+                    variants.push(Src {
+                        stack: s.stack,
+                        path: format!("{}{{{set}={choice}}}", s.path),
+                        offset: s.offset,
+                        root: Some((format!("{}{{{set}={choice}}}", s.path), s.composed_path())),
+                    });
                 }
             }
             for (field, out) in [("references", &mut refs), ("payload", &mut payloads)] {
@@ -390,7 +441,7 @@ impl Composer {
             if group.is_empty() {
                 continue;
             }
-            for s in self.gather(&group, depth + 1)? {
+            for s in self.gather(&group, depth + 1, &chosen)? {
                 if !out.contains(&s) {
                     out.push(s);
                 }
@@ -439,6 +490,7 @@ impl Composer {
         };
         Ok(Src {
             stack,
+            root: Some((path.clone(), from.composed_path())),
             path,
             offset: compose_offset(from.offset, arc.layer_offset),
         })
@@ -471,6 +523,7 @@ impl Composer {
             stack,
             path: "/".to_owned(),
             offset: IDENTITY,
+            root: None,
         };
         let mut metadata: Vec<(String, Value)> = Vec::new();
         let mut names: Vec<String> = Vec::new();
@@ -488,7 +541,7 @@ impl Composer {
             }
             union_names(&mut names, spec.field("primChildren"));
         }
-        let sources = self.gather(&[root_src], 0)?;
+        let sources = self.gather(&[root_src], 0, &[])?;
         for s in &sources {
             for (at, _) in self.specs_at(s) {
                 let spec = self.spec(at).clone();
@@ -503,6 +556,7 @@ impl Composer {
                     stack: s.stack,
                     path: child_path(&s.path, name),
                     offset: s.offset,
+                    root: s.root.clone(),
                 })
                 .collect();
             match self.compose_prim(&child, &child_path("/", name))? {
@@ -525,7 +579,15 @@ impl Composer {
     /// Composes the prim whose opinions are at `sources`, or `None` if no
     /// source authors it.
     fn compose_prim(&mut self, sources: &[Src], path: &str) -> Result<Option<Prim>> {
-        let full = self.gather(sources, 0)?;
+        // The walk recurses once per prim-tree level; the bound turns a
+        // crafted file's hundred-thousand-deep chain into an error instead
+        // of a stack overflow.
+        if path.split('/').count() > MAX_PRIM_DEPTH {
+            return Err(UsdError::Unsupported(format!(
+                "prims nested deeper than {MAX_PRIM_DEPTH} at {path}"
+            )));
+        }
+        let full = self.gather(sources, 0, &[])?;
         let mut fields: Vec<(String, Value)> = Vec::new();
         let mut children: Vec<String> = Vec::new();
         let mut properties: Vec<String> = Vec::new();
@@ -565,6 +627,7 @@ impl Composer {
                     stack: s.stack,
                     path: child_path(&s.path, name),
                     offset: s.offset,
+                    root: s.root.clone(),
                 })
                 .collect();
             match self.compose_prim(&child, &child_path(path, name))? {
@@ -629,11 +692,17 @@ impl Composer {
         let mut target_ops: Vec<(ListOp, (String, String))> = Vec::new();
         let mut kind = PropertyKind::Attribute;
         for s in owners {
-            let roots = arc_roots(&s.path, owner_path);
+            // The namespace translation recorded when the arc was resolved;
+            // a local source translates as the identity.
+            let roots = s
+                .root
+                .clone()
+                .unwrap_or_else(|| (owner_path.to_owned(), owner_path.to_owned()));
             let prop = Src {
                 stack: s.stack,
                 path: format!("{}.{name}", s.path),
                 offset: s.offset,
+                root: s.root.clone(),
             };
             for (at, off) in self.specs_at(&prop) {
                 let spec = self.spec(at);
@@ -688,20 +757,6 @@ impl Composer {
         }
         Ok(out)
     }
-}
-
-/// The namespace translation a source implies: the arc's root path in the
-/// source layer and in the composed stage. Both are the paths left after
-/// stripping the longest common trailing component sequence; a source that is
-/// not behind an arc yields an identity pair.
-fn arc_roots(src_path: &str, composed_path: &str) -> (String, String) {
-    let s: Vec<&str> = src_path.split('/').collect();
-    let c: Vec<&str> = composed_path.split('/').collect();
-    let mut k = 0;
-    while k + 1 < s.len() && k + 1 < c.len() && s[s.len() - 1 - k] == c[c.len() - 1 - k] {
-        k += 1;
-    }
-    (s[..s.len() - k].join("/"), c[..c.len() - k].join("/"))
 }
 
 /// Remaps a path authored in a source namespace into the composed namespace.

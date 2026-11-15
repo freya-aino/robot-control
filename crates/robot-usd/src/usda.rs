@@ -28,7 +28,7 @@
 
 use crate::error::{Result, UsdError};
 use crate::layer::{Layer, Spec, SpecKind};
-use crate::stage::{Prim, Property, PropertyKind, Stage};
+use crate::stage::{Prim, Property, PropertyKind, Stage, MAX_PRIM_DEPTH};
 use crate::value::{ListOp, Specifier, Value, Variability};
 use std::fmt::Write as _;
 
@@ -656,6 +656,11 @@ impl Parser {
 
     /// Parses one prim; returns its specs and the prim record.
     fn prim(&mut self, parent: &str) -> Result<(ParsedPrim, ())> {
+        // One stack frame per nesting level: bounded, or a crafted file
+        // overflows the stack instead of erring.
+        if parent.split('/').count() > MAX_PRIM_DEPTH {
+            return self.err(format!("prims nested deeper than {MAX_PRIM_DEPTH}"));
+        }
         let spec_kw = self.ident()?;
         let specifier = match spec_kw.as_str() {
             "def" => Specifier::Def,

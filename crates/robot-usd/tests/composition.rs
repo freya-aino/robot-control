@@ -416,3 +416,144 @@ fn standalone_target_specs_are_accepted_only_when_fieldless() {
         Stage::from_layers(vec![base(vec![("custom".to_owned(), Value::Bool(true))])]).unwrap_err();
     assert!(matches!(err, UsdError::Unsupported(_)), "{err:?}");
 }
+
+#[test]
+fn a_sibling_target_is_kept_when_the_referenced_prim_shares_the_composed_name() {
+    // /arm references /tpl/arm: the shared trailing name must not widen
+    // the remap root to /tpl -> /, which would rewrite the sibling target
+    // /tpl/base that the module contract promises is kept as authored.
+    let layer = Layer {
+        identifier: "root".to_owned(),
+        specs: vec![
+            pseudo_root(vec![("primChildren".to_owned(), tokens(&["tpl", "arm"]))]),
+            prim(
+                "/tpl",
+                vec![("primChildren".to_owned(), tokens(&["arm", "base"]))],
+            ),
+            prim(
+                "/tpl/arm",
+                vec![
+                    ("primChildren".to_owned(), tokens(&["tip"])),
+                    ("properties".to_owned(), tokens(&["out"])),
+                ],
+            ),
+            prim("/tpl/arm/tip", vec![]),
+            prim("/tpl/base", vec![]),
+            Spec {
+                path: "/tpl/arm.out".to_owned(),
+                kind: SpecKind::Relationship,
+                fields: vec![(
+                    "targetPaths".to_owned(),
+                    list(|op| {
+                        op.appended.push(Value::Path("/tpl/arm/tip".to_owned()));
+                        op.appended.push(Value::Path("/tpl/base".to_owned()));
+                    }),
+                )],
+            },
+            prim(
+                "/arm",
+                vec![(
+                    "references".to_owned(),
+                    list(|op| {
+                        op.appended.push(Value::Reference(Box::new(Arc {
+                            asset_path: String::new(),
+                            prim_path: "/tpl/arm".to_owned(),
+                            layer_offset: (0.0, 1.0),
+                            custom_data: Vec::new(),
+                        })));
+                    }),
+                )],
+            ),
+        ],
+    };
+    let stage = Stage::from_layers(vec![layer]).unwrap();
+    let arm = stage.prim("/arm").unwrap();
+    assert_eq!(
+        arm.property("out").unwrap().targets,
+        vec!["/arm/tip".to_owned(), "/tpl/base".to_owned()],
+        "inside the arc remapped, the sibling kept as authored"
+    );
+}
+
+#[test]
+fn a_stronger_variant_selection_replaces_a_weaker_one() {
+    // /p references /q. /q selects color=blue for itself; /p selects
+    // color=red. The stronger selection must *replace* the weaker one:
+    // only the red variant's opinions may surface, and blue's must not
+    // leak in through the deselected variant.
+    let variant = |path: &str, prop: &str, v: f64| {
+        vec![
+            Spec {
+                path: path.to_owned(),
+                kind: SpecKind::Variant,
+                fields: vec![("properties".to_owned(), tokens(&[prop]))],
+            },
+            attr(&format!("{path}.{prop}"), Value::Double(v)),
+        ]
+    };
+    let mut specs = vec![
+        pseudo_root(vec![("primChildren".to_owned(), tokens(&["q", "p"]))]),
+        prim(
+            "/q",
+            vec![(
+                "variantSelection".to_owned(),
+                Value::Dictionary(vec![("color".to_owned(), Value::String("blue".to_owned()))]),
+            )],
+        ),
+        prim(
+            "/p",
+            vec![
+                (
+                    "references".to_owned(),
+                    list(|op| {
+                        op.appended.push(Value::Reference(Box::new(Arc {
+                            asset_path: String::new(),
+                            prim_path: "/q".to_owned(),
+                            layer_offset: (0.0, 1.0),
+                            custom_data: Vec::new(),
+                        })));
+                    }),
+                ),
+                (
+                    "variantSelection".to_owned(),
+                    Value::Dictionary(vec![("color".to_owned(), Value::String("red".to_owned()))]),
+                ),
+            ],
+        ),
+    ];
+    specs.extend(variant("/q{color=red}", "warmth", 1.0));
+    specs.extend(variant("/q{color=blue}", "coolness", 2.0));
+    let layer = Layer {
+        identifier: "root".to_owned(),
+        specs,
+    };
+    let stage = Stage::from_layers(vec![layer]).unwrap();
+    let p = stage.prim("/p").unwrap();
+    assert!(p.property("warmth").is_some(), "the red variant applies");
+    assert!(
+        p.property("coolness").is_none(),
+        "the deselected blue variant must not leak in"
+    );
+}
+
+#[test]
+fn absurd_prim_nesting_is_refused_not_a_stack_overflow() {
+    let mut specs = vec![pseudo_root(vec![(
+        "primChildren".to_owned(),
+        tokens(&["p0"]),
+    )])];
+    let mut path = String::new();
+    for i in 0..300 {
+        path.push_str(&format!("/p{i}"));
+        let fields = vec![("primChildren".to_owned(), tokens(&[&format!("p{}", i + 1)]))];
+        specs.push(prim(&path, fields));
+    }
+    let layer = Layer {
+        identifier: "root".to_owned(),
+        specs,
+    };
+    assert!(matches!(
+        Stage::from_layers(vec![layer]),
+        Err(UsdError::Unsupported(_))
+    ));
+}
