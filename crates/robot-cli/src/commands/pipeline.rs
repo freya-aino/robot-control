@@ -412,8 +412,16 @@ pub fn motion_validate_reference(source: &Path, args: &[String]) -> i32 {
         // rejects, since this command runs on arbitrary imported robots.
         min_cop_margin: 0.0,
         allow_unchecked_cop: true,
+        // Acceleration and jerk bounds derived from the profile's own
+        // declared effort limits, effective inertias and command latencies
+        // (never invented numbers); a joint declaring no basis gets an
+        // unbounded slot that never rejects.
+        motion_limits: match motion_validate::dynamics::derived_motion_limits(&profile) {
+            Ok(limits) => Some(limits),
+            Err(e) => return fail(e),
+        },
     };
-    eprintln!("note: thresholds (unvalidated defaults): endpoint 0.05 of 1.3 m body size, slip 0.03 m, drift 0.25 m, CoP margin 0 m where checkable");
+    eprintln!("note: thresholds (unvalidated defaults): endpoint 0.05 of 1.3 m body size, slip 0.03 m, drift 0.25 m, CoP margin 0 m where checkable, accel/jerk from the profile's declared envelopes");
     let report = match validate(&human, &reference, &profile, &vc) {
         Ok(r) => r,
         Err(e) => return fail(e),

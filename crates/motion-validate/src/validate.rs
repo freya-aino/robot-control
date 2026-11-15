@@ -380,13 +380,32 @@ mod tests {
             require_tracking: false,
             min_cop_margin: 0.0,
             allow_unchecked_cop: false,
+            // The derived envelope bounds are a genuine check here too: a
+            // gentle standing reach must sit far inside what the G1's own
+            // declared efforts and inertias permit.
+            motion_limits: Some(crate::dynamics::derived_motion_limits(&profile).unwrap()),
         };
         assert_eq!(report.evaluate(&thresholds), Verdict::Accepted);
         let strict = AcceptanceThresholds {
             require_tracking: true,
-            ..thresholds
+            ..thresholds.clone()
         };
         assert!(matches!(report.evaluate(&strict), Verdict::Rejected(_)));
+        // An absurd clip fails the derived gate: scale the report's peaks
+        // past every joint's bound and the codes name the joints.
+        let mut violent = report.clone();
+        for (v, b) in violent
+            .summary
+            .peak_acceleration
+            .iter_mut()
+            .zip(&thresholds.motion_limits.as_ref().unwrap().max_acceleration)
+        {
+            *v = b * 2.0;
+        }
+        let Verdict::Rejected(reasons) = violent.evaluate(&thresholds) else {
+            panic!("expected the over-violent clip to be rejected");
+        };
+        assert!(reasons.iter().any(|r| r.code() == "acceleration_excess"));
     }
 
     #[test]

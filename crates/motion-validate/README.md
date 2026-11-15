@@ -71,12 +71,23 @@ and message, so a threshold change can revisit them.
   the split. A loaded foot with no projectable geometry makes the frame
   `NotCheckable` by name and rejects unless `allow_unchecked_cop` is set —
   a missing polygon never silently passes.
-- Acceleration and jerk are reported as summaries. No limit is declared for
-  them, so the caller decides what is too much.
+- Acceleration and jerk now gate as well as report (project-owner
+  direction, 2026-11-15): `dynamics::derived_motion_limits` derives each
+  joint's acceleration bound from the profile's own declarations — the
+  declared effort limit over the joint's effective inertia `M_jj` at the
+  reference posture, read off one inverse-dynamics column and checked
+  against the composite-rigid-body diagonal by a cross-algorithm test —
+  and the jerk bound as that over the actuator's declared command latency.
+  Never invented numbers: a joint with no effort limit, no actuator or a
+  zero latency gets an unbounded slot that never rejects, stated rather
+  than guessed. `AcceptanceThresholds::motion_limits` is optional
+  (`None` keeps the old report-only behaviour), a width mismatch rejects
+  as `motion_limits_width`, and violations reject with
+  `acceleration_excess`/`jerk_excess` naming the joint.
 
 ## Testing
 
-`cargo test -p motion-validate`: 24 tests. They cover:
+`cargo test -p motion-validate`: 26 tests. They cover:
 - a point mass over a box sole with the hand-computed CoP margin (+0.04 m
   centred, −0.05 m with the sole shifted past the body), the standing G1's
   CoP inside its sole spheres, a 20 m/s² sideways acceleration pushing it

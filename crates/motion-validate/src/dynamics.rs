@@ -279,6 +279,75 @@ pub fn torque_excess(profile: &RobotProfile, torque: &[f64], speed: &[f64]) -> V
     out
 }
 
+/// Per-joint motion bounds derived from the profile's own declarations —
+/// never invented numbers (SPECS.md Section 8.2's smoothness and
+/// feasibility validation, gated by project-owner direction of 2026-11-15).
+///
+/// The acceleration bound is the joint's declared effort limit over its
+/// diagonal effective inertia at the reference (zero) posture: `M_jj` is
+/// read off exactly as one inverse-dynamics column (`qdd = e_j`, zero
+/// velocity, zero gravity), using the same `ArticulatedBody` the torque
+/// estimation already trusts. The jerk bound is the acceleration bound
+/// over the driving actuator's declared `command_latency` — the fastest
+/// the commanded torque, and so the acceleration, can meaningfully change.
+///
+/// A joint with no effort limit, no actuator, or a degenerate `M_jj`
+/// yields `f64::INFINITY` in that slot: there is **no declared basis** for
+/// a bound there, and an unbounded slot never rejects — stated rather
+/// than silently inventing one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DerivedMotionLimits {
+    /// Largest acceptable |acceleration| per joint, rad/s^2.
+    pub max_acceleration: Vec<f64>,
+    /// Largest acceptable RMS jerk per joint, rad/s^3.
+    pub max_rms_jerk: Vec<f64>,
+}
+
+/// Derives [`DerivedMotionLimits`] for a profile. See the type's own
+/// documentation for exactly where each number comes from.
+///
+/// # Errors
+///
+/// [`DynamicsError::Sim`] when the inverse-dynamics column cannot be
+/// evaluated.
+pub fn derived_motion_limits(profile: &RobotProfile) -> Result<DerivedMotionLimits, DynamicsError> {
+    let body = ArticulatedBody::from_profile(profile);
+    let dof = profile.dof();
+    let q = vec![0.0; dof];
+    let qd = vec![0.0; dof];
+    let mut max_acceleration = Vec::with_capacity(dof);
+    let mut max_rms_jerk = Vec::with_capacity(dof);
+    for (j, joint) in profile.actuated_joints().enumerate() {
+        let mut qdd = vec![0.0; dof];
+        qdd[j] = 1.0;
+        let tau = body
+            .inverse_dynamics(&q, &qd, &qdd, Vec3::ZERO)
+            .map_err(|e| DynamicsError::Sim(e.to_string()))?;
+        let m_jj = tau[j];
+        let effort = joint.limits.effort.value();
+        let accel = if effort.is_finite() && effort > 0.0 && m_jj.is_finite() && m_jj > 0.0 {
+            effort / m_jj
+        } else {
+            f64::INFINITY
+        };
+        let latency = profile
+            .actuators
+            .iter()
+            .find(|a| a.joint == joint.id)
+            .map(|a| a.command_latency.as_secs_f64());
+        let jerk = match latency {
+            Some(dt) if dt > 0.0 && accel.is_finite() => accel / dt,
+            _ => f64::INFINITY,
+        };
+        max_acceleration.push(accel);
+        max_rms_jerk.push(jerk);
+    }
+    Ok(DerivedMotionLimits {
+        max_acceleration,
+        max_rms_jerk,
+    })
+}
+
 /// Position-limit excess per joint, as `(joint, excess)`.
 #[must_use]
 pub fn position_excess(profile: &RobotProfile, q: &[f64]) -> Vec<(usize, Radians)> {
@@ -312,6 +381,52 @@ mod tests {
     use super::*;
     use crate::test_support::{g1, reference_from, standing_reference};
     use robot_types::frames::Quat;
+
+    #[test]
+    fn derived_limits_agree_with_the_composite_mass_matrix_diagonal() {
+        // The bound is effort over M_jj, with M_jj read off one
+        // inverse-dynamics column (RNE). The composite-rigid-body algorithm
+        // builds the same matrix by a different recursion in a different
+        // frame, so agreement is a cross-algorithm check, not a tautology.
+        let profile = g1();
+        let limits = derived_motion_limits(&profile).unwrap();
+        let model = robot_sim::composite::CompositeModel::from_profile(&profile);
+        let q = vec![0.0; model.nq];
+        let pos = robot_sim::composite::position(&model, &q).unwrap();
+        let mass = robot_sim::composite::crb(&model, &pos);
+        // The composite model orders degrees of freedom internally; map its
+        // diagonal into the profile's actuated order before comparing.
+        let diag_internal: Vec<f64> = (0..model.nv())
+            .map(|i| mass[model.tree.diag_adr(i)])
+            .collect();
+        let diag = model.dof_to_external(&diag_internal).unwrap();
+        for (j, joint) in profile.actuated_joints().enumerate() {
+            let effort = joint.limits.effort.value();
+            let accel = limits.max_acceleration[j];
+            assert!(accel.is_finite() && accel > 0.0, "joint {j}: {accel}");
+            let m_jj = effort / accel;
+            let crb_jj = diag[j];
+            assert!(
+                (m_jj - crb_jj).abs() <= 1e-9 * crb_jj.max(1.0),
+                "joint {j}: RNE column gives {m_jj}, CRB gives {crb_jj}"
+            );
+            // The jerk bound is exactly the acceleration bound over the
+            // actuator's declared command latency; a zero latency declares
+            // no basis for a jerk bound, so the slot is unbounded.
+            let act = profile
+                .actuators
+                .iter()
+                .find(|a| a.joint == joint.id)
+                .unwrap();
+            let dt = act.command_latency.as_secs_f64();
+            if dt > 0.0 {
+                let expect = accel / dt;
+                assert!((limits.max_rms_jerk[j] - expect).abs() <= 1e-9 * expect);
+            } else {
+                assert!(limits.max_rms_jerk[j].is_infinite(), "joint {j}");
+            }
+        }
+    }
 
     #[test]
     fn standing_still_puts_the_whole_weight_on_the_feet() {

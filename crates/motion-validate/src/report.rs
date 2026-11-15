@@ -89,7 +89,9 @@ pub struct ValidationReport {
 }
 
 /// What the caller accepts. Every field is the caller's choice.
-#[derive(Clone, Copy, PartialEq, Debug)]
+///
+/// No longer `Copy`: the optional per-joint motion limits carry vectors.
+#[derive(Clone, PartialEq, Debug)]
 pub struct AcceptanceThresholds {
     /// Largest normalized endpoint error.
     pub max_normalized_endpoint_error: f64,
@@ -115,6 +117,15 @@ pub struct AcceptanceThresholds {
     /// geometry. `false` rejects them as `cop_unchecked`, so a missing
     /// support polygon can never silently pass.
     pub allow_unchecked_cop: bool,
+    /// Per-joint motion bounds, from
+    /// [`crate::dynamics::derived_motion_limits`] — the profile's own
+    /// declarations, never invented numbers. `None` keeps acceleration and
+    /// jerk report-only (the pre-gate behaviour); an `INFINITY` slot inside
+    /// `Some` means that joint declares no basis for a bound and never
+    /// rejects. A width mismatch against the report rejects as
+    /// `motion_limits_width`, because judging joint `j` by joint `k`'s
+    /// bound would be worse than not judging at all.
+    pub motion_limits: Option<crate::dynamics::DerivedMotionLimits>,
 }
 
 /// Accept or reject.
@@ -205,6 +216,34 @@ pub enum RejectionReason {
         /// Frame.
         frame: usize,
     },
+    /// A joint's peak |acceleration| exceeds its derived bound (effort
+    /// limit over the joint's effective inertia at the reference posture).
+    AccelerationExcess {
+        /// Joint index, in actuated order.
+        joint: usize,
+        /// Peak |acceleration|, rad/s^2.
+        value: f64,
+        /// The derived bound.
+        threshold: f64,
+    },
+    /// A joint's RMS jerk exceeds its derived bound (acceleration bound
+    /// over the actuator's declared command latency).
+    JerkExcess {
+        /// Joint index, in actuated order.
+        joint: usize,
+        /// RMS jerk, rad/s^3.
+        value: f64,
+        /// The derived bound.
+        threshold: f64,
+    },
+    /// The supplied motion limits do not match the report's joint count,
+    /// so no per-joint judgement would be about the joint it names.
+    MotionLimitsWidth {
+        /// Joints in the report.
+        expected: usize,
+        /// Bound slots supplied.
+        found: usize,
+    },
 }
 
 impl RejectionReason {
@@ -223,6 +262,9 @@ impl RejectionReason {
             Self::TrackingMissing => "tracking_missing",
             Self::CopOutside { .. } => "cop_outside",
             Self::CopUnchecked { .. } => "cop_unchecked",
+            Self::AccelerationExcess { .. } => "acceleration_excess",
+            Self::JerkExcess { .. } => "jerk_excess",
+            Self::MotionLimitsWidth { .. } => "motion_limits_width",
         }
     }
 
@@ -239,7 +281,11 @@ impl RejectionReason {
             | Self::Fell { frame }
             | Self::CopOutside { frame, .. }
             | Self::CopUnchecked { frame } => Some(*frame),
-            Self::TrackingFailed { .. } | Self::TrackingMissing => None,
+            Self::TrackingFailed { .. }
+            | Self::TrackingMissing
+            | Self::AccelerationExcess { .. }
+            | Self::JerkExcess { .. }
+            | Self::MotionLimitsWidth { .. } => None,
         }
     }
 }
@@ -298,6 +344,28 @@ impl fmt::Display for RejectionReason {
                 f,
                 "frame {frame}: a loaded foot has no projectable collision geometry, so the \
                  support polygon is unknown"
+            ),
+            Self::AccelerationExcess {
+                joint,
+                value,
+                threshold,
+            } => write!(
+                f,
+                "joint {joint}: peak acceleration {value} rad/s^2 exceeds the derived bound \
+                 {threshold} (effort limit over effective inertia)"
+            ),
+            Self::JerkExcess {
+                joint,
+                value,
+                threshold,
+            } => write!(
+                f,
+                "joint {joint}: RMS jerk {value} rad/s^3 exceeds the derived bound {threshold} \
+                 (acceleration bound over command latency)"
+            ),
+            Self::MotionLimitsWidth { expected, found } => write!(
+                f,
+                "motion limits carry {found} joint bounds where the report has {expected} joints"
             ),
         }
     }
@@ -370,6 +438,48 @@ impl ValidationReport {
                             frame: i,
                             value: *margin,
                             threshold: thresholds.min_cop_margin,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(limits) = &thresholds.motion_limits {
+            let dof = self.summary.peak_acceleration.len();
+            if limits.max_acceleration.len() != dof || limits.max_rms_jerk.len() != dof {
+                reasons.push(RejectionReason::MotionLimitsWidth {
+                    expected: dof,
+                    found: limits.max_acceleration.len().min(limits.max_rms_jerk.len()),
+                });
+            } else {
+                for (joint, (&peak, &bound)) in self
+                    .summary
+                    .peak_acceleration
+                    .iter()
+                    .zip(&limits.max_acceleration)
+                    .enumerate()
+                {
+                    // An INFINITY bound means the profile declares no basis
+                    // for one; it never rejects, and never silently invents.
+                    if peak > bound {
+                        reasons.push(RejectionReason::AccelerationExcess {
+                            joint,
+                            value: peak,
+                            threshold: bound,
+                        });
+                    }
+                }
+                for (joint, (&rms, &bound)) in self
+                    .summary
+                    .rms_jerk
+                    .iter()
+                    .zip(&limits.max_rms_jerk)
+                    .enumerate()
+                {
+                    if rms > bound {
+                        reasons.push(RejectionReason::JerkExcess {
+                            joint,
+                            value: rms,
+                            threshold: bound,
                         });
                     }
                 }
@@ -459,7 +569,53 @@ mod tests {
             require_tracking: false,
             min_cop_margin: 0.0,
             allow_unchecked_cop: false,
+            motion_limits: None,
         }
+    }
+
+    #[test]
+    fn derived_motion_limits_gate_acceleration_and_jerk_by_joint() {
+        use crate::dynamics::DerivedMotionLimits;
+        let mut r = report(&[0.0]);
+        r.summary.peak_acceleration = vec![10.0, 500.0, 3.0];
+        r.summary.rms_jerk = vec![1.0, 1.0, 9e9];
+        let mut t = thresholds();
+        // Joint 0's INFINITY slots are the no-declared-basis case and must
+        // never reject; joint 1 exceeds its acceleration bound; joint 2
+        // exceeds its jerk bound.
+        t.motion_limits = Some(DerivedMotionLimits {
+            max_acceleration: vec![f64::INFINITY, 100.0, 50.0],
+            max_rms_jerk: vec![f64::INFINITY, f64::INFINITY, 1e6],
+        });
+        let Verdict::Rejected(reasons) = r.evaluate(&t) else {
+            panic!("expected rejection");
+        };
+        let codes: Vec<_> = reasons.iter().map(RejectionReason::code).collect();
+        assert_eq!(codes, vec!["acceleration_excess", "jerk_excess"]);
+        assert!(matches!(
+            reasons[0],
+            RejectionReason::AccelerationExcess { joint: 1, .. }
+        ));
+        assert!(matches!(
+            reasons[1],
+            RejectionReason::JerkExcess { joint: 2, .. }
+        ));
+
+        // Under the bounds: accepted.
+        r.summary.peak_acceleration = vec![10.0, 99.0, 3.0];
+        r.summary.rms_jerk = vec![1.0, 1.0, 1e5];
+        assert_eq!(r.evaluate(&t), Verdict::Accepted);
+
+        // A width mismatch rejects by name rather than judging joint j by
+        // joint k's bound.
+        t.motion_limits = Some(DerivedMotionLimits {
+            max_acceleration: vec![1.0],
+            max_rms_jerk: vec![1.0],
+        });
+        let Verdict::Rejected(reasons) = r.evaluate(&t) else {
+            panic!("expected rejection");
+        };
+        assert_eq!(reasons[0].code(), "motion_limits_width");
     }
 
     #[test]
