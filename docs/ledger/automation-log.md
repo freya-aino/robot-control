@@ -1282,3 +1282,25 @@ Specs at 0.1.9-draft. Gate: 1085 tests, fmt and clippy clean.
   `podman` enters `devenv.nix`, because no candidate is
   `code_inspected` and Section 2.2 forbids speculative inputs (C-30);
   no upstream estimator claim was promoted beyond `unverified`.
+
+## Entry 2026-11-15 (third session, continued: GVHMR qualification research)
+
+- **Tool / model:** as above (`claude-fable-5`), now with network access
+  for primary-source retrieval.
+- **What was done:** retrieved the GVHMR repository metadata,
+  `docs/INSTALL.md` and `LICENSE` at pinned commit
+  `ee960bb6e2ea2d381aa97f08e9b71ef320b624b1` (zju3dv/GVHMR, head of
+  `main`, committed 2026-09-15); confirmed identity (SIGGRAPH Asia
+  2024 / TPAMI 2026) and located the SMPL-X output claim in text.
+- **Artifacts produced:** evidence-ledger GVHMR row promoted
+  `unverified` → `paper_verified` with the admitting artifacts named;
+  `services/video-to-smplx/service.toml` `evidence_state` likewise;
+  `services/video-to-smplx/README.md` rewritten around the selected
+  candidate, its license constraint (research/non-profit only,
+  open-source derivatives, commercial use by permission) and the exact
+  remaining `code_inspected` work; root `README.md` command table
+  brought up to the implemented CLI (separate commit).
+- **Deliberately not done:** no `code_inspected` claim — the
+  implementation was not read and no dependency closure inventoried;
+  no `Containerfile`, no image, no digest, no `podman` in `devenv.nix`;
+  the other three candidate leads stay `unverified`.
