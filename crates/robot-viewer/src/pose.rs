@@ -610,7 +610,7 @@ pub(crate) struct PairCheck {
 }
 
 /// Whether two frames are the same bit for bit, so `0.0` and `-0.0` differ.
-fn same_frame(a: &PoseFrame, b: &PoseFrame) -> bool {
+pub(crate) fn same_frame(a: &PoseFrame, b: &PoseFrame) -> bool {
     fn same_floats(a: &[f64], b: &[f64]) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
     }

@@ -10,6 +10,7 @@ description = "Inspection rendering for skeletons, contacts and tracking error"
 [dependencies]
 robot-types = { path = "../robot-types" }
 robot-model = { path = "../robot-model" }
+robot-artifacts = { path = "../robot-artifacts" }
 
 [lints.rust]
 missing_docs = "warn"

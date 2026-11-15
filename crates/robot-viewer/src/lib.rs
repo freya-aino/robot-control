@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod artifact;
 pub mod csv;
 pub mod frame;
 pub mod jsonl;
