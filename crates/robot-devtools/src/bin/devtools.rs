@@ -4,6 +4,8 @@
 //! ```text
 //! devtools kb-sweep [--write]        mark entries stale against Cargo.lock
 //! devtools kb-search <words...>      local search, no model service
+//! devtools kb-publish <store-dir>    snapshot the base into a blob store,
+//!                                    printing the content identity
 //! devtools ledger-diff <old> <new>   state changes; fails on an
 //!                                    unsupported promotion
 //! ```
@@ -93,6 +95,19 @@ fn run() -> Result<ExitCode, ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Some("kb-publish") if args.len() == 2 => {
+            let store_root = Path::new(&args[1]);
+            match robot_devtools::publish::publish_knowledge_base(store_root, &kb_path) {
+                Ok(id) => {
+                    println!("published {} as {id}", kb_path.display());
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("devtools: {e}");
+                    Err(ExitCode::from(2))
+                }
+            }
+        }
         Some("ledger-diff") if args.len() == 3 => {
             let d = diff(&read(Path::new(&args[1]))?, &read(Path::new(&args[2]))?);
             for k in &d.added {
@@ -115,7 +130,8 @@ fn run() -> Result<ExitCode, ExitCode> {
         }
         _ => {
             eprintln!(
-                "usage: devtools kb-sweep [--write] | kb-search <words> | ledger-diff <old> <new>"
+                "usage: devtools kb-sweep [--write] | kb-search <words> | \
+                 kb-publish <store-dir> | ledger-diff <old> <new>"
             );
             Err(ExitCode::from(2))
         }

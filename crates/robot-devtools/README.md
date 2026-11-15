@@ -2,8 +2,9 @@
 
 Development-time automation, the evidence ledger and the dependency
 knowledge base, per SPECS.md §§2.3.1 and 13.1. Depends on `robot-types`
-and `robot-artifacts` (the latter not yet used — reserved for publishing
-knowledge-base snapshots as content-addressed artifacts).
+and `robot-artifacts` — the latter for what it was reserved for:
+publishing knowledge-base snapshots as content-addressed artifacts
+(`publish`, `devtools kb-publish`).
 
 This crate is developer/CI-only tooling: nothing under `robot-control` or
 any other shipping crate depends on it.
@@ -17,9 +18,10 @@ any other shipping crate depends on it.
 | `services_gate` | `check_record`, `check_services`: the §2.4 `robot-service/1` checks over `services/*/service.toml` (rows A-51 and A-52; ADR 0017), run by the same `exclusion-gate` binary |
 | `inventory` | `lock_inventory` (Cargo.lock as the §13.1 primary key), the `kb-store/1` `Store` (entries with kind and dependencies, fault records), `orphans`, `sweep` (version change marks an entry and its dependents stale, transitively), local `search`, `ledger_cites_kb` |
 | `ledger` | Evidence-ledger rows from every table with a `State` column, and `diff`: added, removed and changed rows, promotions classed by Section 3's order, and promotions with no admitting artifact flagged as unsupported |
+| `publish` | `publish_knowledge_base`: snapshots `docs/kb/knowledge-base.toml` byte-for-byte into a `robot_artifacts::BlobStore` and returns the `ContentId`, so a ledger row or automation-log entry can cite one exact knowledge-base state by identity. The snapshot is data about tooling, never evidence; `ledger_cites_kb` still refuses a ledger row citing the base |
 
 The `devtools` binary runs them: `kb-sweep [--write]`, `kb-search
-<words>` and `ledger-diff <old> <new>`. It exits 1 on a finding: stale
+<words>`, `kb-publish <store-dir>` and `ledger-diff <old> <new>`. It exits 1 on a finding: stale
 entries left unwritten, orphans, the ledger citing the base, or an
 unsupported promotion. `docs/kb/knowledge-base.toml` is the store. It has
 no entries, because the default build has no third-party crate and no
@@ -78,7 +80,10 @@ clears it.
 
 ## Testing
 
-`cargo test -p robot-devtools` — 9 tests. Exclusion gate: an excluded
+`cargo test -p robot-devtools` — 29 tests. Publishing: a snapshot
+round-trips byte-identically under its own content hash and deduplicates
+on republish, a missing input is refused naming its path, and the
+committed base publishes. Exclusion gate: an excluded
 runtime in a lockfile reported once, look-alike names pass, only workspace
 path packages pass the tree check, a normal or build dependency on this
 crate fails while a dev-dependency passes, and violations name their
