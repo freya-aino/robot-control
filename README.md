@@ -38,13 +38,23 @@ use `target/release/robot`. With no arguments it prints its usage.
 | `robot sim qualify [--steps N] [--dt S]` | Runs the analytic pendulum energy-drift check (defaults: 2000 steps, 0.001 s) | `cargo run -p robot-cli -- sim qualify` |
 | `robot sim multibody [--floating] [--zero-torque] [--dt S] [--steps N] [--out DIR] [--scene FILE] [--actuation drives\|damping\|zero] [--limit-margin RAD] [--integrator euler\|implicitfast\|rk4]` | Runs the vendored Unitree G1, loaded from its USD description, through the composite-frame dynamics, exact collision manifolds and Newton constraint solver of `robot_sim::world`. Without `--floating` the pelvis is fixed. With `--floating` it is a free base on the scene's ground plane (default `assets/scenes/g1_ground.usda`), held by the model's declared USD drives, or by zero torque with `--zero-torque`. `--out DIR` writes per-step CSV, JSON Lines and SVG pose frames plus two USD replays (`replay.usda`, `replay_playback.usda`) and requires `--floating`. Defaults: `--dt 0.0001`, `--actuation drives`, `--limit-margin 0`, `--integrator euler`; a floating run covers 2 s of simulated time, a fixed-base run 2000 steps | `cargo run -p robot-cli -- sim multibody --floating --out /tmp/g1-frames` |
 | `robot eval summarize <values...>` | Prints summary statistics for a list of numbers | `cargo run -p robot-cli -- eval summarize 1.0 2.0 3.0` |
+| `robot data import <source> --store <dir> [--license <id>] [--training]` | Detects the format by content (BVH, C3D, AMASS `.npz`), stores the original content-addressed in the blob store, parses it and reports the inspection | `cargo run -p robot-cli -- data import clip.npz --store /tmp/blobs` |
+| `robot motion retarget <bvh> --map <file> --out <csv> [--robot g1\|g1-usd] [--unit m\|cm\|mm] [--up y\|z]` | Retargets a BVH motion onto the named vendored robot through a `retarget-map/1` file and writes the robot-reference CSV | `cargo run -p robot-cli -- motion retarget clip.bvh --map map.toml --out ref.csv` |
+| `robot motion validate <bvh> --reference <csv> --map <file> [--robot g1\|g1-usd]` | Validates a retargeted reference against its BVH source (kinematic error, torques, contacts) and reports acceptance | — |
+| `robot eval run --profile <toml> --results <csv>` | Evaluates results against a versioned acceptance profile | — |
+| `robot eval --bundle <dir> --robot <fixture>` | Verifies a `robot-bundle/1` directory's integrity and runs the activation gate against the named vendored robot (exit 0 is "verified and activatable", not a quality claim) | — |
+| `robot skills <list\|search> --manifest <toml> [query...]` | Answers from a `skill-manifest/1` skill library | — |
+| `robot adapt identify <csv> [--dead-band RAD_PER_S]` | System identification over a recorded trajectory | — |
+| `robot train [--iterations N] [--seed S] --out <dir>` | Runs the PPO pendulum reference training and writes its run directory | — |
+| `robot replay <run-dir> [--svg <out> [--robot g1-usd\|g1] [--every N]]` | Replays a recorded run directory, optionally rendering SVG pose frames | — |
 
 Exit codes: `0` success, `1` a command ran and found a real problem (a rejected
 motion, a failed qualification), `2` named but not yet implemented, `3` a
 floating-base `sim multibody` run too short (under 2 s simulated) to judge,
-`64` usage error. Commands named in PLAN.md but not built (`data import`, `motion retarget`,
-`eval --bundle` (also spelled `eval run`), `train`, `skills`, `deps`, `adapt`, `deploy`, `replay`) exit with `2`
-and a reason on stderr.
+`64` usage error. The two commands named in PLAN.md but not built — `deploy`
+(no hardware target is chosen, C-02) and `deps` (the knowledge base is
+developer tooling; this binary deliberately does not link `robot-devtools`) —
+exit with `2` and that reason on stderr.
 
 The other crates are libraries, used by the CLI and by each other, and are
 exercised through their tests. Beyond the CLI, these are available:
