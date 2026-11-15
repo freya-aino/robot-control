@@ -206,6 +206,15 @@ pub fn eval_bundle(args: &[String]) -> i32 {
         host.robot_profile,
         host.velocity_limits.len()
     );
+    // Sim-eval has no independent control loop: the simulator adopts the
+    // bundle's declared rate, so the tier-schedule leg of the gate checks
+    // self-consistency only. Said out loud so exit 0 is not over-read; a
+    // hardware path must pass the host loop's measured rate here instead.
+    println!(
+        "  rate     {} Hz as declared by the bundle (sim-eval adopts it; the \
+         tier-schedule check is self-consistency, not a host-rate match)",
+        manifest.rate.0
+    );
     match manifest.check_activatable(&host, OperatingMode::SimEval, manifest.rate) {
         Ok(()) => {
             println!("ACTIVATABLE in sim-eval against {}", host.robot_profile);

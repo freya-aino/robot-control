@@ -35,7 +35,10 @@ use std::path::Path;
 /// Returns the importer's error if the layer cannot be read or does not match
 /// the subset the importer accepts.
 pub fn unitree_g1_29dof_usd() -> Result<RobotProfile, FixtureError> {
-    let (profile, _report) = crate::usd::import_fixed_base(Path::new(UNITREE_G1_29DOF_USD_ROOT))?;
+    let (mut profile, _report) =
+        crate::usd::import_fixed_base(Path::new(UNITREE_G1_29DOF_USD_ROOT))?;
+    profile.name = Name::new("unitree-g1-29dof-usd").expect("valid name literal");
+    profile.profile_version = UNITREE_MODEL_PIN.to_owned();
     Ok(profile)
 }
 
@@ -60,7 +63,9 @@ pub fn unitree_g1_29dof_usd_floating_base() -> Result<RobotProfile, FixtureError
 ///
 /// As [`unitree_g1_29dof_usd`].
 pub fn unitree_go2_12dof_usd() -> Result<RobotProfile, FixtureError> {
-    let (profile, _report) = crate::usd::import_fixed_base(Path::new(UNITREE_GO2_USD_ROOT))?;
+    let (mut profile, _report) = crate::usd::import_fixed_base(Path::new(UNITREE_GO2_USD_ROOT))?;
+    profile.name = Name::new("unitree-go2-12dof-usd").expect("valid name literal");
+    profile.profile_version = UNITREE_MODEL_PIN.to_owned();
     Ok(profile)
 }
 
@@ -85,7 +90,9 @@ pub fn unitree_go2_12dof_usd_floating_base() -> Result<RobotProfile, FixtureErro
 ///
 /// As [`unitree_g1_29dof_usd`].
 pub fn unitree_h1_19dof_usd() -> Result<RobotProfile, FixtureError> {
-    let (profile, _report) = crate::usd::import_fixed_base(Path::new(UNITREE_H1_USD_ROOT))?;
+    let (mut profile, _report) = crate::usd::import_fixed_base(Path::new(UNITREE_H1_USD_ROOT))?;
+    profile.name = Name::new("unitree-h1-19dof-usd").expect("valid name literal");
+    profile.profile_version = UNITREE_MODEL_PIN.to_owned();
     Ok(profile)
 }
 
@@ -109,6 +116,13 @@ pub fn unitree_h1_19dof_usd_floating_base() -> Result<RobotProfile, FixtureError
 /// asset.
 const UNITREE_G1_29DOF_URDF: &str =
     include_str!("../../../assets/robots/unitree_g1/g1_29dof_rev_1_0.urdf");
+
+/// The pinned `unitreerobotics/unitree_model` commit every vendored USD
+/// fixture is taken from, used as its `profile_version` (each robot's
+/// `PROVENANCE.md` records the per-file verification). The profile *name*
+/// differs per robot — the Section 12.2 "wrong artifact deployed" gate
+/// matches on name and version together.
+pub const UNITREE_MODEL_PIN: &str = "unitree_model@b6a8942b0803b6c137e58cef12beb4b03e4a2fa7";
 
 /// The official Unitree G1 OpenUSD robot layer (ADR 0015), read at build time
 /// from the vendored assets.
@@ -377,6 +391,24 @@ mod usd_fixture_tests {
     use super::*;
     use crate::joint::JointKind;
     use crate::profile::ProfileError;
+
+    #[test]
+    fn the_vendored_usd_profiles_have_distinct_identities() {
+        // The Section 12.2 "wrong artifact deployed" gate matches on
+        // "{name}/{profile_version}"; three robots must present three
+        // different strings or a bundle trained for one activates on another.
+        let ids: Vec<String> = [
+            unitree_g1_29dof_usd().expect("g1 builds"),
+            unitree_go2_12dof_usd().expect("go2 builds"),
+            unitree_h1_19dof_usd().expect("h1 builds"),
+        ]
+        .iter()
+        .map(|p| format!("{}/{}", p.name.as_str(), p.profile_version))
+        .collect();
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
+        assert_ne!(ids[1], ids[2]);
+    }
 
     #[test]
     fn the_vendored_go2_profile_validates() {

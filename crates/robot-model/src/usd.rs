@@ -715,10 +715,31 @@ pub fn import_fixed_base_with_warnings(
         }
     };
 
+    // The profile's identity is what the Section 12.2 "wrong artifact
+    // deployed" gate matches on, so it must differ per robot: derive it from
+    // the root layer's file name. A vendored fixture with a cited provenance
+    // replaces it with its recorded identity (see `fixtures`).
+    let stem = root_layer
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| UsdImportError::BadValue {
+            path: root_layer.display().to_string(),
+            what: "file stem usable as a profile name",
+        })?;
+    let derived: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
     let profile = RobotProfile {
         schema_version: PROFILE_SCHEMA_VERSION,
-        name: Name::new("unitree-g1-29dof-usd")?,
-        profile_version: "unitree_model@b6a8942b0803b6c137e58cef12beb4b03e4a2fa7".to_owned(),
+        name: Name::new(&format!("{derived}-usd"))?,
+        profile_version: "usd-import (no cited version)".to_owned(),
         joints,
         links,
         actuators,

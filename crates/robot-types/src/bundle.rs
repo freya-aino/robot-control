@@ -249,6 +249,25 @@ pub enum BundleError {
         /// Value the host enforces.
         host: f64,
     },
+    /// An envelope vector does not cover every host joint. A missing entry
+    /// would mean an unchecked joint, so the comparison refuses truncated,
+    /// padded or empty vectors instead of zipping over the overlap.
+    EnvelopeWidth {
+        /// Which limit vector.
+        limit: &'static str,
+        /// Entries the bundle declares.
+        bundle: usize,
+        /// Entries the host has.
+        host: usize,
+    },
+    /// An envelope limit is not a finite number. `NaN` compares false to
+    /// everything, so it would pass a wider-than-host check vacuously.
+    EnvelopeNotFinite {
+        /// Which limit vector, and whose.
+        limit: &'static str,
+        /// Joint index.
+        joint: usize,
+    },
     /// A latent action has no decoder in the bundle.
     MissingDecoder {
         /// Latent space name.
@@ -298,6 +317,17 @@ impl fmt::Display for BundleError {
                 f,
                 "bundle assumes {limit} {bundle} on joint {joint}, host enforces {host}"
             ),
+            Self::EnvelopeWidth {
+                limit,
+                bundle,
+                host,
+            } => write!(
+                f,
+                "bundle declares {bundle} {limit} entries for a host with {host} joints"
+            ),
+            Self::EnvelopeNotFinite { limit, joint } => {
+                write!(f, "{limit} on joint {joint} is not a finite number")
+            }
             Self::MissingDecoder { space } => {
                 write!(
                     f,
@@ -391,6 +421,65 @@ impl PolicyBundleManifest {
         }
         if !self.envelope.qualified_modes.contains(&mode) {
             return Err(BundleError::ModeNotQualified { mode });
+        }
+
+        // The comparisons below are only meaningful over vectors of the
+        // host's exact width (zip would silently stop at the shorter side)
+        // and over finite numbers (NaN compares false to everything, which
+        // would pass the wider-than-host checks vacuously). Refuse shape and
+        // arithmetic-class problems by name first.
+        let widths = [
+            (
+                "position limit",
+                self.envelope.position_limits.len(),
+                host.position_limits.len(),
+            ),
+            (
+                "velocity limit",
+                self.envelope.velocity_limits.len(),
+                host.velocity_limits.len(),
+            ),
+            (
+                "torque limit",
+                self.envelope.torque_limits.len(),
+                host.torque_limits.len(),
+            ),
+        ];
+        for (limit, bundle, host_len) in widths {
+            if bundle != host_len {
+                return Err(BundleError::EnvelopeWidth {
+                    limit,
+                    bundle,
+                    host: host_len,
+                });
+            }
+        }
+        for (j, (lo, hi)) in self.envelope.position_limits.iter().enumerate() {
+            if !lo.is_finite() || !hi.is_finite() {
+                return Err(BundleError::EnvelopeNotFinite {
+                    limit: "bundle position limit",
+                    joint: j,
+                });
+            }
+        }
+        for (j, (lo, hi)) in host.position_limits.iter().enumerate() {
+            if !lo.is_finite() || !hi.is_finite() {
+                return Err(BundleError::EnvelopeNotFinite {
+                    limit: "host position limit",
+                    joint: j,
+                });
+            }
+        }
+        let scalar_vectors = [
+            ("bundle velocity limit", &self.envelope.velocity_limits),
+            ("host velocity limit", &host.velocity_limits),
+            ("bundle torque limit", &self.envelope.torque_limits),
+            ("host torque limit", &host.torque_limits),
+        ];
+        for (limit, values) in scalar_vectors {
+            if let Some(j) = values.iter().position(|v| !v.is_finite()) {
+                return Err(BundleError::EnvelopeNotFinite { limit, joint: j });
+            }
         }
 
         // The bundle may assume a *narrower* envelope than the host enforces,
@@ -666,6 +755,68 @@ mod tests {
         assert!(m
             .check_activatable(&host(), OperatingMode::HwShadow, Hertz(100.0))
             .is_ok());
+    }
+
+    #[test]
+    fn a_truncated_or_empty_envelope_vector_is_refused() {
+        // Zip would silently compare only the overlap; the gate must refuse.
+        let mut m = manifest();
+        m.envelope.velocity_limits = vec![2.0];
+        assert!(matches!(
+            m.check_activatable(&host(), OperatingMode::HwShadow, Hertz(100.0)),
+            Err(BundleError::EnvelopeWidth {
+                limit: "velocity limit",
+                bundle: 1,
+                host: 2,
+            })
+        ));
+
+        let mut m2 = manifest();
+        m2.envelope.position_limits = Vec::new();
+        assert!(matches!(
+            m2.check_activatable(&host(), OperatingMode::HwShadow, Hertz(100.0)),
+            Err(BundleError::EnvelopeWidth {
+                limit: "position limit",
+                bundle: 0,
+                host: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn a_nan_envelope_limit_is_refused() {
+        // NaN compares false to everything, so without this refusal it would
+        // pass the wider-than-host checks vacuously.
+        let mut m = manifest();
+        m.envelope.velocity_limits = vec![f64::NAN, f64::NAN];
+        assert!(matches!(
+            m.check_activatable(&host(), OperatingMode::HwShadow, Hertz(100.0)),
+            Err(BundleError::EnvelopeNotFinite {
+                limit: "bundle velocity limit",
+                joint: 0,
+            })
+        ));
+
+        let mut m2 = manifest();
+        m2.envelope.position_limits = vec![(-1.0, f64::NAN), (-1.0, 1.0)];
+        assert!(matches!(
+            m2.check_activatable(&host(), OperatingMode::HwShadow, Hertz(100.0)),
+            Err(BundleError::EnvelopeNotFinite {
+                limit: "bundle position limit",
+                joint: 0,
+            })
+        ));
+
+        let m3 = manifest();
+        let mut h = host();
+        h.torque_limits[1] = f64::INFINITY;
+        assert!(matches!(
+            m3.check_activatable(&h, OperatingMode::HwShadow, Hertz(100.0)),
+            Err(BundleError::EnvelopeNotFinite {
+                limit: "host torque limit",
+                joint: 1,
+            })
+        ));
     }
 
     #[test]
