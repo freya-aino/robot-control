@@ -817,16 +817,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_punch_keeps_its_direction_and_relative_reach_on_the_g1() {
-        let profile = unitree_g1_29dof().unwrap();
-        let human = punching_human(6);
-        let config = g1_config(&profile, &human, None);
-        let out = retarget(&human, &profile, &config).unwrap();
+    /// The punch acceptance shared by the baseline and the QP step: reach
+    /// preserved within 2 cm, joint limits held in every frame, planted feet
+    /// slipping under 2 cm.
+    fn assert_punch_acceptance(
+        profile: &RobotProfile,
+        config: &RetargetConfig,
+        out: &RetargetOutput,
+    ) {
         assert_eq!(out.reference.frame_count(), 6);
         out.reference.validate().unwrap();
-        let shoulder = link(&profile, "right_shoulder_pitch_link");
-        let hand = link(&profile, "right_rubber_hand");
+        let shoulder = link(profile, "right_shoulder_pitch_link");
+        let hand = link(profile, "right_rubber_hand");
         let Anchor::Relative { ratio, .. } = config.map.links[0].anchor else {
             unreachable!()
         };
@@ -839,7 +841,7 @@ mod tests {
                     _ => unreachable!(),
                 })
                 .collect();
-            let poses = forward_kinematics(&profile, &q).unwrap();
+            let poses = forward_kinematics(profile, &q).unwrap();
             let base = RigidPose {
                 translation: frame.root.translation,
                 rotation: frame.root.rotation,
@@ -862,10 +864,68 @@ mod tests {
                 assert!(*slip < 0.02, "{f:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_punch_keeps_its_direction_and_relative_reach_on_the_g1() {
+        let profile = unitree_g1_29dof().unwrap();
+        let human = punching_human(6);
+        let config = g1_config(&profile, &human, None);
+        let out = retarget(&human, &profile, &config).unwrap();
+        assert_punch_acceptance(&profile, &config, &out);
         assert_eq!(
             out.reference.provenance.last().unwrap().operation,
             "retarget"
         );
+    }
+
+    #[test]
+    fn the_qp_step_retargets_the_punch_to_the_same_acceptance() {
+        // The differential-QP step (SPECS.md Section 8.3, ADR 0018) through
+        // the full pipeline on the vendored G1: the acceptance bar is the
+        // baseline's own, so a regression in either step solver fails here.
+        let profile = unitree_g1_29dof().unwrap();
+        let human = punching_human(6);
+        let mut config = g1_config(&profile, &human, None);
+        config.ik.step_solver = crate::ik::StepSolver::BoxQp;
+        let out = retarget(&human, &profile, &config).unwrap();
+        assert_punch_acceptance(&profile, &config, &out);
+    }
+
+    #[test]
+    fn the_two_step_solvers_agree_on_the_full_body_problem_and_are_measured() {
+        // Section 8.3's qualification asks for solve time, iterations,
+        // residuals and failure detection "on representative full-body
+        // constraints" — this is that measurement, on the 29-DOF G1 punch
+        // with planted feet and a free base. The assertion is outcome parity
+        // (both step solvers deliver the acceptance); the timings print for
+        // the record (`cargo test -p motion-retarget --release
+        // the_two_step_solvers -- --nocapture`, ADR 0018 holds the measured
+        // numbers).
+        let profile = unitree_g1_29dof().unwrap();
+        let human = punching_human(6);
+        let mut times = Vec::new();
+        for solver in [
+            crate::ik::StepSolver::DampedLeastSquares,
+            crate::ik::StepSolver::BoxQp,
+        ] {
+            let mut config = g1_config(&profile, &human, None);
+            config.ik.step_solver = solver;
+            let started = std::time::Instant::now();
+            let out = retarget(&human, &profile, &config).unwrap();
+            let elapsed = started.elapsed();
+            assert_punch_acceptance(&profile, &config, &out);
+            let worst = out
+                .frames
+                .iter()
+                .map(|f| f.max_position_error)
+                .fold(0.0, f64::max);
+            println!("{solver:?}: {elapsed:?} for 6 frames, worst position error {worst:.6} m");
+            times.push(elapsed);
+        }
+        // No timing assertion: wall clock is machine-dependent. Parity of the
+        // acceptance above is the qualification claim.
+        assert_eq!(times.len(), 2);
     }
 
     #[test]

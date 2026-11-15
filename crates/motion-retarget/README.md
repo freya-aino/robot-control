@@ -12,7 +12,8 @@ the map file).
 
 | Module | Contents |
 | --- | --- |
-| `ik` | `solve_tasks`: Levenberg-Marquardt over `Task::{Position, Orientation, RelativePosition, Posture}`, an optional free `Base` with a prior, an optional `SelfCollision` penalty; limits by projection; bounded by `max_iterations` and a wall-clock `deadline`, with a `Termination` (`Converged`, `Stalled`, `MaxIterations`, `Deadline`) and per-task residuals. `solve` keeps the position-only entry point |
+| `ik` | `solve_tasks`: Levenberg-Marquardt over `Task::{Position, Orientation, RelativePosition, Posture}`, an optional free `Base` with a prior, an optional `SelfCollision` penalty; bounded by `max_iterations` and a wall-clock `deadline`, with a `Termination` (`Converged`, `Stalled`, `MaxIterations`, `Deadline`) and per-task residuals. `solve` keeps the position-only entry point. `StepSolver` picks how each damped step is computed: `DampedLeastSquares` (limits by projection, the default) or `BoxQp` (limits as hard bounds inside the step, ADR 0018) |
+| `qp` | `solve_box_qp`: dense strictly convex box-constrained QP by the textbook primal active set (Nocedal & Wright 16.5 for bounds), `std`-only — the Rust-native constrained solver §8.3 requires qualifying before differential-QP IK. Bounded iterations with the cap reported, infeasible bounds refused by name, KKT-checked on 200 randomized problems |
 | `collision` | `SelfCollision`: one bounding capsule per collision shape (sphere, box, cylinder, convex hull), non-adjacent pairs, pairs overlapping in the reference posture excluded and reported, exact segment-segment distance |
 | `temporal` | `smooth`, `smooth_rotations`: a discrete smoothing spline solved by banded Cholesky in O(n); straight lines pass through unchanged |
 | `retarget` | `retarget`: `RetargetMap` (absolute and chain-relative links, orientation offsets, planted feet from contact labels), per-frame solve warm-started from the previous frame, smoothing then re-projection, a `RobotReference` record with per-frame reports and velocity excess. `chain_ratio` measures robot over human chain length |
@@ -52,11 +53,18 @@ residual (a test checks 8.0 m for a target 8 m beyond reach), not as
 joint's declared limit is listed in `velocity_excess`. Torque and
 simulated tracking feasibility are `motion-validate`'s job.
 
-**No QP solver.** §8.3: "Qualify a Rust-native constrained solver before
-selecting differential-QP IK." No QP candidate (Appendix B.2.8) has
-cleared qualification (`docs/decisions/0003-std-only-default-closure.md`).
-This is the non-QP baseline Appendix C's C-09 permits. The Jacobian is
-central finite differences over `robot_model::kinematics`.
+**The QP step is qualified, project-authored, and not the default.** §8.3:
+"Qualify a Rust-native constrained solver before selecting differential-QP
+IK." No external candidate (Appendix B.2.8) has cleared the dependency
+gate, and none is needed for this problem class: one differential-IK step
+with hard limits is a dense box-constrained QP, and `qp::solve_box_qp`
+solves exactly that (ADR 0018). Measured on the 29-DOF G1 punch pipeline,
+the QP step meets the identical acceptance in 11.4 ms against the
+baseline's 16.0 ms over six frames, because solving the limits inside the
+step saves outer iterations. The damped-least-squares baseline C-09
+retains stays the default; a map opts in with `[solver] method = "qp"`.
+The Jacobian is central finite differences over `robot_model::kinematics`
+in both paths.
 
 ## Two bugs the original test suite caught
 
@@ -85,11 +93,15 @@ only in this file.
 
 ## Testing
 
-`cargo test -p motion-retarget`: 28 tests. Solver: convergence to a reachable
+`cargo test -p motion-retarget`: 39 tests. Solver: convergence to a reachable
 target (checked by forward kinematics), orientation and relative targets, a
 posture prior choosing among redundant solutions, a free base reaching a far
 target, a zero deadline, stalling at the true residual of an unreachable
-target, hard limits, invalid tasks and widths. Collision: closed-form segment
+target, hard limits, invalid tasks and widths; the QP step converging on the
+same fixtures, finding an optimum on a binding limit, and stalling honestly.
+Box QP: the unconstrained case against the linear solve, blocking and
+releasing bounds, KKT conditions on 200 randomized problems, malformed
+problems refused, the iteration cap reported with a feasible iterate. Collision: closed-form segment
 distances, every bound containing its shape, a measured overlap, the penalty
 holding a hand off the base, pairs excluded at the reference. Smoothing:
 lines unchanged, normal equations satisfied, jitter attenuated, rotation

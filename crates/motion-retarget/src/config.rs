@@ -312,6 +312,7 @@ pub fn parse(
                 "damping",
                 "max_step",
                 "deadline_ms",
+                "method",
             ],
         )?;
         if let Some(v) = t.get("max_iterations") {
@@ -334,6 +335,20 @@ pub fn parse(
                 return Err(ConfigError::Invalid("deadline_ms".into()));
             }
             ik.deadline = Some(std::time::Duration::from_secs_f64(ms * 1e-3));
+        }
+        // The step solver, by name: the damped-least-squares baseline or the
+        // differential-QP step of Section 8.3 (ADR 0018). Anything else is
+        // refused, like every other key in this format.
+        if let Some(v) = t.get("method") {
+            ik.step_solver = match v {
+                Value::String(s) if s == "lm" => crate::ik::StepSolver::DampedLeastSquares,
+                Value::String(s) if s == "qp" => crate::ik::StepSolver::BoxQp,
+                _ => {
+                    return Err(ConfigError::Invalid(
+                        "method must be \"lm\" or \"qp\"".into(),
+                    ))
+                }
+            };
         }
     }
     let base_prior = match root.get("base") {

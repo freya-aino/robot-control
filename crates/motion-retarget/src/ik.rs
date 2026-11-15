@@ -140,6 +140,21 @@ pub struct BasePrior {
     pub rotation_weight: f64,
 }
 
+/// How one damped step is computed from the Jacobian and residual.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StepSolver {
+    /// Damped least squares, with joint limits enforced by projecting the
+    /// iterate back into the box afterwards. The baseline C-09 retains.
+    #[default]
+    DampedLeastSquares,
+    /// The differential-QP step of SPECS.md Section 8.3: the same damped
+    /// objective, minimized by [`crate::qp::solve_box_qp`] subject to the
+    /// joint limits and the trust region as hard bounds, so the step solves
+    /// *around* a nearby limit instead of being clamped through it. Requires
+    /// the qualified box-QP solver (ADR 0018); limits still hold exactly.
+    BoxQp,
+}
+
 /// Solver configuration.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct IkConfig {
@@ -158,6 +173,8 @@ pub struct IkConfig {
     pub stall_fraction: f64,
     /// Wall-clock budget for one solve.
     pub deadline: Option<std::time::Duration>,
+    /// How each damped step is computed.
+    pub step_solver: StepSolver,
 }
 
 impl Default for IkConfig {
@@ -170,6 +187,7 @@ impl Default for IkConfig {
             max_step: 0.2,
             stall_fraction: 1e-9,
             deadline: None,
+            step_solver: StepSolver::default(),
         }
     }
 }
@@ -232,6 +250,8 @@ pub enum IkError {
     Kinematics(KinematicsError),
     /// The damped least-squares step failed.
     Linalg(LinalgError),
+    /// The box-QP step failed ([`StepSolver::BoxQp`] only).
+    Qp(crate::qp::QpError),
 }
 
 impl fmt::Display for IkError {
@@ -247,6 +267,7 @@ impl fmt::Display for IkError {
             Self::InvalidWeight => f.write_str("weights must be finite and non-negative"),
             Self::Kinematics(e) => write!(f, "{e}"),
             Self::Linalg(e) => write!(f, "{e}"),
+            Self::Qp(e) => write!(f, "{e}"),
         }
     }
 }
@@ -262,6 +283,18 @@ impl From<KinematicsError> for IkError {
 impl From<LinalgError> for IkError {
     fn from(e: LinalgError) -> Self {
         Self::Linalg(e)
+    }
+}
+
+impl From<crate::qp::QpError> for IkError {
+    fn from(e: crate::qp::QpError) -> Self {
+        // A linear-algebra failure inside the QP is the same fact as one in
+        // the damped least-squares path, and a caller matching on it should
+        // not have to know which step solver was active.
+        match e {
+            crate::qp::QpError::Linalg(l) => Self::Linalg(l),
+            other => Self::Qp(other),
+        }
     }
 }
 
@@ -343,10 +376,20 @@ pub fn solve_tasks(
         let rhs = r.scaled(-1.0);
         let mut accepted = None;
         for _ in 0..10 {
-            let step = Matrix::damped_least_squares(&jac, &rhs, lambda, None)?;
             let mut trial = x.clone();
-            for (v, s) in trial.iter_mut().zip(step.as_slice()) {
-                *v += s.clamp(-config.max_step, config.max_step);
+            match config.step_solver {
+                StepSolver::DampedLeastSquares => {
+                    let step = Matrix::damped_least_squares(&jac, &rhs, lambda, None)?;
+                    for (v, s) in trial.iter_mut().zip(step.as_slice()) {
+                        *v += s.clamp(-config.max_step, config.max_step);
+                    }
+                }
+                StepSolver::BoxQp => {
+                    let step = problem.qp_step(&jac, &r, lambda, config.max_step, &x)?;
+                    for (v, s) in trial.iter_mut().zip(&step) {
+                        *v += s;
+                    }
+                }
             }
             problem.project(&mut trial);
             let tr = problem.residual(&trial)?;
@@ -554,6 +597,43 @@ impl Problem<'_> {
                 }
             }
         }
+    }
+
+    /// One differential-QP step (SPECS.md Section 8.3): minimize the damped
+    /// Gauss-Newton model `||J s + r||^2 + lambda ||s||^2` subject to the
+    /// joint limits and the trust region as hard bounds on `s`, through the
+    /// qualified box-QP solver. The base coordinates carry only the trust
+    /// region. Because the current iterate is feasible, the box always
+    /// contains zero, so the subproblem is never infeasible.
+    fn qp_step(
+        &self,
+        jac: &Matrix,
+        r: &Matrix,
+        lambda: f64,
+        max_step: f64,
+        x: &[f64],
+    ) -> Result<Vec<f64>, IkError> {
+        let n = x.len();
+        let nb = self.base_vars();
+        let mut h = jac.transposed().mul(jac)?;
+        h.add_to_diagonal(lambda.max(1e-12));
+        let g_mat = jac.transposed().mul(r)?;
+        let g: Vec<f64> = (0..n).map(|i| g_mat[(i, 0)]).collect();
+        let mut lo = vec![-max_step; n];
+        let mut hi = vec![max_step; n];
+        for (i, lim) in self.limits.iter().enumerate() {
+            if let Some((l, u)) = lim {
+                let v = x[nb + i];
+                lo[nb + i] = (*l - v).max(-max_step);
+                hi[nb + i] = (*u - v).min(max_step);
+            }
+        }
+        // 20 active-set iterations per variable bounds the combinatorics far
+        // beyond what a trust-region step ever needs in practice, and the cap
+        // is reported rather than looped on; a capped step is still feasible
+        // and the outer loop only accepts it if it lowers the cost.
+        let solution = crate::qp::solve_box_qp(&h, &g, &lo, &hi, 20 * n.max(4))?;
+        Ok(solution.x)
     }
 
     fn jacobian(&self, x: &[f64], h: f64) -> Result<Matrix, IkError> {
@@ -852,6 +932,110 @@ mod tests {
         for (v, joint) in solution.joint_values.iter().zip(profile.actuated_joints()) {
             let range = joint.limits.position.unwrap();
             assert!(range.contains(Radians(*v)), "{v} outside {range:?}");
+        }
+    }
+
+    #[test]
+    fn the_qp_step_converges_on_a_reachable_target() {
+        let profile = two_link_arm();
+        let shoulder = 30f64.to_radians();
+        let elbow = 60f64.to_radians();
+        let target_point = Vec3::new(shoulder.cos(), shoulder.sin(), 0.0)
+            + Vec3::new((shoulder + elbow).cos(), (shoulder + elbow).sin(), 0.0);
+        let tasks = [Task::Position {
+            link: 3,
+            target: target_point,
+            weight: 1.0,
+        }];
+        let s = solve_tasks(
+            &profile,
+            &[0.0, 0.0],
+            Base::FIXED_AT_ORIGIN,
+            &tasks,
+            None,
+            &IkConfig {
+                step_solver: StepSolver::BoxQp,
+                ..IkConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(s.termination, Termination::Converged, "{}", s.final_error);
+        let poses = forward_kinematics(&profile, &s.joint_values).unwrap();
+        assert!((poses.by_index(3).unwrap().translation - target_point).norm() < 1e-3);
+    }
+
+    #[test]
+    fn the_qp_step_finds_an_optimum_on_a_binding_limit() {
+        // Tighten the shoulder to [-0.2, 0.2] and target the pose that needs
+        // the shoulder exactly at its upper limit: the constrained optimum is
+        // *on* the bound, which is the case the differential-QP step exists
+        // for (the step solves around the limit instead of being clamped
+        // through it, SPECS.md Section 8.3).
+        let mut profile = two_link_arm();
+        profile.joints[0].limits.position =
+            Some(robot_types::units::Range::<Radians>::new(Radians(-0.2), Radians(0.2)).unwrap());
+        let target_q = [0.2, 0.9];
+        let poses = forward_kinematics(&profile, &target_q).unwrap();
+        let target_point = poses.by_index(3).unwrap().translation;
+        let tasks = [Task::Position {
+            link: 3,
+            target: target_point,
+            weight: 1.0,
+        }];
+        let s = solve_tasks(
+            &profile,
+            &[0.0, 0.0],
+            Base::FIXED_AT_ORIGIN,
+            &tasks,
+            None,
+            &IkConfig {
+                step_solver: StepSolver::BoxQp,
+                max_iterations: 200,
+                ..IkConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            s.final_error < 1e-4,
+            "{:?} {}",
+            s.termination,
+            s.final_error
+        );
+        // The shoulder sits on its bound, within the limits at all times.
+        assert!(s.joint_values[0] <= 0.2 + 1e-12);
+        assert!(
+            (s.joint_values[0] - 0.2).abs() < 1e-3,
+            "{:?}",
+            s.joint_values
+        );
+    }
+
+    #[test]
+    fn the_qp_step_stalls_at_the_true_residual_of_an_unreachable_target() {
+        let profile = two_link_arm();
+        let tasks = [Task::Position {
+            link: 3,
+            target: Vec3::new(10.0, 0.0, 0.0),
+            weight: 1.0,
+        }];
+        let s = solve_tasks(
+            &profile,
+            &[0.3, 0.3],
+            Base::FIXED_AT_ORIGIN,
+            &tasks,
+            None,
+            &IkConfig {
+                step_solver: StepSolver::BoxQp,
+                max_iterations: 500,
+                ..IkConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(s.termination, Termination::Stalled);
+        assert!((s.final_error - 8.0).abs() < 1e-3, "{}", s.final_error);
+        for (v, joint) in s.joint_values.iter().zip(profile.actuated_joints()) {
+            let range = joint.limits.position.unwrap();
+            assert!(range.contains(Radians(*v)));
         }
     }
 

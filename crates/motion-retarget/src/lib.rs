@@ -7,6 +7,7 @@
 pub mod collision;
 pub mod config;
 pub mod ik;
+pub mod qp;
 pub mod retarget;
 pub mod temporal;
 
